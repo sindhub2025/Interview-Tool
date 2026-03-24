@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: windows-exe-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows-exe:
     runs-on: windows-latest
@@ -17,17 +21,22 @@ jobs:
         python-version: [3.12]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements_windows.txt
+            ghostmic/requirements_windows.txt
 
       - name: Install dependencies
         shell: pwsh
         run: |
-          Set-Location $env:GITHUB_WORKSPACE
+          $ErrorActionPreference = "Stop"
           python -m pip install --upgrade pip
           pip install -r requirements_windows.txt
           pip install pyinstaller
@@ -35,12 +44,18 @@ jobs:
       - name: Build EXE with PyInstaller
         shell: pwsh
         run: |
-          Set-Location $env:GITHUB_WORKSPACE
-          $specPath = Join-Path $env:GITHUB_WORKSPACE 'InterviewTool.spec'
-          pyinstaller --noconfirm --clean $specPath
+          pyinstaller --noconfirm --clean InterviewTool.spec
+
+      - name: Validate EXE output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'dist/InterviewTool.exe')) {
+            Write-Error 'Build output missing: dist/InterviewTool.exe'
+            exit 1
+          }
 
       - name: Upload EXE artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: InterviewTool-windows-exe-${{ github.run_number }}
           path: dist/InterviewTool.exe
@@ -49,7 +64,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
-          Set-Location $env:GITHUB_WORKSPACE
           Compress-Archive -Path dist/InterviewTool.exe -DestinationPath dist/InterviewTool-${{ github.ref_name }}-windows-x64.zip
 
       - name: Publish GitHub Release Asset
