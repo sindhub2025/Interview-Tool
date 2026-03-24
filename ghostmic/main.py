@@ -17,9 +17,12 @@ import time
 from typing import List, Optional
 
 # ── Ensure the project root is on sys.path ────────────────────────────
-_HERE = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _HERE = os.path.join(sys._MEIPASS, "ghostmic")
+else:
+    _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
-if _ROOT not in sys.path:
+if not getattr(sys, "frozen", False) and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from ghostmic.utils.logger import configure_logging, get_logger
@@ -48,6 +51,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--minimized", action="store_true", help="Start minimised to tray"
+    )
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run a fast non-GUI startup self-test and exit",
     )
     return parser.parse_args()
 
@@ -574,6 +582,20 @@ class GhostMicApp:
 
 def main() -> None:
     args = _parse_args()
+
+    if args.smoke_test:
+        # Lightweight startup validation for CI on frozen executables.
+        _load_config(args.config)
+        import PyQt6.QtCore  # noqa: F401
+        import PyQt6.QtWidgets  # noqa: F401
+        import faster_whisper  # noqa: F401
+        import torch  # noqa: F401
+        import torchaudio  # noqa: F401
+        import sounddevice  # noqa: F401
+        import pynput  # noqa: F401
+        import requests  # noqa: F401
+        sys.exit(0)
+
     configure_logging(debug=args.debug)
     logger = get_logger("ghostmic.main")
 

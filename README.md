@@ -82,6 +82,23 @@ python ghostmic/main.py --debug
 python ghostmic/main.py --minimized
 ```
 
+### Build Windows EXE in CI
+
+The repository includes a Windows build workflow at
+`.github/workflows/build-windows.yml`.
+
+- Every push/PR builds `dist/InterviewTool.exe` and uploads it as a workflow artifact.
+- CI runs `InterviewTool.exe --smoke-test` to validate frozen startup/imports.
+- Pushing a tag like `v1.0.0` also creates a GitHub Release asset:
+  `InterviewTool-v1.0.0-windows-x64.zip`.
+
+Tag and push to publish a downloadable EXE:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
 ### First-time setup
 
 1. Open **Settings** (gear icon or `⚙` in the overlay).

@@ -5,6 +5,7 @@ System tray icon and context menu for GhostMic.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Optional
 
 from PyQt6.QtCore import pyqtSignal
@@ -18,11 +19,21 @@ logger = get_logger(__name__)
 
 def _tray_icon() -> QIcon:
     """Load tray icon from assets or fall back to a blank coloured icon."""
-    assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
-    for name in ("tray_icon.png", "icon.ico"):
-        path = os.path.join(assets_dir, name)
-        if os.path.exists(path):
-            return QIcon(path)
+    asset_dirs = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        asset_dirs.extend(
+            [
+                os.path.join(sys._MEIPASS, "ghostmic", "assets"),
+                os.path.join(sys._MEIPASS, "assets"),
+            ]
+        )
+    asset_dirs.append(os.path.join(os.path.dirname(__file__), "..", "assets"))
+
+    for assets_dir in asset_dirs:
+        for name in ("tray_icon.png", "icon.ico"):
+            path = os.path.join(assets_dir, name)
+            if os.path.exists(path):
+                return QIcon(path)
     # Generate a small coloured pixmap as fallback
     pix = QPixmap(16, 16)
     pix.fill(QColor("#58a6ff"))
