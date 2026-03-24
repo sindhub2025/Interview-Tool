@@ -149,27 +149,30 @@ class SettingsDialog(QDialog):
         form = QFormLayout(w)
 
         self._backend_combo = QComboBox()
-        self._backend_combo.addItems(["groq", "ollama"])
+        self._backend_combo.addItems(["openai", "groq"])
         form.addRow("Backend:", self._backend_combo)
 
-        self._api_key_edit = QLineEdit()
-        self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._api_key_edit.setPlaceholderText("Get a free key at console.groq.com")
-        form.addRow("Groq API key:", self._api_key_edit)
+        self._openai_api_key_edit = QLineEdit()
+        self._openai_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._openai_api_key_edit.setPlaceholderText(
+            "Get your key at platform.openai.com"
+        )
+        form.addRow("OpenAI API key:", self._openai_api_key_edit)
+
+        self._openai_model_combo = QComboBox()
+        self._openai_model_combo.addItems(["gpt-5-mini"])
+        form.addRow("OpenAI model:", self._openai_model_combo)
+
+        self._groq_api_key_edit = QLineEdit()
+        self._groq_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._groq_api_key_edit.setPlaceholderText("Get a free key at console.groq.com")
+        form.addRow("Groq API key:", self._groq_api_key_edit)
 
         self._groq_model_combo = QComboBox()
         self._groq_model_combo.addItems(
             ["llama-3.1-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
         )
         form.addRow("Groq model:", self._groq_model_combo)
-
-        self._ollama_model = QLineEdit()
-        self._ollama_model.setPlaceholderText("llama3.1:8b")
-        form.addRow("Ollama model:", self._ollama_model)
-
-        self._ollama_url = QLineEdit()
-        self._ollama_url.setPlaceholderText("http://localhost:11434")
-        form.addRow("Ollama URL:", self._ollama_url)
 
         self._trigger_combo = QComboBox()
         self._trigger_combo.addItems(["auto", "manual", "continuous"])
@@ -292,17 +295,20 @@ class SettingsDialog(QDialog):
             self._compute_combo.setCurrentIndex(c_idx)
 
         # AI
-        backend = ai.get("backend", "groq")
+        backend = ai.get("backend", "openai")
         b_idx = self._backend_combo.findText(backend)
         if b_idx >= 0:
             self._backend_combo.setCurrentIndex(b_idx)
-        self._api_key_edit.setText(ai.get("groq_api_key", ""))
+        self._openai_api_key_edit.setText(ai.get("openai_api_key", ""))
+        openai_model = ai.get("openai_model", "gpt-5-mini")
+        openai_model_idx = self._openai_model_combo.findText(openai_model)
+        if openai_model_idx >= 0:
+            self._openai_model_combo.setCurrentIndex(openai_model_idx)
+        self._groq_api_key_edit.setText(ai.get("groq_api_key", ""))
         gm = ai.get("groq_model", "llama-3.1-70b-versatile")
         gm_idx = self._groq_model_combo.findText(gm)
         if gm_idx >= 0:
             self._groq_model_combo.setCurrentIndex(gm_idx)
-        self._ollama_model.setText(ai.get("ollama_model", "llama3.1:8b"))
-        self._ollama_url.setText(ai.get("ollama_url", "http://localhost:11434"))
         trigger = ai.get("trigger_mode", "auto")
         t_idx = self._trigger_combo.findText(trigger)
         if t_idx >= 0:
@@ -339,10 +345,12 @@ class SettingsDialog(QDialog):
         # AI
         cfg.setdefault("ai", {})
         cfg["ai"]["backend"] = self._backend_combo.currentText()
-        cfg["ai"]["groq_api_key"] = self._api_key_edit.text()
+        cfg["ai"]["openai_api_key"] = self._openai_api_key_edit.text()
+        cfg["ai"]["openai_model"] = self._openai_model_combo.currentText()
+        cfg["ai"]["groq_api_key"] = self._groq_api_key_edit.text()
         cfg["ai"]["groq_model"] = self._groq_model_combo.currentText()
-        cfg["ai"]["ollama_model"] = self._ollama_model.text()
-        cfg["ai"]["ollama_url"] = self._ollama_url.text()
+        cfg["ai"].pop("ollama_model", None)
+        cfg["ai"].pop("ollama_url", None)
         cfg["ai"]["trigger_mode"] = self._trigger_combo.currentText()
         cfg["ai"]["temperature"] = self._temp_slider.value() / 100.0
         cfg["ai"]["system_prompt"] = self._system_prompt.toPlainText()

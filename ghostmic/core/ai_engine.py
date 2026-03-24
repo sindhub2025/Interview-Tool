@@ -2,15 +2,14 @@
 AI response engine.
 
 Supports two backends (user configurable via config.json):
-  - Groq API (default, free tier)
-  - Ollama (local, fully offline)
+    - OpenAI API (default)
+    - Groq API (manual backup)
 
 Runs in a dedicated QThread and emits streaming response tokens.
 """
 
 from __future__ import annotations
 
-import json
 import queue
 import threading
 import time
@@ -130,16 +129,16 @@ class AIThread(QThread):  # type: ignore[misc]
     # ------------------------------------------------------------------
 
     def _generate(self, transcript: List[TranscriptSegment]) -> None:
-        backend = self._config.get("backend", "groq")
+        backend = self._config.get("backend", "openai")
         context = self._build_context(transcript)
         system_prompt = self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
         temperature = float(self._config.get("temperature", 0.7))
 
         try:
-            if backend == "groq":
+            if backend == "openai":
+                self._generate_openai(context, system_prompt, temperature)
+            elif backend == "groq":
                 self._generate_groq(context, system_prompt, temperature)
-            elif backend == "ollama":
-                self._generate_ollama(context, system_prompt, temperature)
             else:
                 logger.error("AIThread: unknown backend %r", backend)
         except Exception as exc:  # pylint: disable=broad-except
@@ -147,6 +146,56 @@ class AIThread(QThread):  # type: ignore[misc]
             logger.error(msg, exc_info=True)
             if pyqtSignal is not None:
                 self.ai_error.emit(str(exc))  # type: ignore[attr-defined]
+
+    def _generate_openai(
+        self, context: str, system_prompt: str, temperature: float
+    ) -> None:
+        try:
+            from openai import OpenAI  # type: ignore[import]
+        except ImportError:
+            if pyqtSignal is not None:
+                self.ai_error.emit(  # type: ignore[attr-defined]
+                    "openai package not installed. Run: pip install openai"
+                )
+            return
+
+        api_key = self._config.get("openai_api_key", "")
+        if not api_key:
+            if pyqtSignal is not None:
+                self.ai_error.emit(  # type: ignore[attr-defined]
+                    "OpenAI API key not set. Add it in Settings -> AI."
+                )
+            return
+
+        model = self._config.get("openai_model", "gpt-5-mini")
+        client = OpenAI(api_key=api_key)
+
+        full_response: List[str] = []
+        stream = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context},
+            ],
+            temperature=temperature,
+            max_tokens=512,
+            stream=True,
+        )
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                full_response.append(delta)
+                if self._on_chunk:
+                    self._on_chunk(delta)
+                if pyqtSignal is not None:
+                    self.ai_response_chunk.emit(delta)  # type: ignore[attr-defined]
+
+        complete = "".join(full_response)
+        if self._on_ready:
+            self._on_ready(complete)
+        if pyqtSignal is not None:
+            self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
 
     def _generate_groq(
         self, context: str, system_prompt: str, temperature: float
@@ -191,65 +240,6 @@ class AIThread(QThread):  # type: ignore[misc]
                     self._on_chunk(delta)
                 if pyqtSignal is not None:
                     self.ai_response_chunk.emit(delta)  # type: ignore[attr-defined]
-
-        complete = "".join(full_response)
-        if self._on_ready:
-            self._on_ready(complete)
-        if pyqtSignal is not None:
-            self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
-
-    def _generate_ollama(
-        self, context: str, system_prompt: str, temperature: float
-    ) -> None:
-        import requests  # type: ignore[import]
-
-        url = self._config.get("ollama_url", "http://localhost:11434")
-        model = self._config.get("ollama_model", "llama3.1:8b")
-
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context},
-            ],
-            "stream": True,
-            "options": {"temperature": temperature},
-        }
-
-        full_response: List[str] = []
-        try:
-            response = requests.post(
-                f"{url}/api/chat",
-                json=payload,
-                stream=True,
-                timeout=60,
-            )
-            response.raise_for_status()
-
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                delta = obj.get("message", {}).get("content", "")
-                if delta:
-                    full_response.append(delta)
-                    if self._on_chunk:
-                        self._on_chunk(delta)
-                    if pyqtSignal is not None:
-                        self.ai_response_chunk.emit(delta)  # type: ignore[attr-defined]
-                if obj.get("done"):
-                    break
-        except requests.ConnectionError:
-            msg = (
-                "Cannot connect to Ollama at "
-                f"{url}. Is Ollama running?"
-            )
-            if pyqtSignal is not None:
-                self.ai_error.emit(msg)  # type: ignore[attr-defined]
-            return
 
         complete = "".join(full_response)
         if self._on_ready:

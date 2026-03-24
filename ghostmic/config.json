@@ -1,10 +1,10 @@
 {
   "ai": {
-    "backend": "groq",
+    "backend": "openai",
+    "openai_api_key": "",
+    "openai_model": "gpt-5-mini",
     "groq_api_key": "",
     "groq_model": "llama-3.1-70b-versatile",
-    "ollama_model": "llama3.1:8b",
-    "ollama_url": "http://localhost:11434",
     "system_prompt": "You are a real-time interview/meeting assistant. You are helping the user respond to questions and participate in a conversation.\n\nBased on the conversation transcript provided, generate:\n1. A concise, natural-sounding suggested response to the last question/topic\n2. Key talking points the user should mention\n\nRules:\n- Keep responses concise (2-4 sentences max for the main response)\n- Sound natural and conversational, not robotic\n- If it's a technical question, provide accurate technical details\n- If context is unclear, provide the most likely helpful response\n- Format: Start with the direct response, then bullet points for key points\n- Do NOT include phrases like \"Based on the transcript\" or \"Here's a suggestion\"\n- Write in first person as if the user is speaking\n",
     "temperature": 0.7,
     "trigger_mode": "auto",

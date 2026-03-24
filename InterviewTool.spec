@@ -14,11 +14,13 @@ hiddenimports = [
     "pynput",
     "sounddevice",
     "groq",
+    "openai",
     "requests",
 ]
 
 hiddenimports += collect_submodules("faster_whisper")
 hiddenimports += collect_submodules("groq")
+hiddenimports += collect_submodules("openai")
 
 binaries = []
 binaries += collect_dynamic_libs("torch")
@@ -84,12 +86,14 @@ hiddenimports = [
     "pynput",
     "sounddevice",
     "groq",
+    "openai",
     "requests",
 ]
 
 # Collect submodules for libraries that often use dynamic imports.
 hiddenimports += collect_submodules("faster_whisper")
 hiddenimports += collect_submodules("groq")
+hiddenimports += collect_submodules("openai")
 
 datas = [
     ("ghostmic/assets", "ghostmic/assets"),

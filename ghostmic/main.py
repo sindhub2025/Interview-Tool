@@ -64,11 +64,11 @@ def _default_config() -> dict:
     """Return a hardcoded minimal default configuration."""
     return {
         "ai": {
-            "backend": "groq",
+            "backend": "openai",
+            "openai_api_key": "",
+            "openai_model": "gpt-5-mini",
             "groq_api_key": "",
             "groq_model": "llama-3.1-70b-versatile",
-            "ollama_model": "llama3.1:8b",
-            "ollama_url": "http://localhost:11434",
             "system_prompt": (
                 "You are a real-time interview/meeting assistant helping the user "
                 "respond to questions. Keep responses concise and natural."
@@ -107,6 +107,16 @@ def _default_config() -> dict:
 
 def _load_config(path: str) -> dict:
     """Load config.json; create a default if it does not exist."""
+    def _merge_defaults(base: dict, defaults: dict) -> dict:
+        merged = dict(base)
+        for key, default_value in defaults.items():
+            if key not in merged:
+                merged[key] = default_value
+                continue
+            if isinstance(default_value, dict) and isinstance(merged[key], dict):
+                merged[key] = _merge_defaults(merged[key], default_value)
+        return merged
+
     if not os.path.exists(path):
         # Try to read the bundled default config.json
         default_path = DEFAULT_CONFIG_PATH
@@ -128,7 +138,17 @@ def _load_config(path: str) -> dict:
         return cfg
 
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        cfg = json.load(fh)
+
+    cfg = _merge_defaults(cfg, _default_config())
+    ai_cfg = cfg.get("ai", {})
+    if isinstance(ai_cfg, dict):
+        ai_cfg.pop("ollama_model", None)
+        ai_cfg.pop("ollama_url", None)
+        if ai_cfg.get("backend") == "ollama":
+            ai_cfg["backend"] = "openai"
+
+    return cfg
 
 
 def _save_config(config: dict, path: str) -> None:
