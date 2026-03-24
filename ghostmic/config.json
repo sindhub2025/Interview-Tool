@@ -1,0 +1,42 @@
+{
+  "ai": {
+    "backend": "groq",
+    "groq_api_key": "",
+    "groq_model": "llama-3.1-70b-versatile",
+    "ollama_model": "llama3.1:8b",
+    "ollama_url": "http://localhost:11434",
+    "system_prompt": "You are a real-time interview/meeting assistant. You are helping the user respond to questions and participate in a conversation.\n\nBased on the conversation transcript provided, generate:\n1. A concise, natural-sounding suggested response to the last question/topic\n2. Key talking points the user should mention\n\nRules:\n- Keep responses concise (2-4 sentences max for the main response)\n- Sound natural and conversational, not robotic\n- If it's a technical question, provide accurate technical details\n- If context is unclear, provide the most likely helpful response\n- Format: Start with the direct response, then bullet points for key points\n- Do NOT include phrases like \"Based on the transcript\" or \"Here's a suggestion\"\n- Write in first person as if the user is speaking\n",
+    "temperature": 0.7,
+    "trigger_mode": "auto",
+    "context_segments": 10,
+    "session_context": ""
+  },
+  "audio": {
+    "input_device": null,
+    "loopback_device": null,
+    "sample_rate": 16000
+  },
+  "transcription": {
+    "model_size": "base.en",
+    "compute_type": "int8",
+    "language": "en",
+    "beam_size": 3
+  },
+  "ui": {
+    "opacity": 0.95,
+    "font_size": 11,
+    "window_width": 420,
+    "window_height": 650,
+    "window_x": null,
+    "window_y": null,
+    "always_on_top": true,
+    "compact_mode": false
+  },
+  "hotkeys": {
+    "toggle_recording": "ctrl+shift+g",
+    "toggle_window": "ctrl+shift+h",
+    "generate_response": "ctrl+g",
+    "copy_response": "ctrl+shift+c",
+    "clear_transcript": "ctrl+shift+x"
+  }
+}
