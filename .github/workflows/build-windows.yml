@@ -120,9 +120,17 @@ jobs:
         shell: pwsh
         run: |
           Set-Location $env:GITHUB_WORKSPACE
-          .\dist\InterviewTool.exe --smoke-test
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Smoke test failed with exit code $LASTEXITCODE"
+          $exePath = Join-Path $env:GITHUB_WORKSPACE 'dist\InterviewTool.exe'
+          $stdoutLog = Join-Path $env:GITHUB_WORKSPACE 'smoke-test.stdout.log'
+          $stderrLog = Join-Path $env:GITHUB_WORKSPACE 'smoke-test.stderr.log'
+          if (Test-Path $stdoutLog) { Remove-Item $stdoutLog -Force }
+          if (Test-Path $stderrLog) { Remove-Item $stderrLog -Force }
+          $proc = Start-Process -FilePath $exePath -ArgumentList '--smoke-test' -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+          Write-Host "Smoke test exit code: $($proc.ExitCode)"
+          if (Test-Path $stdoutLog) { Get-Content $stdoutLog }
+          if (Test-Path $stderrLog) { Get-Content $stderrLog }
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Smoke test failed with exit code $($proc.ExitCode)"
             exit 1
           }
 

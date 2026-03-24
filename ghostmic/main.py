@@ -9,11 +9,13 @@ applies stealth, and enters the event loop.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import platform
 import sys
 import time
+import traceback
 from typing import List, Optional
 
 # ── Ensure the project root is on sys.path ────────────────────────────
@@ -585,16 +587,33 @@ def main() -> None:
 
     if args.smoke_test:
         # Lightweight startup validation for CI on frozen executables.
-        _load_config(args.config)
-        import PyQt6.QtCore  # noqa: F401
-        import PyQt6.QtWidgets  # noqa: F401
-        import faster_whisper  # noqa: F401
-        import torch  # noqa: F401
-        import torchaudio  # noqa: F401
-        import sounddevice  # noqa: F401
-        import pynput  # noqa: F401
-        import requests  # noqa: F401
-        sys.exit(0)
+        try:
+            _load_config(args.config)
+            modules_to_check = [
+                "PyQt6.QtCore",
+                "PyQt6.QtGui",
+                "PyQt6.QtWidgets",
+                "faster_whisper",
+                "torch",
+                "torchaudio",
+                "sounddevice",
+                "pynput",
+                "requests",
+                "ghostmic.core.audio_buffer",
+                "ghostmic.core.vad",
+                "ghostmic.core.transcription_engine",
+                "ghostmic.core.ai_engine",
+                "ghostmic.ui.system_tray",
+                "ghostmic.utils.hotkeys",
+            ]
+            for module_name in modules_to_check:
+                importlib.import_module(module_name)
+            print("SMOKE_TEST_OK")
+            sys.exit(0)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"SMOKE_TEST_FAILED: {exc}", file=sys.stderr)
+            traceback.print_exc()
+            sys.exit(1)
 
     configure_logging(debug=args.debug)
     logger = get_logger("ghostmic.main")
