@@ -17,6 +17,7 @@ env/
 
 # PyInstaller
 *.spec
+!InterviewTool.spec
 dist/
 build/
 

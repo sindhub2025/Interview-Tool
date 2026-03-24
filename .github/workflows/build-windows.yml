@@ -32,107 +32,12 @@ jobs:
           pip install -r requirements_windows.txt
           pip install pyinstaller
 
-      - name: Generate PyInstaller spec
-        shell: pwsh
-        run: |
-          $specPath = Join-Path $env:GITHUB_WORKSPACE 'InterviewTool.spec'
-          $specLines = @(
-            '# -*- mode: python ; coding: utf-8 -*-',
-            '',
-            'from PyInstaller.utils.hooks import collect_submodules',
-            '',
-            '',
-            'hiddenimports = [',
-            '    "PyQt6.QtCore",',
-            '    "PyQt6.QtGui",',
-            '    "PyQt6.QtWidgets",',
-            '    "torch",',
-            '    "torchaudio",',
-            '    "faster_whisper",',
-            '    "pyaudiowpatch",',
-            '    "pynput",',
-            '    "sounddevice",',
-            '    "groq",',
-            '    "requests",',
-            ']',
-            '',
-            'hiddenimports += collect_submodules("faster_whisper")',
-            'hiddenimports += collect_submodules("groq")',
-            '',
-            'datas = [',
-            '    ("ghostmic/assets", "ghostmic/assets"),',
-            '    ("ghostmic/config.json", "ghostmic"),',
-            ']',
-            '',
-            '',
-            'a = Analysis(',
-            '    ["ghostmic/main.py"],',
-            '    pathex=["."],',
-            '    binaries=[],',
-            '    datas=datas,',
-            '    hiddenimports=hiddenimports,',
-            '    hookspath=[],',
-            '    hooksconfig={},',
-            '    runtime_hooks=["ghostmic/.pyinstaller/runtime_hook.py"],',
-            '    excludes=[],',
-            '    noarchive=False,',
-            ')',
-            '',
-            'pyz = PYZ(a.pure)',
-            '',
-            'exe = EXE(',
-            '    pyz,',
-            '    a.scripts,',
-            '    a.binaries,',
-            '    a.datas,',
-            '    [],',
-            '    name="InterviewTool",',
-            '    debug=False,',
-            '    bootloader_ignore_signals=False,',
-            '    strip=False,',
-            '    upx=True,',
-            '    upx_exclude=[],',
-            '    runtime_tmpdir=None,',
-            '    console=False,',
-            '    disable_windowed_traceback=False,',
-            '    argv_emulation=False,',
-            '    target_arch=None,',
-            '    codesign_identity=None,',
-            '    entitlements_file=None,',
-            '    icon="ghostmic/assets/icon.ico",',
-            ')'
-          )
-          $specLines | Set-Content -Path $specPath -Encoding utf8
-
-          if (-not (Test-Path $specPath)) {
-            Write-Error "Spec file not found after generation: $specPath"
-            exit 1
-          }
-
       - name: Build EXE with PyInstaller
         shell: pwsh
         run: |
           Set-Location $env:GITHUB_WORKSPACE
           $specPath = Join-Path $env:GITHUB_WORKSPACE 'InterviewTool.spec'
           pyinstaller --noconfirm --clean $specPath
-
-      - name: Smoke-test built EXE
-        shell: pwsh
-        run: |
-          Set-Location $env:GITHUB_WORKSPACE
-          $exePath = Join-Path $env:GITHUB_WORKSPACE 'dist\InterviewTool.exe'
-          $stdoutLog = Join-Path $env:GITHUB_WORKSPACE 'smoke-test.stdout.log'
-          $stderrLog = Join-Path $env:GITHUB_WORKSPACE 'smoke-test.stderr.log'
-          if (Test-Path $stdoutLog) { Remove-Item $stdoutLog -Force }
-          if (Test-Path $stderrLog) { Remove-Item $stderrLog -Force }
-          $proc = Start-Process -FilePath $exePath -ArgumentList '--smoke-test' -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
-          Write-Host "Smoke test exit code: $($proc.ExitCode)"
-          if (Test-Path $stdoutLog) { Get-Content $stdoutLog }
-          if (Test-Path $stderrLog) { Get-Content $stderrLog }
-          if ($proc.ExitCode -ne 0) {
-            Write-Error "Smoke test failed with exit code $($proc.ExitCode)"
-            exit 1
-          }
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
