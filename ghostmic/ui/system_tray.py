@@ -8,7 +8,7 @@ import os
 from typing import Optional
 
 from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtGui import QAction, QIcon, QPixmap
+from PyQt6.QtGui import QAction, QColor, QIcon, QPixmap
 from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
 
 from ghostmic.utils.logger import get_logger
@@ -25,7 +25,7 @@ def _tray_icon() -> QIcon:
             return QIcon(path)
     # Generate a small coloured pixmap as fallback
     pix = QPixmap(16, 16)
-    pix.fill(__import__("PyQt6.QtGui", fromlist=["QColor"]).QColor("#58a6ff"))
+    pix.fill(QColor("#58a6ff"))
     return QIcon(pix)
 
 

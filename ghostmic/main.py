@@ -57,19 +57,71 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
+def _default_config() -> dict:
+    """Return a hardcoded minimal default configuration."""
+    return {
+        "ai": {
+            "backend": "groq",
+            "groq_api_key": "",
+            "groq_model": "llama-3.1-70b-versatile",
+            "ollama_model": "llama3.1:8b",
+            "ollama_url": "http://localhost:11434",
+            "system_prompt": (
+                "You are a real-time interview/meeting assistant helping the user "
+                "respond to questions. Keep responses concise and natural."
+            ),
+            "temperature": 0.7,
+            "trigger_mode": "auto",
+            "context_segments": 10,
+            "session_context": "",
+        },
+        "audio": {"input_device": None, "loopback_device": None, "sample_rate": 16000},
+        "transcription": {
+            "model_size": "base.en",
+            "compute_type": "int8",
+            "language": "en",
+            "beam_size": 3,
+        },
+        "ui": {
+            "opacity": 0.95,
+            "font_size": 11,
+            "window_width": 420,
+            "window_height": 650,
+            "window_x": None,
+            "window_y": None,
+            "always_on_top": True,
+            "compact_mode": False,
+        },
+        "hotkeys": {
+            "toggle_recording": "ctrl+shift+g",
+            "toggle_window": "ctrl+shift+h",
+            "generate_response": "ctrl+g",
+            "copy_response": "ctrl+shift+c",
+            "clear_transcript": "ctrl+shift+x",
+        },
+    }
+
+
 def _load_config(path: str) -> dict:
     """Load config.json; create a default if it does not exist."""
     if not os.path.exists(path):
+        # Try to read the bundled default config.json
         default_path = DEFAULT_CONFIG_PATH
-        if os.path.exists(default_path) and path != default_path:
+        cfg: dict
+        if os.path.exists(default_path):
             with open(default_path, encoding="utf-8") as fh:
-                return json.load(fh)
-        # Write an empty default
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(default_path, encoding="utf-8") as fh:
-            cfg = json.load(fh)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, indent=2)
+                cfg = json.load(fh)
+        else:
+            cfg = _default_config()
+
+        # Write it to the requested path if it differs
+        if path != default_path:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    json.dump(cfg, fh, indent=2)
+            except OSError as exc:
+                _early_logger.warning("Could not create config file %s: %s", path, exc)
         return cfg
 
     with open(path, encoding="utf-8") as fh:
@@ -177,8 +229,8 @@ class GhostMicApp:
 
         self._window = MainWindow(self._config)
         # Wire controls
-        self._window._controls.record_toggled.connect(self._on_record_toggled)
-        self._window._controls.settings_requested.connect(self._on_settings_requested)
+        self._window.controls.record_toggled.connect(self._on_record_toggled)
+        self._window.controls.settings_requested.connect(self._on_settings_requested)
 
     # ------------------------------------------------------------------
     # System tray
@@ -224,19 +276,19 @@ class GhostMicApp:
                 self._transcription_thread.set_model(loader.model)
                 self._transcription_thread.start()
                 if self._window:
-                    self._window._controls.set_status("Model ready", "#3fb950")
+                    self._window.controls.set_status("Model ready", "#3fb950")
 
             def _on_model_error(msg: str):
                 self._logger.error("Model load error: %s", msg)
                 if self._window:
-                    self._window._controls.set_status(
+                    self._window.controls.set_status(
                         f"Model error: {msg[:40]}", "#f85149"
                     )
 
             loader.model_ready.connect(_on_model_ready)
             loader.model_error.connect(_on_model_error)
             loader.progress.connect(
-                lambda msg: self._window._controls.set_status(msg) if self._window else None
+                lambda msg: self._window.controls.set_status(msg) if self._window else None
             )
 
             self._model_loader = loader
@@ -372,7 +424,7 @@ class GhostMicApp:
     def _on_transcribing(self, source: str) -> None:
         if self._window:
             self._window.transcript_panel.show_pending(source)
-            self._window._controls.set_status("Transcribing…", "#58a6ff")
+            self._window.controls.set_status("Transcribing…", "#58a6ff")
 
     def _on_transcription_ready(self, segment) -> None:
         from ghostmic.utils.text_processing import clean_text
@@ -385,7 +437,7 @@ class GhostMicApp:
 
         if self._window:
             self._window.transcript_panel.add_segment(segment)
-            self._window._controls.set_status("Listening…", "#3fb950")
+            self._window.controls.set_status("Listening…", "#3fb950")
 
         # Auto-trigger AI for speaker segments
         ai_cfg = self._config.get("ai", {})
@@ -435,8 +487,8 @@ class GhostMicApp:
 
     def _toggle_recording(self) -> None:
         if self._window:
-            recording = not self._window._controls._recording
-            self._window._controls.set_recording(recording)
+            recording = not self._window.controls.is_recording
+            self._window.controls.set_recording(recording)
             self._on_record_toggled(recording)
 
     def _generate_ai_response(self) -> None:

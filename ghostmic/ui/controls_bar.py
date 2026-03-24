@@ -82,6 +82,11 @@ class ControlsBar(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def is_recording(self) -> bool:
+        """Return whether recording is currently active."""
+        return self._recording
+
     def set_recording(self, recording: bool) -> None:
         """Sync button state with actual recording status."""
         self._recording = recording

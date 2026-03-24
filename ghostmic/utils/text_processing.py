@@ -74,7 +74,7 @@ def clean_text(
             text,
         )
         # Capitalise the very first character
-        text = text[0].upper() + text[1:]
+        text = text[0].upper() + text[1:] if len(text) > 1 else text.upper()
 
     return text
 

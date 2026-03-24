@@ -206,6 +206,8 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 return None
 
             full_text = " ".join(texts)
+            # avg_logprob is in [-inf, 0]; adding 1.0 maps the typical
+            # range [-1, 0] to [0, 1] as an approximate confidence score.
             confidence = float(
                 min(1.0, max(0.0, (avg_prob / seg_count + 1.0)))
                 if seg_count

@@ -56,6 +56,7 @@ from ghostmic.utils.logger import get_logger
 logger = get_logger(__name__)
 
 RESIZE_MARGIN = 8  # pixels from edge that trigger resize
+QWIDGETSIZE_MAX = 16_777_215  # Qt maximum widget dimension
 
 
 class TitleBar(QWidget):
@@ -297,6 +298,18 @@ class MainWindow(QMainWindow):
             ui.get("window_height", 650),
         )
 
+    @property
+    def controls(self) -> "ControlsBar":
+        """Public accessor for the controls bar."""
+        return self._controls
+
+    def set_status(self, text: str, color: str = "") -> None:
+        """Set the status label text (delegates to ControlsBar)."""
+        if color:
+            self._controls.set_status(text, color)
+        else:
+            self._controls.set_status(text)
+
     # ------------------------------------------------------------------
     # Compact mode
     # ------------------------------------------------------------------
@@ -308,8 +321,8 @@ class MainWindow(QMainWindow):
             self.transcript_panel.setMaximumHeight(60)
             self.resize(self.width(), 200)
         else:
-            self.transcript_panel.setMaximumHeight(16_777_215)
-            self.ai_panel.setMaximumHeight(16_777_215)
+            self.transcript_panel.setMaximumHeight(QWIDGETSIZE_MAX)
+            self.ai_panel.setMaximumHeight(QWIDGETSIZE_MAX)
             ui = self._config.get("ui", {})
             self.resize(
                 ui.get("window_width", 420), ui.get("window_height", 650)

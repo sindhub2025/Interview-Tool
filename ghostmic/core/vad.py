@@ -147,7 +147,7 @@ class VADThread(QThread):  # type: ignore[misc]
             logger.info("VADThread: Silero VAD model loaded.")
         except Exception as exc:  # pylint: disable=broad-except
             logger.error(
-                "VADThread: failed to load Silero VAD: %s – bypassing VAD.",
+                "VADThread: failed to load Silero VAD: %s - bypassing VAD.",
                 exc,
             )
             self._bypass_vad = True

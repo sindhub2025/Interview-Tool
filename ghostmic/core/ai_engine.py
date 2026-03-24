@@ -10,6 +10,7 @@ Runs in a dedicated QThread and emits streaming response tokens.
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
@@ -224,8 +225,6 @@ class AIThread(QThread):  # type: ignore[misc]
                 timeout=60,
             )
             response.raise_for_status()
-
-            import json
 
             for line in response.iter_lines():
                 if not line:
