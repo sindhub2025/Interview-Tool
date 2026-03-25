@@ -34,6 +34,26 @@ from ghostmic.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class ApiConnectivityWorker(QThread):
+    """Runs API connectivity checks in a background thread."""
+
+    result_ready = pyqtSignal(bool, str, str)
+
+    def __init__(self, ai_config: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._ai_config = ai_config
+
+    def run(self) -> None:
+        try:
+            from ghostmic.core.ai_engine import AIThread
+
+            ai_test = AIThread(self._ai_config)
+            success, backend, message = ai_test.test_api_connectivity()
+            self.result_ready.emit(bool(success), str(backend), str(message))
+        except Exception as exc:  # pylint: disable=broad-except
+            self.result_ready.emit(False, "unknown", f"Error testing connection: {exc}")
+
+
 class SettingsDialog(QDialog):
     """Multi-tab settings dialog.
 
@@ -46,6 +66,7 @@ class SettingsDialog(QDialog):
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
         self._config = config
+        self._api_test_worker: ApiConnectivityWorker | None = None
         self.setWindowTitle("GhostMic — Settings")
         self.setMinimumSize(520, 460)
         self.setStyleSheet(MAIN_STYLE)
@@ -161,7 +182,7 @@ class SettingsDialog(QDialog):
         form.addRow("OpenAI API key:", self._openai_api_key_edit)
 
         self._openai_model_combo = QComboBox()
-        self._openai_model_combo.addItems(["gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"])
+        self._openai_model_combo.addItems(["gpt-5-mini", "gpt-5-nano", "gpt-5.4-nano"])
         form.addRow("OpenAI model:", self._openai_model_combo)
 
         self._groq_api_key_edit = QLineEdit()
@@ -172,7 +193,7 @@ class SettingsDialog(QDialog):
         self._groq_model_combo = QComboBox()
         self._groq_model_combo.addItems(
             [
-                "openai/gpt-oss-20b",
+                "llama-3.3-70b-versatile",
                 "llama-3.1-70b-versatile",
                 "llama-3.1-8b-instant",
                 "mixtral-8x7b-32768",
@@ -209,9 +230,9 @@ class SettingsDialog(QDialog):
         form.addRow("Session context:", self._session_ctx)
 
         # Test connection button
-        test_btn = QPushButton("Test API Connection")
-        test_btn.clicked.connect(self._test_api_connection)
-        form.addRow("", test_btn)
+        self._test_btn = QPushButton("Test API Connection")
+        self._test_btn.clicked.connect(self._test_api_connection)
+        form.addRow("", self._test_btn)
 
         self._test_result_label = QLabel("")
         self._test_result_label.setWordWrap(True)
@@ -315,12 +336,12 @@ class SettingsDialog(QDialog):
         if b_idx >= 0:
             self._backend_combo.setCurrentIndex(b_idx)
         self._openai_api_key_edit.setText(ai.get("openai_api_key", ""))
-        openai_model = ai.get("openai_model", "gpt-4o-mini")
+        openai_model = ai.get("openai_model", "gpt-5-mini")
         openai_model_idx = self._openai_model_combo.findText(openai_model)
         if openai_model_idx >= 0:
             self._openai_model_combo.setCurrentIndex(openai_model_idx)
         self._groq_api_key_edit.setText(ai.get("groq_api_key", ""))
-        gm = ai.get("groq_model", "openai/gpt-oss-20b")
+        gm = ai.get("groq_model", "llama-3.3-70b-versatile")
         gm_idx = self._groq_model_combo.findText(gm)
         if gm_idx >= 0:
             self._groq_model_combo.setCurrentIndex(gm_idx)
@@ -385,8 +406,12 @@ class SettingsDialog(QDialog):
 
     def _test_api_connection(self) -> None:
         """Test the API connection with the currently configured settings."""
+        if self._api_test_worker is not None and self._api_test_worker.isRunning():
+            return
+
         self._test_result_label.setText("Testing API connection...")
         self._test_result_label.setStyleSheet("color: #888;")
+        self._test_btn.setEnabled(False)
 
         # Build a temporary config with current dialog values
         test_config = copy.deepcopy(self._config)
@@ -399,26 +424,37 @@ class SettingsDialog(QDialog):
         test_config["ai"]["backend"] = selected_backend
         test_config["ai"]["main_backend"] = selected_backend
 
-        # Test the connection
-        try:
-            from ghostmic.core.ai_engine import AIThread
-            ai_test_config = test_config.get("ai")
-            if not isinstance(ai_test_config, dict):
-                self._test_result_label.setText("✗ Missing AI settings in config")
-                self._test_result_label.setStyleSheet("color: #ef4444;")
-                return
-            ai_test = AIThread(ai_test_config)
-            success, backend, message = ai_test.test_api_connectivity()
-            
-            if success:
-                self._test_result_label.setText(f"✓ Connected to {backend.title()}!\n{message[:200]}")
-                self._test_result_label.setStyleSheet("color: #4ade80;")
-            else:
-                self._test_result_label.setText(f"✗ Connection Failed ({backend}):\n{message}")
-                self._test_result_label.setStyleSheet("color: #ef4444;")
-        except Exception as e:
-            self._test_result_label.setText(f"✗ Error testing connection:\n{str(e)[:200]}")
+        ai_test_config = test_config.get("ai")
+        if not isinstance(ai_test_config, dict):
+            self._test_result_label.setText("✗ Missing AI settings in config")
             self._test_result_label.setStyleSheet("color: #ef4444;")
+            self._test_btn.setEnabled(True)
+            return
+
+        self._api_test_worker = ApiConnectivityWorker(copy.deepcopy(ai_test_config), self)
+        self._api_test_worker.result_ready.connect(self._on_api_test_result)
+        self._api_test_worker.finished.connect(self._on_api_test_finished)
+        self._api_test_worker.start()
+
+    def _on_api_test_result(self, success: bool, backend: str, message: str) -> None:
+        if success:
+            self._test_result_label.setText(
+                f"✓ Connected to {backend.title()}!\n{message[:200]}"
+            )
+            self._test_result_label.setStyleSheet("color: #4ade80;")
+            return
+
+        self._test_result_label.setText(
+            f"✗ Connection Failed ({backend}):\n{message[:200]}"
+        )
+        self._test_result_label.setStyleSheet("color: #ef4444;")
+
+    def _on_api_test_finished(self) -> None:
+        self._test_btn.setEnabled(True)
+        if self._api_test_worker is None:
+            return
+        self._api_test_worker.deleteLater()
+        self._api_test_worker = None
 
     # ------------------------------------------------------------------
     # Device helpers

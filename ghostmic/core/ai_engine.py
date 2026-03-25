@@ -188,41 +188,8 @@ class AIThread(QThread):  # type: ignore[misc]
                 self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
             raise ValueError(error_msg)
 
-        model = self._config.get("openai_model", "gpt-4o-mini")
         client = OpenAI(api_key=api_key)
-
-        full_response: List[str] = []
-        # OpenAI API Parameters (current as of 2026):
-        # - model: gpt-4o-mini is the configured low-latency default; override in config.json if needed
-        # - messages: standard chat completion format (system + user roles)
-        # - temperature: 0.7 balances creativity and consistency (0.0=deterministic, 1.0=maximum randomness)
-        # - max_tokens: 512 is sufficient for interview/meeting suggestions
-        # - stream: enables incremental token delivery for real-time response display
-        stream = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context},
-            ],
-            temperature=temperature,
-            max_tokens=512,
-            stream=True,
-        )
-
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
-            if delta:
-                full_response.append(delta)
-                if self._on_chunk:
-                    self._on_chunk(delta)
-                if pyqtSignal is not None:
-                    self.ai_response_chunk.emit(delta)  # type: ignore[attr-defined]
-
-        complete = "".join(full_response)
-        if self._on_ready:
-            self._on_ready(complete)
-        if pyqtSignal is not None:
-            self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
+        self._generate_stream(client, system_prompt, context, temperature, "openai")
 
     def _generate_groq(
         self, context: str, system_prompt: str, temperature: float
@@ -242,44 +209,196 @@ class AIThread(QThread):  # type: ignore[misc]
                 self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
             raise ValueError(error_msg)
 
-        model = self._config.get("groq_model", "openai/gpt-oss-20b")
         client = OpenAI(
             api_key=api_key,
             base_url="https://api.groq.com/openai/v1",
         )
+        self._generate_stream(client, system_prompt, context, temperature, "groq")
 
+    # ------------------------------------------------------------------
+    # Stream Processing (shared by OpenAI and Groq)
+    # ------------------------------------------------------------------
+
+    def _generate_stream(
+        self, client, system_prompt: str, context: str, temperature: float, backend_name: str
+    ) -> None:
+        """Generate response from client using Responses API streaming.
+        
+        Handles event-driven state machine for both OpenAI and Groq backends.
+        
+        Args:
+            client: OpenAI client instance (supports both OpenAI and Groq via base_url)
+            system_prompt: System prompt for the model
+            context: User context/input
+            temperature: Temperature setting
+            backend_name: "openai" or "groq" for logging
+        """
+        # Response state machine: pending → streaming → completed/refusal
         full_response: List[str] = []
-        # Groq API Parameters (current as of 2026):
-        # - base_url: https://api.groq.com/openai/v1 uses Groq's OpenAI-compatible endpoint
-        # - model: openai/gpt-oss-20b matches the documented Groq example and is configurable
-        # - responses.create: current OpenAI-compatible Responses API
-        # - max_output_tokens: 512 is sufficient for interview/meeting suggestions
-        # - stream: enables incremental token delivery for real-time response display
-        stream = client.responses.create(
-            model=model,
-            instructions=system_prompt,
-            input=context,
-            temperature=temperature,
-            max_output_tokens=512,
-            stream=True,
-        )
+        response_state = "pending"
+        error_to_emit = None
+        stream = None
+        unknown_event_types: set[str] = set()
 
-        for chunk in stream:
-            if getattr(chunk, "type", None) != "response.output_text.delta":
-                continue
-            delta = getattr(chunk, "delta", "") or ""
-            if delta:
-                full_response.append(delta)
-                if self._on_chunk:
-                    self._on_chunk(delta)
-                if pyqtSignal is not None:
-                    self.ai_response_chunk.emit(delta)  # type: ignore[attr-defined]
+        try:
+            default_model = "llama-3.3-70b-versatile" if backend_name == "groq" else "gpt-5-mini"
+            model = self._config.get(f"{backend_name}_model", default_model)
+            stream = client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": context},
+                ],
+                temperature=temperature,
+                max_output_tokens=512,
+                stream=True,
+            )
 
+            stream_timeout = self._config.get("stream_timeout", 30.0)
+            stream_start = time.time()
+
+            for event in stream:
+                # Hard timeout check on each event
+                elapsed = time.time() - stream_start
+                if elapsed > stream_timeout:
+                    response_state = "error"
+                    error_to_emit = f"Stream timeout after {stream_timeout}s"
+                    logger.error("AIThread (%s): %s", backend_name, error_to_emit)
+                    break
+
+                # State transition: pending → streaming on first delta
+                if response_state == "pending" and event.type == "response.output_text.delta":
+                    response_state = "streaming"
+
+                # Event-driven state machine
+                if event.type == "response.created":
+                    logger.debug("AIThread (%s): response created", backend_name)
+
+                elif event.type == "response.output_text.delta":
+                    # Events guarantee ordering - no state guard needed
+                    delta = event.delta or ""
+                    if delta:
+                        full_response.append(delta)
+                        if self._on_chunk:
+                            self._on_chunk(delta)
+                        if pyqtSignal is not None:
+                            self.ai_response_chunk.emit(delta)  # type: ignore[attr-defined]
+
+                elif event.type == "response.output_text.done":
+                    logger.debug("AIThread (%s): output text done", backend_name)
+
+                elif event.type == "response.refusal.delta":
+                    # Accumulate refusal text
+                    refusal_delta = event.delta or ""
+                    if refusal_delta:
+                        full_response.append(refusal_delta)
+
+                elif event.type == "response.refusal.done":
+                    # Refusal completed - state transition and stop processing
+                    response_state = "refusal"
+                    refusal_msg = "".join(full_response) or "Model refused to respond"
+                    error_to_emit = f"Model declined: {refusal_msg}"
+                    logger.warning("AIThread (%s): model refusal: %s", backend_name, refusal_msg)
+                    break
+
+                elif event.type == "response.completed":
+                    response_state = "completed"
+                    logger.debug("AIThread (%s): response completed", backend_name)
+
+                elif event.type == "response.tool_calls":
+                    self._route_tool_calls(event, backend_name)
+
+                else:
+                    if event.type not in unknown_event_types:
+                        unknown_event_types.add(event.type)
+                        logger.debug(
+                            "AIThread (%s): unknown event type observed: %s",
+                            backend_name,
+                            event.type,
+                        )
+
+        except Exception as exc:  # pylint: disable=broad-except
+            response_state = "error"
+            error_to_emit = f"Stream error: {exc}"
+            logger.error("AIThread (%s): %s", backend_name, error_to_emit)
+
+        finally:
+            # Hard cancel: explicitly close the stream to prevent resource leak
+            if stream is not None:
+                try:
+                    if hasattr(stream, 'close'):
+                        stream.close()
+                except Exception as e:  # pylint: disable=broad-except
+                    logger.debug("AIThread (%s): error closing stream: %s", backend_name, e)
+
+        if unknown_event_types:
+            logger.debug(
+                "AIThread (%s): suppressed repeated unknown event logs for types: %s",
+                backend_name,
+                sorted(unknown_event_types),
+            )
+
+        # Final state handling
         complete = "".join(full_response)
-        if self._on_ready:
-            self._on_ready(complete)
-        if pyqtSignal is not None:
-            self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
+
+        if error_to_emit:
+            if complete:
+                logger.warning(
+                    "AIThread (%s): stream ended with error, emitting partial response (%d chars)",
+                    backend_name,
+                    len(complete),
+                )
+                if self._on_ready:
+                    self._on_ready(complete)
+                if pyqtSignal is not None:
+                    self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
+            if pyqtSignal is not None:
+                self.ai_error.emit(error_to_emit)  # type: ignore[attr-defined]
+            return
+
+        if response_state == "completed":
+            if self._on_ready:
+                self._on_ready(complete)
+            if pyqtSignal is not None:
+                self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
+        elif response_state != "completed":
+            if complete:
+                logger.warning(
+                    "AIThread (%s): stream ended in state %s, emitting partial response (%d chars)",
+                    backend_name,
+                    response_state,
+                    len(complete),
+                )
+                if self._on_ready:
+                    self._on_ready(complete)
+                if pyqtSignal is not None:
+                    self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
+            else:
+                logger.warning(
+                    "AIThread (%s): stream ended in unexpected state: %s (response incomplete)",
+                    backend_name,
+                    response_state,
+                )
+                if pyqtSignal is not None:
+                    self.ai_error.emit(f"Response incomplete: {response_state}")  # type: ignore[attr-defined]
+
+    def _route_tool_calls(self, event, backend_name: str) -> None:
+        """Route tool call events to a dedicated handler path.
+
+        Agents/tool execution is not wired yet, but this keeps event handling centralized.
+        """
+        tool_calls = getattr(event, "tool_calls", None)
+        if tool_calls:
+            logger.info(
+                "AIThread (%s): received %d tool call(s); execution path not enabled yet",
+                backend_name,
+                len(tool_calls),
+            )
+        else:
+            logger.info(
+                "AIThread (%s): received tool call event without payload",
+                backend_name,
+            )
 
     # ------------------------------------------------------------------
     # Connectivity Test (for startup and manual testing)
@@ -310,51 +429,134 @@ class AIThread(QThread):  # type: ignore[misc]
             return (False, test_backend, f"Connection failed: {exc}")
 
     def _test_openai(self, message: str) -> str:
-        """Send test message to OpenAI and return response."""
-        try:
-            from openai import OpenAI  # type: ignore[import]
-        except ImportError as e:
-            raise RuntimeError("openai package not installed") from e
-
+        """Send test message to OpenAI and return response.
+        
+        Uses exponential backoff for transient errors (max 3 retries).
+        """
         api_key = self._config.get("openai_api_key", "")
         if not api_key:
             raise ValueError("OpenAI API key not set")
 
-        model = self._config.get("openai_model", "gpt-4o-mini")
-        client = OpenAI(api_key=api_key)
+        model = self._config.get("openai_model", "gpt-5-mini")
+        max_retries = 3
+        retry_delay = 1.0
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": message}],
-            temperature=0.7,
-            max_tokens=100,
-        )
-        return response.choices[0].message.content or ""
+        for attempt in range(max_retries):
+            try:
+                try:
+                    from openai import OpenAI  # type: ignore[import]
+                except ImportError as e:
+                    raise RuntimeError("openai package not installed") from e
+
+                client = OpenAI(api_key=api_key)
+                response = client.responses.create(
+                    model=model,
+                    input=[{"role": "user", "content": message}],
+                    temperature=0.7,
+                    max_output_tokens=100,
+                    timeout=10.0,
+                )
+                
+                # Safely extract response text from output structure
+                if hasattr(response, 'output') and response.output:
+                    text_parts = []
+                    for item in response.output:
+                        if getattr(item, 'type', None) == 'text':
+                            text_parts.append(getattr(item, 'text', ''))
+                    if text_parts:
+                        return "".join(text_parts)
+                
+                # Fallback to output_text property if available
+                if hasattr(response, 'output_text') and response.output_text:
+                    return response.output_text
+                
+                # Last resort: empty string
+                logger.warning("AIThread: OpenAI response had no output_text or output items")
+                return ""
+
+            except TimeoutError as e:
+                if attempt < max_retries - 1:
+                    logger.debug("AIThread: OpenAI test timeout, retrying in %.1fs... (attempt %d/%d)", 
+                               retry_delay, attempt + 1, max_retries)
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # exponential backoff
+                else:
+                    raise RuntimeError(f"OpenAI test timeout after {max_retries} retries") from e
+            except Exception as e:
+                if attempt < max_retries - 1 and "rate" in str(e).lower():
+                    logger.debug("AIThread: OpenAI rate limit, retrying in %.1fs... (attempt %d/%d)", 
+                               retry_delay, attempt + 1, max_retries)
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise
 
     def _test_groq(self, message: str) -> str:
-        """Send test message to Groq and return response."""
-        try:
-            from openai import OpenAI  # type: ignore[import]
-        except ImportError as e:
-            raise RuntimeError("openai package not installed") from e
-
+        """Send test message to Groq and return response.
+        
+        Uses exponential backoff for transient errors (max 3 retries).
+        """
         api_key = self._config.get("groq_api_key", "")
         if not api_key:
             raise ValueError("Groq API key not set")
 
-        model = self._config.get("groq_model", "openai/gpt-oss-20b")
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
-        )
+        model = self._config.get("groq_model", "llama-3.3-70b-versatile")
+        max_retries = 3
+        retry_delay = 1.0
 
-        response = client.responses.create(
-            model=model,
-            input=message,
-            temperature=0.7,
-            max_output_tokens=100,
-        )
-        return getattr(response, "output_text", "") or ""
+        for attempt in range(max_retries):
+            try:
+                try:
+                    from openai import OpenAI  # type: ignore[import]
+                except ImportError as e:
+                    raise RuntimeError("openai package not installed") from e
+
+                client = OpenAI(
+                    api_key=api_key,
+                    base_url="https://api.groq.com/openai/v1",
+                )
+
+                response = client.responses.create(
+                    model=model,
+                    input=[{"role": "user", "content": message}],
+                    temperature=0.7,
+                    max_output_tokens=100,
+                    timeout=10.0,
+                )
+                
+                # Safely extract response text from output structure
+                if hasattr(response, 'output') and response.output:
+                    text_parts = []
+                    for item in response.output:
+                        if getattr(item, 'type', None) == 'text':
+                            text_parts.append(getattr(item, 'text', ''))
+                    if text_parts:
+                        return "".join(text_parts)
+                
+                # Fallback to output_text property if available
+                if hasattr(response, 'output_text') and response.output_text:
+                    return response.output_text
+                
+                # Last resort: empty string
+                logger.warning("AIThread: Groq response had no output_text or output items")
+                return ""
+
+            except TimeoutError as e:
+                if attempt < max_retries - 1:
+                    logger.debug("AIThread: Groq test timeout, retrying in %.1fs... (attempt %d/%d)", 
+                               retry_delay, attempt + 1, max_retries)
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # exponential backoff
+                else:
+                    raise RuntimeError(f"Groq test timeout after {max_retries} retries") from e
+            except Exception as e:
+                if attempt < max_retries - 1 and "rate" in str(e).lower():
+                    logger.debug("AIThread: Groq rate limit, retrying in %.1fs... (attempt %d/%d)", 
+                               retry_delay, attempt + 1, max_retries)
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise
 
     # ------------------------------------------------------------------
     # Context formatting
