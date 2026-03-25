@@ -310,7 +310,7 @@ class SettingsDialog(QDialog):
             self._compute_combo.setCurrentIndex(c_idx)
 
         # AI
-        backend = ai.get("backend", "openai")
+        backend = ai.get("main_backend") or ai.get("backend", "openai")
         b_idx = self._backend_combo.findText(backend)
         if b_idx >= 0:
             self._backend_combo.setCurrentIndex(b_idx)
@@ -359,7 +359,9 @@ class SettingsDialog(QDialog):
 
         # AI
         cfg.setdefault("ai", {})
-        cfg["ai"]["backend"] = self._backend_combo.currentText()
+        selected_backend = self._backend_combo.currentText()
+        cfg["ai"]["backend"] = selected_backend
+        cfg["ai"]["main_backend"] = selected_backend
         cfg["ai"]["openai_api_key"] = self._openai_api_key_edit.text()
         cfg["ai"]["openai_model"] = self._openai_model_combo.currentText()
         cfg["ai"]["groq_api_key"] = self._groq_api_key_edit.text()
@@ -393,12 +395,19 @@ class SettingsDialog(QDialog):
         test_config["ai"]["openai_model"] = self._openai_model_combo.currentText()
         test_config["ai"]["groq_api_key"] = self._groq_api_key_edit.text()
         test_config["ai"]["groq_model"] = self._groq_model_combo.currentText()
-        test_config["ai"]["backend"] = self._backend_combo.currentText()
+        selected_backend = self._backend_combo.currentText()
+        test_config["ai"]["backend"] = selected_backend
+        test_config["ai"]["main_backend"] = selected_backend
 
         # Test the connection
         try:
             from ghostmic.core.ai_engine import AIThread
-            ai_test = AIThread(test_config)
+            ai_test_config = test_config.get("ai")
+            if not isinstance(ai_test_config, dict):
+                self._test_result_label.setText("✗ Missing AI settings in config")
+                self._test_result_label.setStyleSheet("color: #ef4444;")
+                return
+            ai_test = AIThread(ai_test_config)
             success, backend, message = ai_test.test_api_connectivity()
             
             if success:

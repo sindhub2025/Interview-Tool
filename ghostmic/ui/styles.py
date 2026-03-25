@@ -97,6 +97,21 @@ QPushButton#record_btn:hover {{
     background-color: #da3633;
 }}
 
+QPushButton#settings_btn {{
+    background-color: {BG_MID};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    font-size: 14pt;
+    padding: 2px;
+}}
+QPushButton#settings_btn:hover {{
+    border-color: {ACCENT_BLUE};
+    background-color: {BG_CARD};
+}}
+QPushButton#settings_btn:pressed {{
+    background-color: {BG_DEEP};
+}}
+
 /* ─── LineEdit / TextEdit ─────────────────────────────────────────── */
 QLineEdit, QTextEdit, QPlainTextEdit {{
     background-color: {BG_MID};

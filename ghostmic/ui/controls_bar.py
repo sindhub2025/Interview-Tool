@@ -111,6 +111,7 @@ class ControlsBar(QWidget):
 
         # Settings button
         settings_btn = QPushButton("⚙")
+        settings_btn.setObjectName("settings_btn")
         settings_btn.setFixedSize(32, 32)
         settings_btn.setToolTip("Settings")
         settings_btn.clicked.connect(self.settings_requested)

@@ -251,7 +251,7 @@ class GhostMicApp:
     def _setup_main_window(self) -> None:
         from ghostmic.ui.main_window import MainWindow
 
-        self._window = MainWindow(self._config)
+        self._window = MainWindow(self._config, config_path=self._config_path)
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)

@@ -13,6 +13,7 @@ Features:
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Optional
 
@@ -148,12 +149,14 @@ class MainWindow(QMainWindow):
 
     Args:
         config: Full application config dict.
+        config_path: Optional path to config.json for persistence.
         parent: Optional parent widget.
     """
 
-    def __init__(self, config: dict, parent=None) -> None:
+    def __init__(self, config: dict, config_path: Optional[str] = None, parent=None) -> None:
         super().__init__(parent)
         self._config = config
+        self._config_path = config_path
         self._compact_mode = False
         self._resize_edge: Optional[str] = None
         self._resize_origin: Optional[QPoint] = None
@@ -291,6 +294,13 @@ class MainWindow(QMainWindow):
     def update_config(self, config: dict) -> None:
         """Apply updated config (called after settings dialog saves)."""
         self._config = config
+        # Persist config to disk
+        if self._config_path:
+            try:
+                with open(self._config_path, "w", encoding="utf-8") as fh:
+                    json.dump(config, fh, indent=2)
+            except OSError as exc:
+                logger.error("Could not save config: %s", exc)
         ui = config.get("ui", {})
         self.setWindowOpacity(ui.get("opacity", 0.95))
         self.resize(
