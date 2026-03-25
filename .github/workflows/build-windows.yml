@@ -37,14 +37,32 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
           python -m pip install --upgrade pip
           pip install -r requirements_windows.txt
           pip install pyinstaller
+          $sw.Stop()
+          Write-Host "Dependency install time: $($sw.Elapsed.ToString())"
 
-      - name: Build EXE with PyInstaller
+      - name: Build EXE with PyInstaller (PR fast path)
+        if: github.event_name == 'pull_request'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          pyinstaller --noconfirm InterviewTool.spec
+          $sw.Stop()
+          Write-Host "PyInstaller build time (PR): $($sw.Elapsed.ToString())"
+
+      - name: Build EXE with PyInstaller (clean for main/tags)
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
           pyinstaller --noconfirm --clean InterviewTool.spec
+          $sw.Stop()
+          Write-Host "PyInstaller build time (main/tag): $($sw.Elapsed.ToString())"
 
       - name: Validate EXE output
         shell: pwsh
