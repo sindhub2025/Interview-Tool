@@ -5,7 +5,7 @@ Controls bar: record toggle, mode dropdown, settings gear, status label.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -15,6 +15,40 @@ from PyQt6.QtWidgets import (
 )
 
 from ghostmic.ui.styles import ACCENT_GREEN, ACCENT_RED, TEXT_SECONDARY
+
+
+class APIStatusIndicator(QWidget):
+    """Small API connection status indicator."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(140, 20)
+        self._connected = False
+        self._backend = "OpenAI"
+
+    def set_status(self, connected: bool, backend: str = "OpenAI") -> None:
+        """Update the connection status."""
+        self._connected = connected
+        self._backend = backend
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Dot color
+        dot_color = ACCENT_GREEN if self._connected else "#666666"
+        painter.fillRect(4, 6, 8, 8, QColor(dot_color))
+
+        # Text
+        text = f"✓ {self._backend}" if self._connected else "○ Offline"
+        text_color = ACCENT_GREEN if self._connected else TEXT_SECONDARY
+        
+        painter.setPen(QColor(text_color))
+        font = QFont()
+        font.setPointSize(8)
+        painter.setFont(font)
+        painter.drawText(16, 15, text)
 
 
 class ControlsBar(QWidget):
@@ -51,6 +85,10 @@ class ControlsBar(QWidget):
         self._record_btn.setToolTip("Start/Stop recording (Ctrl+Shift+G)")
         self._record_btn.clicked.connect(self._on_record_clicked)
         layout.addWidget(self._record_btn)
+
+        # API Status indicator
+        self._api_status = APIStatusIndicator()
+        layout.addWidget(self._api_status)
 
         # Mode dropdown
         self._mode_combo = QComboBox()
@@ -109,6 +147,10 @@ class ControlsBar(QWidget):
         self._status_label.setStyleSheet(
             f"color: {color}; font-size: 9pt;"
         )
+
+    def set_api_status(self, connected: bool, backend: str = "OpenAI") -> None:
+        """Update the API connection status indicator."""
+        self._api_status.set_status(connected, backend)
 
     def current_mode(self) -> str:
         return self._mode_combo.currentText()

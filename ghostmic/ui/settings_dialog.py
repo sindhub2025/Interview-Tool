@@ -5,6 +5,7 @@ Stealth (WDA_EXCLUDEFROMCAPTURE) is applied to this window too.
 
 from __future__ import annotations
 
+import copy
 import sys
 from typing import Any, Dict
 
@@ -160,7 +161,7 @@ class SettingsDialog(QDialog):
         form.addRow("OpenAI API key:", self._openai_api_key_edit)
 
         self._openai_model_combo = QComboBox()
-        self._openai_model_combo.addItems(["gpt-5-mini"])
+        self._openai_model_combo.addItems(["gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"])
         form.addRow("OpenAI model:", self._openai_model_combo)
 
         self._groq_api_key_edit = QLineEdit()
@@ -170,7 +171,12 @@ class SettingsDialog(QDialog):
 
         self._groq_model_combo = QComboBox()
         self._groq_model_combo.addItems(
-            ["llama-3.1-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+            [
+                "openai/gpt-oss-20b",
+                "llama-3.1-70b-versatile",
+                "llama-3.1-8b-instant",
+                "mixtral-8x7b-32768",
+            ]
         )
         form.addRow("Groq model:", self._groq_model_combo)
 
@@ -201,6 +207,15 @@ class SettingsDialog(QDialog):
             "e.g. Python developer interview at Google"
         )
         form.addRow("Session context:", self._session_ctx)
+
+        # Test connection button
+        test_btn = QPushButton("Test API Connection")
+        test_btn.clicked.connect(self._test_api_connection)
+        form.addRow("", test_btn)
+
+        self._test_result_label = QLabel("")
+        self._test_result_label.setWordWrap(True)
+        form.addRow("", self._test_result_label)
 
         return w
 
@@ -300,12 +315,12 @@ class SettingsDialog(QDialog):
         if b_idx >= 0:
             self._backend_combo.setCurrentIndex(b_idx)
         self._openai_api_key_edit.setText(ai.get("openai_api_key", ""))
-        openai_model = ai.get("openai_model", "gpt-5-mini")
+        openai_model = ai.get("openai_model", "gpt-4o-mini")
         openai_model_idx = self._openai_model_combo.findText(openai_model)
         if openai_model_idx >= 0:
             self._openai_model_combo.setCurrentIndex(openai_model_idx)
         self._groq_api_key_edit.setText(ai.get("groq_api_key", ""))
-        gm = ai.get("groq_model", "llama-3.1-70b-versatile")
+        gm = ai.get("groq_model", "openai/gpt-oss-20b")
         gm_idx = self._groq_model_combo.findText(gm)
         if gm_idx >= 0:
             self._groq_model_combo.setCurrentIndex(gm_idx)
@@ -365,6 +380,36 @@ class SettingsDialog(QDialog):
 
         self.settings_saved.emit(cfg)
         self.accept()
+
+    def _test_api_connection(self) -> None:
+        """Test the API connection with the currently configured settings."""
+        self._test_result_label.setText("Testing API connection...")
+        self._test_result_label.setStyleSheet("color: #888;")
+
+        # Build a temporary config with current dialog values
+        test_config = copy.deepcopy(self._config)
+        test_config.setdefault("ai", {})
+        test_config["ai"]["openai_api_key"] = self._openai_api_key_edit.text()
+        test_config["ai"]["openai_model"] = self._openai_model_combo.currentText()
+        test_config["ai"]["groq_api_key"] = self._groq_api_key_edit.text()
+        test_config["ai"]["groq_model"] = self._groq_model_combo.currentText()
+        test_config["ai"]["backend"] = self._backend_combo.currentText()
+
+        # Test the connection
+        try:
+            from ghostmic.core.ai_engine import AIThread
+            ai_test = AIThread(test_config)
+            success, backend, message = ai_test.test_api_connectivity()
+            
+            if success:
+                self._test_result_label.setText(f"✓ Connected to {backend.title()}!\n{message[:200]}")
+                self._test_result_label.setStyleSheet("color: #4ade80;")
+            else:
+                self._test_result_label.setText(f"✗ Connection Failed ({backend}):\n{message}")
+                self._test_result_label.setStyleSheet("color: #ef4444;")
+        except Exception as e:
+            self._test_result_label.setText(f"✗ Error testing connection:\n{str(e)[:200]}")
+            self._test_result_label.setStyleSheet("color: #ef4444;")
 
     # ------------------------------------------------------------------
     # Device helpers

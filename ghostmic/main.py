@@ -235,6 +235,7 @@ class GhostMicApp:
         self._start_model_loader()
         self._start_audio_threads()
         self._setup_hotkeys()
+        self._test_api_startup()  # Test API connectivity and display result
 
         if not self._args.minimized and self._window:
             self._window.show()
@@ -254,6 +255,30 @@ class GhostMicApp:
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)
+
+    def _test_api_startup(self) -> None:
+        """Test API connectivity on startup and display result."""
+        from ghostmic.core.ai_engine import AIThread
+        
+        if not self._window:
+            return
+        
+        # Create temporary AI thread for testing
+        ai_test = AIThread(self._config.get("ai", {}))
+        success, backend, message = ai_test.test_api_connectivity()
+        
+        # Update status indicator
+        if success:
+            self._window.set_api_status(True, backend.title())
+            # Display startup test response
+            self._window.ai_panel.start_response()
+            self._window.ai_panel.finish_response(message)
+            self._logger.info("Startup API test successful: %s", backend)
+        else:
+            self._window.set_api_status(False)
+            # Display error in AI panel
+            self._window.ai_panel.show_error(f"API Connection Failed: {message}")
+            self._logger.warning("Startup API test failed: %s", message)
 
     # ------------------------------------------------------------------
     # System tray

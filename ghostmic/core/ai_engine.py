@@ -129,48 +129,75 @@ class AIThread(QThread):  # type: ignore[misc]
     # ------------------------------------------------------------------
 
     def _generate(self, transcript: List[TranscriptSegment]) -> None:
-        backend = self._config.get("backend", "openai")
+        # Support both old 'backend' and new 'main_backend' config for backward compatibility
+        main_backend = self._config.get("main_backend") or self._config.get("backend", "openai")
+        fallback_backend = self._config.get("fallback_backend", "groq")
+        enable_fallback = self._config.get("enable_fallback", True)
+        
         context = self._build_context(transcript)
         system_prompt = self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
         temperature = float(self._config.get("temperature", 0.7))
 
+        # Try main backend first
+        success = self._try_generate(main_backend, context, system_prompt, temperature)
+        
+        # If main failed and fallback is enabled, try fallback backend
+        if not success and enable_fallback and fallback_backend != main_backend:
+            logger.info("AIThread: main backend (%s) failed, trying fallback (%s)", 
+                       main_backend, fallback_backend)
+            success = self._try_generate(fallback_backend, context, system_prompt, temperature)
+        
+        if not success:
+            logger.error("AIThread: both main and fallback backends failed")
+
+    def _try_generate(self, backend: str, context: str, system_prompt: str, 
+                     temperature: float) -> bool:
+        """Try to generate response using specified backend.
+        
+        Returns True if successful, False if failed.
+        """
         try:
             if backend == "openai":
                 self._generate_openai(context, system_prompt, temperature)
+                return True
             elif backend == "groq":
                 self._generate_groq(context, system_prompt, temperature)
+                return True
             else:
                 logger.error("AIThread: unknown backend %r", backend)
+                return False
         except Exception as exc:  # pylint: disable=broad-except
-            msg = f"AI generation error: {exc}"
-            logger.error(msg, exc_info=True)
-            if pyqtSignal is not None:
-                self.ai_error.emit(str(exc))  # type: ignore[attr-defined]
+            logger.debug("AIThread: backend %r failed: %s", backend, exc)
+            return False
 
     def _generate_openai(
         self, context: str, system_prompt: str, temperature: float
     ) -> None:
         try:
             from openai import OpenAI  # type: ignore[import]
-        except ImportError:
+        except ImportError as e:
+            error_msg = "openai package not installed. Run: pip install openai"
             if pyqtSignal is not None:
-                self.ai_error.emit(  # type: ignore[attr-defined]
-                    "openai package not installed. Run: pip install openai"
-                )
-            return
+                self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
+            raise RuntimeError(error_msg) from e
 
         api_key = self._config.get("openai_api_key", "")
         if not api_key:
+            error_msg = "OpenAI API key not set. Add it in Settings -> AI."
             if pyqtSignal is not None:
-                self.ai_error.emit(  # type: ignore[attr-defined]
-                    "OpenAI API key not set. Add it in Settings -> AI."
-                )
-            return
+                self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
+            raise ValueError(error_msg)
 
-        model = self._config.get("openai_model", "gpt-5-mini")
+        model = self._config.get("openai_model", "gpt-4o-mini")
         client = OpenAI(api_key=api_key)
 
         full_response: List[str] = []
+        # OpenAI API Parameters (current as of 2026):
+        # - model: gpt-4o-mini is the configured low-latency default; override in config.json if needed
+        # - messages: standard chat completion format (system + user roles)
+        # - temperature: 0.7 balances creativity and consistency (0.0=deterministic, 1.0=maximum randomness)
+        # - max_tokens: 512 is sufficient for interview/meeting suggestions
+        # - stream: enables incremental token delivery for real-time response display
         stream = client.chat.completions.create(
             model=model,
             messages=[
@@ -201,39 +228,46 @@ class AIThread(QThread):  # type: ignore[misc]
         self, context: str, system_prompt: str, temperature: float
     ) -> None:
         try:
-            from groq import Groq  # type: ignore[import]
-        except ImportError:
+            from openai import OpenAI  # type: ignore[import]
+        except ImportError as e:
+            error_msg = "openai package not installed. Run: pip install openai"
             if pyqtSignal is not None:
-                self.ai_error.emit(  # type: ignore[attr-defined]
-                    "groq package not installed. Run: pip install groq"
-                )
-            return
+                self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
+            raise RuntimeError(error_msg) from e
 
         api_key = self._config.get("groq_api_key", "")
         if not api_key:
+            error_msg = "Groq API key not set. Add it in Settings → AI."
             if pyqtSignal is not None:
-                self.ai_error.emit(  # type: ignore[attr-defined]
-                    "Groq API key not set. Add it in Settings → AI."
-                )
-            return
+                self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
+            raise ValueError(error_msg)
 
-        model = self._config.get("groq_model", "llama-3.1-70b-versatile")
-        client = Groq(api_key=api_key)
+        model = self._config.get("groq_model", "openai/gpt-oss-20b")
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
 
         full_response: List[str] = []
-        stream = client.chat.completions.create(
+        # Groq API Parameters (current as of 2026):
+        # - base_url: https://api.groq.com/openai/v1 uses Groq's OpenAI-compatible endpoint
+        # - model: openai/gpt-oss-20b matches the documented Groq example and is configurable
+        # - responses.create: current OpenAI-compatible Responses API
+        # - max_output_tokens: 512 is sufficient for interview/meeting suggestions
+        # - stream: enables incremental token delivery for real-time response display
+        stream = client.responses.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context},
-            ],
+            instructions=system_prompt,
+            input=context,
             temperature=temperature,
-            max_tokens=512,
+            max_output_tokens=512,
             stream=True,
         )
 
         for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
+            if getattr(chunk, "type", None) != "response.output_text.delta":
+                continue
+            delta = getattr(chunk, "delta", "") or ""
             if delta:
                 full_response.append(delta)
                 if self._on_chunk:
@@ -246,6 +280,81 @@ class AIThread(QThread):  # type: ignore[misc]
             self._on_ready(complete)
         if pyqtSignal is not None:
             self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # Connectivity Test (for startup and manual testing)
+    # ------------------------------------------------------------------
+
+    def test_api_connectivity(self, backend: Optional[str] = None) -> tuple:
+        """Test API connectivity by sending a simple message.
+        
+        Args:
+            backend: Specific backend to test, or None to test main backend.
+            
+        Returns:
+            Tuple of (success: bool, backend_used: str, message_or_error: str)
+        """
+        test_backend = backend or self._config.get("main_backend") or self._config.get("backend", "openai")
+        test_msg = self._config.get("api_test_message", "Hi, testing API connectivity")
+        
+        try:
+            if test_backend == "openai":
+                response = self._test_openai(test_msg)
+                return (True, "openai", response)
+            elif test_backend == "groq":
+                response = self._test_groq(test_msg)
+                return (True, "groq", response)
+            else:
+                return (False, test_backend, f"Unknown backend: {test_backend}")
+        except Exception as exc:
+            return (False, test_backend, f"Connection failed: {exc}")
+
+    def _test_openai(self, message: str) -> str:
+        """Send test message to OpenAI and return response."""
+        try:
+            from openai import OpenAI  # type: ignore[import]
+        except ImportError as e:
+            raise RuntimeError("openai package not installed") from e
+
+        api_key = self._config.get("openai_api_key", "")
+        if not api_key:
+            raise ValueError("OpenAI API key not set")
+
+        model = self._config.get("openai_model", "gpt-4o-mini")
+        client = OpenAI(api_key=api_key)
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": message}],
+            temperature=0.7,
+            max_tokens=100,
+        )
+        return response.choices[0].message.content or ""
+
+    def _test_groq(self, message: str) -> str:
+        """Send test message to Groq and return response."""
+        try:
+            from openai import OpenAI  # type: ignore[import]
+        except ImportError as e:
+            raise RuntimeError("openai package not installed") from e
+
+        api_key = self._config.get("groq_api_key", "")
+        if not api_key:
+            raise ValueError("Groq API key not set")
+
+        model = self._config.get("groq_model", "openai/gpt-oss-20b")
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
+
+        response = client.responses.create(
+            model=model,
+            input=message,
+            temperature=0.7,
+            max_output_tokens=100,
+        )
+        return getattr(response, "output_text", "") or ""
 
     # ------------------------------------------------------------------
     # Context formatting
