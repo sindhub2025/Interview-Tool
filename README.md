@@ -13,7 +13,7 @@
 | 🎙 Dual audio capture | WASAPI loopback (system audio) + microphone via `pyaudiowpatch` & `sounddevice` |
 | 🗣 Voice Activity Detection | Silero VAD — only transcribes actual speech, not silence |
 | 📝 Real-time transcription | `faster-whisper` (base.en by default, CPU int8 or CUDA float16) |
-| 🤖 AI suggestions | OpenAI GPT-5 Mini (primary) **or** Groq API (backup) |
+| 🤖 AI suggestions | Groq API (active provider) |
 | ⌨ Global hotkeys | `Ctrl+Shift+G` record · `Ctrl+Shift+H` hide · `Ctrl+G` AI generate |
 | 🔧 Settings dialog | Tabs for Audio, AI, Appearance, Hotkeys — also stealthed |
 | 💾 Auto-save | Transcript saved to `~/.ghostmic/` on exit |
@@ -32,7 +32,7 @@ ghostmic/
 │   ├── audio_capture.py      # WASAPI loopback + mic capture (QThread)
 │   ├── vad.py                # Silero VAD state machine (QThread)
 │   ├── transcription_engine.py  # faster-whisper (QThread)
-│   ├── ai_engine.py          # OpenAI / Groq AI response (QThread)
+│   ├── ai_engine.py          # Groq AI response (QThread)
 │   └── stealth.py            # SetWindowDisplayAffinity logic
 ├── ui/
 │   ├── main_window.py        # Frameless overlay window
@@ -102,9 +102,10 @@ git push origin v1.0.0
 
 1. Open **Settings** (gear icon or `⚙` in the overlay).
 2. **Audio** tab → select your microphone and loopback device.
-3. **AI** tab → paste your [OpenAI API key](https://platform.openai.com)
-  for GPT-5 Mini, or switch backend to Groq as backup.
+3. **AI** tab → paste your Groq API key from `console.groq.com`.
 4. Click **OK** and press **⏺** (or `Ctrl+Shift+G`) to start recording.
+
+To re-enable OpenAI later, set `ai.expose_openai_provider` to `true` in `ghostmic/config.json`.
 
 ---
 

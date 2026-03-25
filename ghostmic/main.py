@@ -78,7 +78,11 @@ def _default_config() -> dict:
     """Return a hardcoded minimal default configuration."""
     return {
         "ai": {
-            "backend": "openai",
+            "backend": "groq",
+            "main_backend": "groq",
+            "fallback_backend": "groq",
+            "enable_fallback": False,
+            "expose_openai_provider": False,
             "openai_api_key": "",
             "openai_model": "gpt-5-mini",
             "groq_api_key": "",
@@ -159,8 +163,16 @@ def _load_config(path: str) -> dict:
     if isinstance(ai_cfg, dict):
         ai_cfg.pop("ollama_model", None)
         ai_cfg.pop("ollama_url", None)
+        expose_openai = bool(ai_cfg.get("expose_openai_provider", False))
         if ai_cfg.get("backend") == "ollama":
-            ai_cfg["backend"] = "openai"
+            ai_cfg["backend"] = "openai" if expose_openai else "groq"
+
+        # Groq-only mode unless the feature flag re-exposes OpenAI.
+        if not expose_openai:
+            ai_cfg["backend"] = "groq"
+            ai_cfg["main_backend"] = "groq"
+            ai_cfg["fallback_backend"] = "groq"
+            ai_cfg["enable_fallback"] = False
 
     return cfg
 

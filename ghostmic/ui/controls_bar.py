@@ -24,9 +24,9 @@ class APIStatusIndicator(QWidget):
         super().__init__(parent)
         self.setFixedSize(140, 20)
         self._connected = False
-        self._backend = "OpenAI"
+        self._backend = "Groq"
 
-    def set_status(self, connected: bool, backend: str = "OpenAI") -> None:
+    def set_status(self, connected: bool, backend: str = "Groq") -> None:
         """Update the connection status."""
         self._connected = connected
         self._backend = backend
@@ -149,7 +149,7 @@ class ControlsBar(QWidget):
             f"color: {color}; font-size: 9pt;"
         )
 
-    def set_api_status(self, connected: bool, backend: str = "OpenAI") -> None:
+    def set_api_status(self, connected: bool, backend: str = "Groq") -> None:
         """Update the API connection status indicator."""
         self._api_status.set_status(connected, backend)
 

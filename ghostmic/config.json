@@ -1,9 +1,10 @@
 {
   "ai": {
-    "backend": "openai",
-    "main_backend": "openai",
+    "backend": "groq",
+    "main_backend": "groq",
     "fallback_backend": "groq",
-    "enable_fallback": true,
+    "enable_fallback": false,
+    "expose_openai_provider": false,
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",
     "groq_api_key": "",

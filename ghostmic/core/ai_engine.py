@@ -1,9 +1,8 @@
 """
 AI response engine.
 
-Supports two backends (user configurable via config.json):
-    - OpenAI API (default)
-    - Groq API (manual backup)
+Groq is the active backend exposed in the app.
+OpenAI code paths are intentionally preserved for future re-enable.
 
 Runs in a dedicated QThread and emits streaming response tokens.
 """
@@ -128,11 +127,37 @@ class AIThread(QThread):  # type: ignore[misc]
     # Generation
     # ------------------------------------------------------------------
 
+    def _resolve_active_backend(self, requested_backend: Optional[str]) -> str:
+        """Return the active backend for execution.
+
+        OpenAI is available only when expose_openai_provider is enabled.
+        Otherwise, runtime execution is normalized to Groq while OpenAI
+        code remains in the codebase.
+        """
+        expose_openai = bool(self._config.get("expose_openai_provider", False))
+
+        if requested_backend in (None, "", "groq"):
+            return "groq"
+
+        if requested_backend == "openai":
+            if expose_openai:
+                return "openai"
+            logger.info("AIThread: OpenAI backend is hidden; using 'groq'")
+            return "groq"
+
+        logger.info(
+            "AIThread: backend %r is unsupported; using 'groq'",
+            requested_backend,
+        )
+        return "groq"
+
     def _generate(self, transcript: List[TranscriptSegment]) -> None:
-        # Support both old 'backend' and new 'main_backend' config for backward compatibility
-        main_backend = self._config.get("main_backend") or self._config.get("backend", "openai")
-        fallback_backend = self._config.get("fallback_backend", "groq")
-        enable_fallback = self._config.get("enable_fallback", True)
+        # Keep old/new config keys for compatibility, then normalize to active provider.
+        requested_main = self._config.get("main_backend") or self._config.get("backend", "groq")
+        requested_fallback = self._config.get("fallback_backend", "groq")
+        main_backend = self._resolve_active_backend(requested_main)
+        fallback_backend = self._resolve_active_backend(requested_fallback)
+        enable_fallback = bool(self._config.get("enable_fallback", False))
         
         context = self._build_context(transcript)
         system_prompt = self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
@@ -413,7 +438,12 @@ class AIThread(QThread):  # type: ignore[misc]
         Returns:
             Tuple of (success: bool, backend_used: str, message_or_error: str)
         """
-        test_backend = backend or self._config.get("main_backend") or self._config.get("backend", "openai")
+        requested_backend = (
+            backend
+            or self._config.get("main_backend")
+            or self._config.get("backend", "groq")
+        )
+        test_backend = self._resolve_active_backend(requested_backend)
         test_msg = self._config.get("api_test_message", "Hi, testing API connectivity")
         
         try:

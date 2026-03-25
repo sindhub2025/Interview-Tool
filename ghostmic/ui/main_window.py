@@ -319,7 +319,7 @@ class MainWindow(QMainWindow):
         else:
             self._controls.set_status(text)
 
-    def set_api_status(self, connected: bool, backend: str = "OpenAI") -> None:
+    def set_api_status(self, connected: bool, backend: str = "Groq") -> None:
         """Update API connection status indicator."""
         self._controls.set_api_status(connected, backend)
 

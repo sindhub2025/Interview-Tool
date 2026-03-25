@@ -9,7 +9,7 @@ import copy
 import sys
 from typing import Any, Dict
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -66,6 +66,9 @@ class SettingsDialog(QDialog):
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
         self._config = config
+        self._expose_openai_provider = bool(
+            self._config.get("ai", {}).get("expose_openai_provider", False)
+        )
         self._api_test_worker: ApiConnectivityWorker | None = None
         self.setWindowTitle("GhostMic — Settings")
         self.setMinimumSize(520, 460)
@@ -171,19 +174,27 @@ class SettingsDialog(QDialog):
         form = QFormLayout(w)
 
         self._backend_combo = QComboBox()
-        self._backend_combo.addItems(["openai", "groq"])
-        form.addRow("Backend:", self._backend_combo)
+        if self._expose_openai_provider:
+            self._backend_combo.addItems(["groq", "openai"])
+            self._backend_combo.setEnabled(True)
+            form.addRow("Backend:", self._backend_combo)
+        else:
+            self._backend_combo.addItems(["groq"])
+            self._backend_combo.setEnabled(False)
+            form.addRow("Backend (fixed):", self._backend_combo)
 
         self._openai_api_key_edit = QLineEdit()
         self._openai_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._openai_api_key_edit.setPlaceholderText(
             "Get your key at platform.openai.com"
         )
-        form.addRow("OpenAI API key:", self._openai_api_key_edit)
 
         self._openai_model_combo = QComboBox()
         self._openai_model_combo.addItems(["gpt-5-mini", "gpt-5-nano", "gpt-5.4-nano"])
-        form.addRow("OpenAI model:", self._openai_model_combo)
+
+        if self._expose_openai_provider:
+            form.addRow("OpenAI API key:", self._openai_api_key_edit)
+            form.addRow("OpenAI model:", self._openai_model_combo)
 
         self._groq_api_key_edit = QLineEdit()
         self._groq_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -331,15 +342,19 @@ class SettingsDialog(QDialog):
             self._compute_combo.setCurrentIndex(c_idx)
 
         # AI
-        backend = ai.get("main_backend") or ai.get("backend", "openai")
+        backend = ai.get("main_backend") or ai.get("backend", "groq")
+        if not self._expose_openai_provider and backend != "groq":
+            backend = "groq"
         b_idx = self._backend_combo.findText(backend)
         if b_idx >= 0:
             self._backend_combo.setCurrentIndex(b_idx)
+
         self._openai_api_key_edit.setText(ai.get("openai_api_key", ""))
         openai_model = ai.get("openai_model", "gpt-5-mini")
         openai_model_idx = self._openai_model_combo.findText(openai_model)
         if openai_model_idx >= 0:
             self._openai_model_combo.setCurrentIndex(openai_model_idx)
+
         self._groq_api_key_edit.setText(ai.get("groq_api_key", ""))
         gm = ai.get("groq_model", "llama-3.3-70b-versatile")
         gm_idx = self._groq_model_combo.findText(gm)
@@ -380,11 +395,23 @@ class SettingsDialog(QDialog):
 
         # AI
         cfg.setdefault("ai", {})
-        selected_backend = self._backend_combo.currentText()
+        cfg["ai"]["expose_openai_provider"] = self._expose_openai_provider
+
+        selected_backend = (
+            self._backend_combo.currentText()
+            if self._expose_openai_provider
+            else "groq"
+        )
         cfg["ai"]["backend"] = selected_backend
         cfg["ai"]["main_backend"] = selected_backend
-        cfg["ai"]["openai_api_key"] = self._openai_api_key_edit.text()
-        cfg["ai"]["openai_model"] = self._openai_model_combo.currentText()
+        if not self._expose_openai_provider:
+            cfg["ai"]["fallback_backend"] = "groq"
+            cfg["ai"]["enable_fallback"] = False
+
+        if self._expose_openai_provider:
+            cfg["ai"]["openai_api_key"] = self._openai_api_key_edit.text()
+            cfg["ai"]["openai_model"] = self._openai_model_combo.currentText()
+
         cfg["ai"]["groq_api_key"] = self._groq_api_key_edit.text()
         cfg["ai"]["groq_model"] = self._groq_model_combo.currentText()
         cfg["ai"].pop("ollama_model", None)
@@ -416,13 +443,24 @@ class SettingsDialog(QDialog):
         # Build a temporary config with current dialog values
         test_config = copy.deepcopy(self._config)
         test_config.setdefault("ai", {})
-        test_config["ai"]["openai_api_key"] = self._openai_api_key_edit.text()
-        test_config["ai"]["openai_model"] = self._openai_model_combo.currentText()
+        test_config["ai"]["expose_openai_provider"] = self._expose_openai_provider
+
+        if self._expose_openai_provider:
+            test_config["ai"]["openai_api_key"] = self._openai_api_key_edit.text()
+            test_config["ai"]["openai_model"] = self._openai_model_combo.currentText()
+
         test_config["ai"]["groq_api_key"] = self._groq_api_key_edit.text()
         test_config["ai"]["groq_model"] = self._groq_model_combo.currentText()
-        selected_backend = self._backend_combo.currentText()
+        selected_backend = (
+            self._backend_combo.currentText()
+            if self._expose_openai_provider
+            else "groq"
+        )
         test_config["ai"]["backend"] = selected_backend
         test_config["ai"]["main_backend"] = selected_backend
+        if not self._expose_openai_provider:
+            test_config["ai"]["fallback_backend"] = "groq"
+            test_config["ai"]["enable_fallback"] = False
 
         ai_test_config = test_config.get("ai")
         if not isinstance(ai_test_config, dict):
