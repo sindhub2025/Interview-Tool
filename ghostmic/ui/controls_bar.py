@@ -114,7 +114,7 @@ class ControlsBar(QWidget):
         settings_btn.setObjectName("settings_btn")
         settings_btn.setFixedSize(32, 32)
         settings_btn.setToolTip("Settings")
-        settings_btn.clicked.connect(self.settings_requested)
+        settings_btn.clicked.connect(self._on_settings_clicked)
         layout.addWidget(settings_btn)
 
     # ------------------------------------------------------------------
@@ -163,3 +163,6 @@ class ControlsBar(QWidget):
     def _on_record_clicked(self, checked: bool) -> None:
         self.set_recording(checked)
         self.record_toggled.emit(checked)
+
+    def _on_settings_clicked(self) -> None:
+        self.settings_requested.emit()

@@ -243,7 +243,6 @@ class MainWindow(QMainWindow):
         self._controls = ControlsBar()
         self._controls.record_toggled.connect(self._on_record_toggled)
         self._controls.mode_changed.connect(self._on_mode_changed)
-        self._controls.settings_requested.connect(self._show_settings)
         root_layout.addWidget(self._controls)
 
         # Content splitter (transcript above, AI below)

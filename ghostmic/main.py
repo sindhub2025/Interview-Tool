@@ -31,8 +31,22 @@ from ghostmic.utils.logger import configure_logging, get_logger
 # for module-level imports that may log warnings.
 _early_logger = get_logger("ghostmic.startup")
 
-# ── Default config path ───────────────────────────────────────────────
-DEFAULT_CONFIG_PATH = os.path.join(_HERE, "config.json")
+def _default_user_config_path() -> str:
+    """Return the writable user config path for the current platform."""
+    if sys.platform == "win32":
+        base_dir = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        if base_dir:
+            return os.path.join(base_dir, "GhostMic", "config.json")
+    return os.path.join(os.path.expanduser("~"), ".ghostmic", "config.json")
+
+
+# ── Config paths ──────────────────────────────────────────────────────
+BUNDLED_CONFIG_PATH = os.path.join(_HERE, "config.json")
+DEFAULT_CONFIG_PATH = (
+    _default_user_config_path()
+    if getattr(sys, "frozen", False)
+    else BUNDLED_CONFIG_PATH
+)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +133,7 @@ def _load_config(path: str) -> dict:
 
     if not os.path.exists(path):
         # Try to read the bundled default config.json
-        default_path = DEFAULT_CONFIG_PATH
+        default_path = BUNDLED_CONFIG_PATH
         cfg: dict
         if os.path.exists(default_path):
             with open(default_path, encoding="utf-8") as fh:
@@ -153,6 +167,7 @@ def _load_config(path: str) -> dict:
 
 def _save_config(config: dict, path: str) -> None:
     try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(config, fh, indent=2)
     except OSError as exc:
