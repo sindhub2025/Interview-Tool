@@ -10,6 +10,8 @@ hiddenimports = [
     "torch",
     "torchaudio",
     "faster_whisper",
+    "ctranslate2",
+    "onnxruntime",
     "pyaudiowpatch",
     "pynput",
     "sounddevice",
@@ -20,6 +22,7 @@ hiddenimports = [
 
 # faster_whisper relies on dynamic imports; include submodules explicitly.
 hiddenimports += collect_submodules("faster_whisper")
+hiddenimports += collect_submodules("ctranslate2")
 
 binaries = []
 binaries += collect_dynamic_libs("torch")

@@ -77,3 +77,8 @@ def get_logger(name: str) -> logging.Logger:
         A :class:`logging.Logger` instance.
     """
     return logging.getLogger(name)
+
+
+def get_log_file_path() -> str:
+    """Return the absolute path of the GhostMic log file."""
+    return _LOG_FILE

@@ -145,6 +145,7 @@ class ControlsBar(QWidget):
     def set_status(self, text: str, color: str = TEXT_SECONDARY) -> None:
         """Update the status label."""
         self._status_label.setText(text)
+        self._status_label.setToolTip(text)
         self._status_label.setStyleSheet(
             f"color: {color}; font-size: 9pt;"
         )

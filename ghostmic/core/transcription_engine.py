@@ -67,25 +67,92 @@ class ModelLoader(QThread):  # type: ignore[misc]
             from faster_whisper import WhisperModel  # type: ignore[import]
 
             resolved_device = self._resolve_device()
-            self._emit_progress(
-                f"Initialising model on {resolved_device} ({self.compute_type}) …"
+            errors: List[str] = []
+            for device, compute_type in self._candidate_load_configs(resolved_device):
+                self._emit_progress(
+                    f"Initialising model on {device} ({compute_type}) …"
+                )
+                try:
+                    self.model = WhisperModel(
+                        self.model_size,
+                        device=device,
+                        compute_type=compute_type,
+                    )
+                    self._emit_progress("Whisper model ready.")
+                    if pyqtSignal is not None:
+                        self.model_ready.emit()  # type: ignore[attr-defined]
+                    logger.info(
+                        "ModelLoader: model '%s' loaded on %s (%s).",
+                        self.model_size,
+                        device,
+                        compute_type,
+                    )
+                    return
+                except Exception as exc:  # pylint: disable=broad-except
+                    diagnostic = self._diagnose_load_error(exc)
+                    errors.append(
+                        f"{device}/{compute_type}: {exc}"
+                    )
+                    logger.error(
+                        "ModelLoader: load attempt failed on %s (%s): %s",
+                        device,
+                        compute_type,
+                        diagnostic,
+                        exc_info=True,
+                    )
+
+            detail = "; ".join(errors) if errors else "unknown error"
+            msg = (
+                "Failed to load Whisper model after fallback attempts. "
+                f"Attempts: {detail}"
             )
-            self.model = WhisperModel(
-                self.model_size,
-                device=resolved_device,
-                compute_type=self.compute_type,
-            )
-            self._emit_progress("Whisper model ready.")
+            logger.error("%s", msg)
             if pyqtSignal is not None:
-                self.model_ready.emit()  # type: ignore[attr-defined]
-            logger.info(
-                "ModelLoader: model '%s' loaded on %s.", self.model_size, resolved_device
-            )
+                self.model_error.emit(msg)  # type: ignore[attr-defined]
         except Exception as exc:  # pylint: disable=broad-except
-            msg = f"Failed to load Whisper model: {exc}"
+            diagnostic = self._diagnose_load_error(exc)
+            msg = f"Failed to load Whisper model: {exc}. {diagnostic}"
             logger.error(msg, exc_info=True)
             if pyqtSignal is not None:
-                self.model_error.emit(str(exc))  # type: ignore[attr-defined]
+                self.model_error.emit(msg)  # type: ignore[attr-defined]
+
+    def _candidate_load_configs(self, resolved_device: str) -> List[Tuple[str, str]]:
+        candidates: List[Tuple[str, str]] = []
+        preferred = (resolved_device, self.compute_type)
+        candidates.append(preferred)
+
+        if resolved_device == "cuda":
+            fallback_chain = ["float16", "int8_float16", "int8", "float32"]
+        else:
+            fallback_chain = ["int8", "float32"]
+
+        for compute_type in fallback_chain:
+            item = (resolved_device, compute_type)
+            if item not in candidates:
+                candidates.append(item)
+
+        if resolved_device != "cpu":
+            cpu_fallbacks = ["int8", "float32"]
+            for compute_type in cpu_fallbacks:
+                item = ("cpu", compute_type)
+                if item not in candidates:
+                    candidates.append(item)
+
+        return candidates
+
+    def _diagnose_load_error(self, exc: Exception) -> str:
+        text = str(exc).lower()
+        if "winerror 1114" in text or "dynamic link library" in text:
+            return (
+                "Windows DLL initialisation failed. Install/repair the Microsoft "
+                "Visual C++ 2015-2022 x64 Redistributable and ensure PyInstaller "
+                "includes torch/ctranslate2/onnxruntime runtime DLLs."
+            )
+        if "dll load failed" in text:
+            return "A required native dependency DLL is missing or incompatible."
+        if "no module named" in text:
+            return "A Python dependency is missing from the runtime environment."
+        return "See logs for the full traceback and failing dependency."
 
     def _resolve_device(self) -> str:
         if self.device != "auto":
@@ -94,8 +161,11 @@ class ModelLoader(QThread):  # type: ignore[misc]
             import torch  # type: ignore[import]
             if torch.cuda.is_available():
                 return "cuda"
-        except ImportError:
-            pass
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "ModelLoader: failed to probe CUDA via torch (%s). Falling back to CPU.",
+                exc,
+            )
         return "cpu"
 
     def _emit_progress(self, msg: str) -> None:
@@ -144,6 +214,12 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    def has_model(self) -> bool:
+        return self._model is not None
+
+    def is_ready(self) -> bool:
+        return self.isRunning() and self.has_model() and not self._stop_event.is_set()
 
     def push_segment(self, audio: np.ndarray, source: str) -> None:
         """Enqueue an audio segment for transcription."""

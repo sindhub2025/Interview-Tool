@@ -25,7 +25,7 @@ _ROOT = os.path.dirname(_HERE)
 if not getattr(sys, "frozen", False) and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from ghostmic.utils.logger import configure_logging, get_logger
+from ghostmic.utils.logger import configure_logging, get_log_file_path, get_logger
 
 # Logger is set up in _main() after parsing --debug, but we need it here
 # for module-level imports that may log warnings.
@@ -240,6 +240,9 @@ class GhostMicApp:
         self._tray = None
         self._window = None
         self._transcript_history: List = []
+        self._model_ready = False
+        self._model_error_message: Optional[str] = None
+        self._last_transcription_drop_log = 0.0
 
     def run(self) -> int:
         """Initialise everything and start the Qt event loop."""
@@ -329,10 +332,18 @@ class GhostMicApp:
             from ghostmic.core.transcription_engine import ModelLoader, TranscriptionThread
 
             tcfg = self._config.get("transcription", {})
+            self._model_ready = False
+            self._model_error_message = None
             loader = ModelLoader(
                 model_size=tcfg.get("model_size", "base.en"),
                 compute_type=tcfg.get("compute_type", "int8"),
                 device="auto",
+            )
+            self._logger.info(
+                "Initialising model loader: model=%s compute_type=%s device=%s",
+                loader.model_size,
+                loader.compute_type,
+                loader.device,
             )
 
             # Set up transcription thread
@@ -348,16 +359,28 @@ class GhostMicApp:
             )
 
             def _on_model_ready():
+                self._logger.info("Model loader reported ready.")
+                self._model_ready = True
+                self._model_error_message = None
                 self._transcription_thread.set_model(loader.model)
-                self._transcription_thread.start()
+                if not self._transcription_thread.isRunning():
+                    self._transcription_thread.start()
+                    self._logger.info("Transcription thread started.")
                 if self._window:
                     self._window.controls.set_status("Model ready", "#3fb950")
 
             def _on_model_error(msg: str):
+                self._model_ready = False
+                self._model_error_message = msg
+                log_path = get_log_file_path()
                 self._logger.error("Model load error: %s", msg)
+                self._logger.error("Model diagnostics log path: %s", log_path)
                 if self._window:
                     self._window.controls.set_status(
-                        f"Model error: {msg[:40]}", "#f85149"
+                        "Model error. See AI panel/log file.", "#f85149"
+                    )
+                    self._window.ai_panel.show_error(
+                        f"Model load failed. {msg}\n\nLog file: {log_path}"
                     )
 
             loader.model_ready.connect(_on_model_ready)
@@ -368,8 +391,11 @@ class GhostMicApp:
 
             self._model_loader = loader
             loader.start()
+            self._logger.info("Model loader thread started.")
 
         except ImportError as exc:
+            self._model_ready = False
+            self._model_error_message = str(exc)
             self._logger.warning("faster-whisper not available: %s", exc)
 
     # ------------------------------------------------------------------
@@ -413,13 +439,17 @@ class GhostMicApp:
         except ImportError as exc:
             self._logger.warning("Audio libraries not available: %s", exc)
 
-    def _start_audio_capture(self) -> None:
+    def _start_audio_capture(self) -> bool:
+        if not self._is_transcription_ready():
+            return False
+
         if self._vad_thread and not self._vad_thread.isRunning():
             self._vad_thread.start()
         if self._sys_audio_thread and not self._sys_audio_thread.isRunning():
             self._sys_audio_thread.start()
         if self._mic_thread and not self._mic_thread.isRunning():
             self._mic_thread.start()
+        return True
 
     def _stop_audio_capture(self) -> None:
         for thread in (self._sys_audio_thread, self._mic_thread):
@@ -481,9 +511,46 @@ class GhostMicApp:
     # Signal handlers
     # ------------------------------------------------------------------
 
+    def _is_transcription_ready(self) -> bool:
+        return bool(
+            self._model_ready
+            and self._transcription_thread
+            and self._transcription_thread.is_ready()
+        )
+
     def _on_record_toggled(self, recording: bool) -> None:
         if recording:
-            self._start_audio_capture()
+            if self._model_loader and self._model_loader.isRunning():
+                self._logger.info("Recording blocked: model is still loading.")
+                if self._window:
+                    self._window.controls.set_recording(False)
+                    self._window.controls.set_status(
+                        "Model is still loading. Please wait.", "#f0883e"
+                    )
+                if self._tray:
+                    self._tray.set_recording(False)
+                return
+
+            if not self._start_audio_capture():
+                self._logger.warning(
+                    "Recording blocked: transcription model unavailable. last_error=%s",
+                    self._model_error_message,
+                )
+                if self._window:
+                    self._window.controls.set_recording(False)
+                    self._window.controls.set_status(
+                        "Transcription unavailable. Check AI panel/logs.",
+                        "#f85149",
+                    )
+                    if self._model_error_message:
+                        self._window.ai_panel.show_error(
+                            "Cannot start recording for transcription until model is ready.\n"
+                            f"Reason: {self._model_error_message}"
+                        )
+                if self._tray:
+                    self._tray.set_recording(False)
+                return
+
             self._ensure_ai_thread()
             if self._tray:
                 self._tray.set_recording(True)
@@ -493,8 +560,25 @@ class GhostMicApp:
                 self._tray.set_recording(False)
 
     def _on_speech_segment(self, audio, source: str) -> None:
-        if self._transcription_thread:
-            self._transcription_thread.push_segment(audio, source)
+        if not self._transcription_thread:
+            now = time.time()
+            if now - self._last_transcription_drop_log >= 5.0:
+                self._logger.warning(
+                    "Dropping speech segment because transcription thread is unavailable."
+                )
+                self._last_transcription_drop_log = now
+            return
+
+        if not self._transcription_thread.is_ready():
+            now = time.time()
+            if now - self._last_transcription_drop_log >= 5.0:
+                self._logger.warning(
+                    "Dropping speech segment because transcription model is not ready."
+                )
+                self._last_transcription_drop_log = now
+            return
+
+        self._transcription_thread.push_segment(audio, source)
 
     def _on_transcribing(self, source: str) -> None:
         if self._window:
