@@ -102,6 +102,14 @@ def _default_config() -> dict:
             "compute_type": "int8",
             "language": "en",
             "beam_size": 3,
+            "remote_fallback": True,
+            "remote_backend": "auto",
+            "remote_model_groq": "whisper-large-v3-turbo",
+            "remote_model_openai": "gpt-4o-mini-transcribe",
+            "auto_skip_local_on_windows_broken": True,
+            "known_local_torch_broken": False,
+            "known_local_torch_error": "",
+            "known_local_torch_marked_at": 0,
         },
         "ui": {
             "opacity": 0.95,
@@ -327,6 +335,40 @@ class GhostMicApp:
     # Whisper model loading
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_torch_dll_failure(msg: str) -> bool:
+        text = msg.lower()
+        return "winerror 1114" in text and ("c10.dll" in text or "torch" in text)
+
+    def _should_skip_local_model_load(self) -> bool:
+        if sys.platform != "win32":
+            return False
+        tcfg = self._config.get("transcription", {})
+        return bool(
+            tcfg.get("auto_skip_local_on_windows_broken", True)
+            and tcfg.get("known_local_torch_broken", False)
+        )
+
+    def _mark_local_model_known_broken(self, msg: str) -> None:
+        if sys.platform != "win32" or not self._is_torch_dll_failure(msg):
+            return
+        tcfg = self._config.setdefault("transcription", {})
+        tcfg["known_local_torch_broken"] = True
+        tcfg["known_local_torch_error"] = msg[:800]
+        tcfg["known_local_torch_marked_at"] = int(time.time())
+        _save_config(self._config, self._config_path)
+        self._logger.info("Marked local torch runtime as known-broken for fast startup fallback.")
+
+    def _clear_local_model_known_broken(self) -> None:
+        tcfg = self._config.setdefault("transcription", {})
+        if not tcfg.get("known_local_torch_broken", False):
+            return
+        tcfg["known_local_torch_broken"] = False
+        tcfg["known_local_torch_error"] = ""
+        tcfg["known_local_torch_marked_at"] = 0
+        _save_config(self._config, self._config_path)
+        self._logger.info("Cleared known-broken torch marker after successful local model load.")
+
     def _start_model_loader(self) -> None:
         try:
             from ghostmic.core.transcription_engine import ModelLoader, TranscriptionThread
@@ -350,6 +392,8 @@ class GhostMicApp:
             self._transcription_thread = TranscriptionThread(
                 language=tcfg.get("language", "en"),
                 beam_size=tcfg.get("beam_size", 3),
+                ai_config=self._config.get("ai", {}),
+                remote_config=tcfg,
             )
             self._transcription_thread.transcription_ready.connect(
                 self._on_transcription_ready
@@ -358,10 +402,42 @@ class GhostMicApp:
                 self._on_transcribing
             )
 
+            if self._should_skip_local_model_load():
+                enabled, detail = self._transcription_thread.enable_remote_fallback()
+                if enabled:
+                    self._model_loader = None
+                    self._model_ready = True
+                    self._model_error_message = (
+                        self._config.get("transcription", {}).get(
+                            "known_local_torch_error",
+                            "Local torch runtime previously failed (WinError 1114).",
+                        )
+                    )
+                    if not self._transcription_thread.isRunning():
+                        self._transcription_thread.start()
+                    self._logger.warning(
+                        "Skipping local Whisper model load on Windows (known-broken torch). "
+                        "Using cloud transcription fallback (%s).",
+                        detail,
+                    )
+                    if self._window:
+                        self._window.controls.set_status(
+                            "Cloud transcription mode (local model skipped)",
+                            "#f0883e",
+                        )
+                    return
+
+                self._logger.warning(
+                    "Known-broken local model flag set, but cloud fallback is unavailable (%s). "
+                    "Attempting local model load anyway.",
+                    detail,
+                )
+
             def _on_model_ready():
                 self._logger.info("Model loader reported ready.")
                 self._model_ready = True
                 self._model_error_message = None
+                self._clear_local_model_known_broken()
                 self._transcription_thread.set_model(loader.model)
                 if not self._transcription_thread.isRunning():
                     self._transcription_thread.start()
@@ -370,11 +446,38 @@ class GhostMicApp:
                     self._window.controls.set_status("Model ready", "#3fb950")
 
             def _on_model_error(msg: str):
-                self._model_ready = False
+                self._mark_local_model_known_broken(msg)
+                fallback_enabled = False
+                fallback_detail = ""
+                if self._transcription_thread:
+                    fallback_enabled, fallback_detail = (
+                        self._transcription_thread.enable_remote_fallback()
+                    )
+
+                self._model_ready = fallback_enabled
                 self._model_error_message = msg
                 log_path = get_log_file_path()
                 self._logger.error("Model load error: %s", msg)
                 self._logger.error("Model diagnostics log path: %s", log_path)
+
+                if fallback_enabled:
+                    if not self._transcription_thread.isRunning():
+                        self._transcription_thread.start()
+                        self._logger.info(
+                            "Transcription thread started with cloud fallback (%s).",
+                            fallback_detail,
+                        )
+                    if self._window:
+                        self._window.controls.set_status(
+                            "Local model failed. Cloud transcription ready.",
+                            "#f0883e",
+                        )
+                        self._window.ai_panel.show_error(
+                            "Local Whisper model failed to load, switched to cloud transcription "
+                            f"({fallback_detail}).\n\nModel error: {msg}\n\nLog file: {log_path}"
+                        )
+                    return
+
                 if self._window:
                     self._window.controls.set_status(
                         "Model error. See AI panel/log file.", "#f85149"
@@ -573,7 +676,7 @@ class GhostMicApp:
             now = time.time()
             if now - self._last_transcription_drop_log >= 5.0:
                 self._logger.warning(
-                    "Dropping speech segment because transcription model is not ready."
+                    "Dropping speech segment because transcription backend is not ready."
                 )
                 self._last_transcription_drop_log = now
             return

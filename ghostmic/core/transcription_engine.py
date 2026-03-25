@@ -7,11 +7,13 @@ pipeline, and emits TranscriptSegment results.
 
 from __future__ import annotations
 
+import io
 import queue
 import threading
 import time
+import wave
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -197,6 +199,8 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         model=None,
         language: str = "en",
         beam_size: int = 3,
+        ai_config: Optional[dict] = None,
+        remote_config: Optional[dict] = None,
         on_result: Optional[Callable[[TranscriptSegment], None]] = None,
         parent=None,
     ) -> None:
@@ -204,9 +208,16 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         self._model = model
         self._language = language
         self._beam_size = beam_size
+        self._ai_config = ai_config or {}
+        self._remote_config = remote_config or {}
         self._on_result = on_result
         self._stop_event = threading.Event()
         self._queue: "queue.Queue[Tuple[np.ndarray, str]]" = queue.Queue()
+        self._remote_transcription_enabled = False
+        self._remote_backend: Optional[str] = None
+        self._remote_model: Optional[str] = None
+        self._remote_api_key: Optional[str] = None
+        self._remote_base_url: Optional[str] = None
 
     def set_model(self, model) -> None:
         """Attach a (newly loaded) model."""
@@ -218,8 +229,29 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
     def has_model(self) -> bool:
         return self._model is not None
 
+    def has_remote_transcriber(self) -> bool:
+        return self._remote_transcription_enabled
+
+    def enable_remote_fallback(self) -> Tuple[bool, str]:
+        """Enable cloud transcription fallback using configured AI provider."""
+        if self._remote_transcription_enabled:
+            detail = f"{self._remote_backend}/{self._remote_model}"
+            return True, detail
+
+        enabled, detail = self._configure_remote_transcriber()
+        if enabled:
+            self._remote_transcription_enabled = True
+            logger.info("TranscriptionThread: remote fallback enabled (%s)", detail)
+            return True, detail
+        logger.warning("TranscriptionThread: remote fallback unavailable (%s)", detail)
+        return False, detail
+
     def is_ready(self) -> bool:
-        return self.isRunning() and self.has_model() and not self._stop_event.is_set()
+        return bool(
+            self.isRunning()
+            and (self.has_model() or self.has_remote_transcriber())
+            and not self._stop_event.is_set()
+        )
 
     def push_segment(self, audio: np.ndarray, source: str) -> None:
         """Enqueue an audio segment for transcription."""
@@ -233,7 +265,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             except queue.Empty:
                 continue
 
-            if self._model is None:
+            if self._model is None and not self._remote_transcription_enabled:
                 logger.warning(
                     "TranscriptionThread: no model loaded – dropping segment."
                 )
@@ -256,6 +288,9 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
     ) -> Optional[TranscriptSegment]:
         """Run whisper inference on *audio* and return a TranscriptSegment."""
         try:
+            if self._model is None:
+                return self._transcribe_remote(audio, source)
+
             audio_float = audio.astype(np.float32) / 32768.0
             segments, info = self._model.transcribe(
                 audio_float,
@@ -299,3 +334,125 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("TranscriptionThread: error: %s", exc, exc_info=True)
             return None
+
+    def _configure_remote_transcriber(self) -> Tuple[bool, str]:
+        if not self._remote_config.get("remote_fallback", True):
+            return False, "disabled in transcription settings"
+
+        preferred = str(self._remote_config.get("remote_backend", "auto")).lower()
+        ai_backend = str(
+            self._ai_config.get("main_backend")
+            or self._ai_config.get("backend", "groq")
+        ).lower()
+
+        candidates: List[str] = []
+        if preferred in ("groq", "openai"):
+            candidates.append(preferred)
+        elif ai_backend in ("groq", "openai"):
+            candidates.append(ai_backend)
+
+        for provider in ("groq", "openai"):
+            if provider not in candidates:
+                candidates.append(provider)
+
+        for provider in candidates:
+            if provider == "groq":
+                api_key = str(self._ai_config.get("groq_api_key", "")).strip()
+                if not api_key:
+                    continue
+                self._remote_backend = "groq"
+                self._remote_api_key = api_key
+                self._remote_base_url = "https://api.groq.com/openai/v1"
+                self._remote_model = str(
+                    self._remote_config.get(
+                        "remote_model_groq", "whisper-large-v3-turbo"
+                    )
+                )
+                return True, f"groq/{self._remote_model}"
+
+            if provider == "openai":
+                api_key = str(self._ai_config.get("openai_api_key", "")).strip()
+                if not api_key:
+                    continue
+                self._remote_backend = "openai"
+                self._remote_api_key = api_key
+                self._remote_base_url = None
+                self._remote_model = str(
+                    self._remote_config.get(
+                        "remote_model_openai", "gpt-4o-mini-transcribe"
+                    )
+                )
+                return True, f"openai/{self._remote_model}"
+
+        return False, "no configured API key for remote transcription"
+
+    def _transcribe_remote(
+        self, audio: np.ndarray, source: str
+    ) -> Optional[TranscriptSegment]:
+        if not self._remote_transcription_enabled:
+            return None
+
+        try:
+            from openai import OpenAI  # type: ignore[import]
+        except ImportError:
+            logger.error("TranscriptionThread: openai package missing for remote STT.")
+            return None
+
+        if not self._remote_api_key or not self._remote_model:
+            logger.error("TranscriptionThread: remote STT not configured correctly.")
+            return None
+
+        try:
+            if self._remote_base_url:
+                client = OpenAI(
+                    api_key=self._remote_api_key,
+                    base_url=self._remote_base_url,
+                )
+            else:
+                client = OpenAI(api_key=self._remote_api_key)
+
+            wav_bytes = self._to_wav_bytes(audio)
+            wav_file = io.BytesIO(wav_bytes)
+            wav_file.name = "segment.wav"
+
+            request_kwargs: Dict[str, object] = {
+                "model": self._remote_model,
+                "file": wav_file,
+            }
+            if self._language and self._language.lower() not in ("auto", ""):
+                request_kwargs["language"] = self._language
+
+            response = client.audio.transcriptions.create(**request_kwargs)
+            text = str(getattr(response, "text", "")).strip()
+            if not text and hasattr(response, "model_dump"):
+                dumped = response.model_dump()
+                text = str(dumped.get("text", "")).strip()
+
+            if not text:
+                return None
+
+            return TranscriptSegment(
+                text=text,
+                source=source,
+                confidence=0.75,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error(
+                "TranscriptionThread: remote transcription failed (%s/%s): %s",
+                self._remote_backend,
+                self._remote_model,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _to_wav_bytes(audio: np.ndarray) -> bytes:
+        mono = np.asarray(audio, dtype=np.int16)
+        with io.BytesIO() as buff:
+            with wave.open(buff, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16_000)
+                wf.writeframes(mono.tobytes())
+            return buff.getvalue()
