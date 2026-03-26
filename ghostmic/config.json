@@ -8,7 +8,7 @@
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",
     "groq_api_key": "",
-    "groq_model": "openai/gpt-oss-20b",
+    "groq_model": "llama-3.3-70b-versatile",
     "system_prompt": "You are a real-time interview/meeting assistant. You are helping the user respond to questions and participate in a conversation.\n\nBased on the conversation transcript provided, generate:\n1. A concise, natural-sounding suggested response to the last question/topic\n2. Key talking points the user should mention\n\nRules:\n- Keep responses concise (2-4 sentences max for the main response)\n- Sound natural and conversational, not robotic\n- If it's a technical question, provide accurate technical details\n- If context is unclear, provide the most likely helpful response\n- Format: Start with the direct response, then bullet points for key points\n- Do NOT include phrases like \"Based on the transcript\" or \"Here's a suggestion\"\n- Write in first person as if the user is speaking\n",
     "temperature": 0.7,
     "trigger_mode": "auto",
@@ -25,7 +25,15 @@
     "model_size": "base.en",
     "compute_type": "int8",
     "language": "en",
-    "beam_size": 3
+    "beam_size": 3,
+    "remote_fallback": true,
+    "remote_backend": "auto",
+    "remote_model_groq": "whisper-large-v3-turbo",
+    "remote_model_openai": "gpt-4o-mini-transcribe",
+    "auto_skip_local_on_windows_broken": true,
+    "known_local_torch_broken": false,
+    "known_local_torch_error": "",
+    "known_local_torch_marked_at": 0
   },
   "ui": {
     "opacity": 0.95,

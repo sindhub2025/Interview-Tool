@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import sys
+import threading
 import time
 from typing import List, Optional
 
@@ -26,6 +27,8 @@ if not getattr(sys, "frozen", False) and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from ghostmic.utils.logger import configure_logging, get_log_file_path, get_logger
+from ghostmic.services.thread_coordinator import ThreadCoordinator
+from ghostmic.services.runtime_state import RuntimeStateCache
 
 # Logger is set up in _main() after parsing --debug, but we need it here
 # for module-level imports that may log warnings.
@@ -253,11 +256,21 @@ class GhostMicApp:
         self._tray = None
         self._window = None
         self._transcript_history: List = []
+        self._transcript_lock = threading.Lock()
         self._model_ready = False
         self._model_error_message: Optional[str] = None
         self._last_transcription_drop_log = 0.0
         self._recording_active = False
+        self._recording_lock = threading.Lock()
         self._dictation_hotkey_guard_until = 0.0
+        self._startup_api_worker = None
+
+        # Services
+        self._thread_coordinator = ThreadCoordinator()
+        runtime_state_path = os.path.join(
+            os.path.expanduser("~"), ".ghostmic", ".runtime_state.json"
+        )
+        self._runtime_state = RuntimeStateCache(runtime_state_path)
 
     def run(self) -> int:
         """Initialise everything and start the Qt event loop."""
@@ -280,7 +293,7 @@ class GhostMicApp:
         self._start_model_loader()
         self._start_audio_threads()
         self._setup_hotkeys()
-        self._test_api_startup()  # Test API connectivity and display result
+        self._test_api_startup_async()  # Test API connectivity in background
 
         if not self._args.minimized and self._window:
             self._window.show()
@@ -302,29 +315,37 @@ class GhostMicApp:
         self._window.controls.settings_requested.connect(self._on_settings_requested)
         self._window.dictation_committed.connect(self._on_dictation_committed)
 
-    def _test_api_startup(self) -> None:
-        """Test API connectivity on startup and display result."""
-        from ghostmic.core.ai_engine import AIThread
-        
+    def _test_api_startup_async(self) -> None:
+        """Test API connectivity in a background thread (non-blocking)."""
         if not self._window:
             return
-        
-        # Create temporary AI thread for testing
-        ai_test = AIThread(self._config.get("ai", {}))
-        success, backend, message = ai_test.test_api_connectivity()
-        
-        # Update status indicator
+
+        from ghostmic.ui.settings_dialog import ApiConnectivityWorker
+
+        self._window.controls.set_status("Testing API…", "#58a6ff")
+        worker = ApiConnectivityWorker(self._config.get("ai", {}), parent=None)
+        worker.result_ready.connect(self._on_startup_api_test_result)
+        worker.finished.connect(lambda: self._cleanup_startup_worker())
+        self._startup_api_worker = worker
+        worker.start()
+
+    def _on_startup_api_test_result(self, success: bool, backend: str, message: str) -> None:
+        if not self._window:
+            return
         if success:
             self._window.set_api_status(True, backend.title())
-            # Display startup test response
             self._window.ai_panel.start_response()
             self._window.ai_panel.finish_response(message)
             self._logger.info("Startup API test successful: %s", backend)
         else:
             self._window.set_api_status(False)
-            # Display error in AI panel
             self._window.ai_panel.show_error(f"API Connection Failed: {message}")
             self._logger.warning("Startup API test failed: %s", message)
+
+    def _cleanup_startup_worker(self) -> None:
+        if self._startup_api_worker:
+            self._startup_api_worker.deleteLater()
+            self._startup_api_worker = None
 
     # ------------------------------------------------------------------
     # System tray
@@ -354,27 +375,21 @@ class GhostMicApp:
         tcfg = self._config.get("transcription", {})
         return bool(
             tcfg.get("auto_skip_local_on_windows_broken", True)
-            and tcfg.get("known_local_torch_broken", False)
+            and self._runtime_state.get("known_local_torch_broken", False)
         )
 
     def _mark_local_model_known_broken(self, msg: str) -> None:
         if sys.platform != "win32" or not self._is_torch_dll_failure(msg):
             return
-        tcfg = self._config.setdefault("transcription", {})
-        tcfg["known_local_torch_broken"] = True
-        tcfg["known_local_torch_error"] = msg[:800]
-        tcfg["known_local_torch_marked_at"] = int(time.time())
-        _save_config(self._config, self._config_path)
+        self._runtime_state.set("known_local_torch_broken", True, ttl=604800.0)  # 7 days
+        self._runtime_state.set("known_local_torch_error", msg[:800], ttl=604800.0)
         self._logger.info("Marked local torch runtime as known-broken for fast startup fallback.")
 
     def _clear_local_model_known_broken(self) -> None:
-        tcfg = self._config.setdefault("transcription", {})
-        if not tcfg.get("known_local_torch_broken", False):
+        if not self._runtime_state.get("known_local_torch_broken", False):
             return
-        tcfg["known_local_torch_broken"] = False
-        tcfg["known_local_torch_error"] = ""
-        tcfg["known_local_torch_marked_at"] = 0
-        _save_config(self._config, self._config_path)
+        self._runtime_state.delete("known_local_torch_broken")
+        self._runtime_state.delete("known_local_torch_error")
         self._logger.info("Cleared known-broken torch marker after successful local model load.")
 
     def _start_model_loader(self) -> None:
@@ -409,6 +424,7 @@ class GhostMicApp:
             self._transcription_thread.transcribing.connect(
                 self._on_transcribing
             )
+            self._thread_coordinator.register("transcription", self._transcription_thread)
 
             if self._should_skip_local_model_load():
                 enabled, detail = self._transcription_thread.enable_remote_fallback()
@@ -416,7 +432,7 @@ class GhostMicApp:
                     self._model_loader = None
                     self._model_ready = True
                     self._model_error_message = (
-                        self._config.get("transcription", {}).get(
+                        self._runtime_state.get(
                             "known_local_torch_error",
                             "Local torch runtime previously failed (WinError 1114).",
                         )
@@ -501,6 +517,7 @@ class GhostMicApp:
             )
 
             self._model_loader = loader
+            self._thread_coordinator.register("model_loader", loader)
             loader.start()
             self._logger.info("Model loader thread started.")
 
@@ -529,6 +546,7 @@ class GhostMicApp:
 
             self._vad_thread = VADThread(self._buffer)
             self._vad_thread.speech_segment_ready.connect(self._on_speech_segment)
+            self._thread_coordinator.register("vad", self._vad_thread)
             # Don't start yet — wait for user to click Record
 
             self._sys_audio_thread = SystemAudioCaptureThread(
@@ -538,6 +556,7 @@ class GhostMicApp:
             self._sys_audio_thread.audio_chunk_ready.connect(
                 self._vad_thread.push_chunk
             )
+            self._thread_coordinator.register("sys_audio", self._sys_audio_thread)
 
             self._mic_thread = MicCaptureThread(
                 self._buffer,
@@ -546,6 +565,7 @@ class GhostMicApp:
             self._mic_thread.audio_chunk_ready.connect(
                 self._vad_thread.push_chunk
             )
+            self._thread_coordinator.register("mic", self._mic_thread)
 
         except ImportError as exc:
             self._logger.warning("Audio libraries not available: %s", exc)
@@ -563,13 +583,9 @@ class GhostMicApp:
         return True
 
     def _stop_audio_capture(self) -> None:
-        for thread in (self._sys_audio_thread, self._mic_thread):
-            if thread and thread.isRunning():
-                thread.stop()
-                thread.wait(2000)
-        if self._vad_thread and self._vad_thread.isRunning():
-            self._vad_thread.stop()
-            self._vad_thread.wait(2000)
+        for name in ("sys_audio", "mic"):
+            self._thread_coordinator.stop_one(name, timeout_ms=2000)
+        self._thread_coordinator.stop_one("vad", timeout_ms=2000)
 
     # ------------------------------------------------------------------
     # AI engine
@@ -592,6 +608,7 @@ class GhostMicApp:
             self._ai_thread.ai_error.connect(
                 lambda msg: self._window.ai_panel.show_error(msg) if self._window else None
             )
+            self._thread_coordinator.register("ai", self._ai_thread)
             self._ai_thread.start()
         except ImportError as exc:
             self._logger.warning("AI engine not available: %s", exc)
@@ -726,9 +743,10 @@ class GhostMicApp:
         if not segment.text:
             return False
 
-        self._transcript_history.append(segment)
-        if len(self._transcript_history) > 1000:
-            self._transcript_history = self._transcript_history[-1000:]
+        with self._transcript_lock:
+            self._transcript_history.append(segment)
+            if len(self._transcript_history) > 1000:
+                self._transcript_history = self._transcript_history[-1000:]
 
         if self._window:
             self._window.transcript_panel.add_segment(segment)
@@ -817,10 +835,12 @@ class GhostMicApp:
             self._logger.warning("Unable to focus dictation target for Win+H capture.")
 
     def _generate_ai_response(self) -> None:
-        if not self._transcript_history:
-            if self._window:
-                self._window.controls.set_status("No transcript available for AI", "#f0883e")
-            return
+        with self._transcript_lock:
+            if not self._transcript_history:
+                if self._window:
+                    self._window.controls.set_status("No transcript available for AI", "#f0883e")
+                return
+            transcript_snapshot = list(self._transcript_history)
 
         self._ensure_ai_thread()
         if self._ai_thread is None:
@@ -830,7 +850,7 @@ class GhostMicApp:
                 self._window.ai_panel.show_error("AI engine is unavailable. Check dependencies/API settings.")
             return
 
-        accepted = self._ai_thread.request_response(self._transcript_history)
+        accepted = self._ai_thread.request_response(transcript_snapshot)
         if accepted:
             if self._window:
                 self._window.ai_panel.start_response()
@@ -843,17 +863,43 @@ class GhostMicApp:
             self._window.controls.set_status(f"AI request skipped ({reason})", "#f0883e")
 
     def _copy_last_response(self) -> None:
-        # Copy from the most recent AI response card (best effort)
-        if self._window:
-            cards = self._window.ai_panel._cards
-            if cards:
-                from PyQt6.QtWidgets import QApplication
-                QApplication.clipboard().setText(cards[-1].get_text())
+        """Copy the most recent AI response to clipboard with user feedback."""
+        if not self._window:
+            return
+        text = self._window.ai_panel.get_last_response_text()
+        if text:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.clipboard().setText(text)
+            self._window.controls.set_status("✓ Copied to clipboard", "#3fb950")
+        else:
+            self._window.controls.set_status("Nothing to copy", "#f0883e")
 
     def _clear_transcript(self) -> None:
-        if self._window:
+        """Clear transcript with confirmation dialog."""
+        if not self._window:
+            with self._transcript_lock:
+                self._transcript_history.clear()
+            return
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        segment_count = len(self._transcript_history)
+        if segment_count == 0:
+            self._window.controls.set_status("Transcript is already empty", "#f0883e")
+            return
+
+        reply = QMessageBox.question(
+            self._window,
+            "Clear Transcript",
+            f"Clear all {segment_count} transcript segment(s)?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
             self._window.transcript_panel.clear_transcript()
-        self._transcript_history.clear()
+            with self._transcript_lock:
+                self._transcript_history.clear()
+            self._window.controls.set_status("Transcript cleared", "#3fb950")
 
     # ------------------------------------------------------------------
     # Shutdown
@@ -863,20 +909,20 @@ class GhostMicApp:
         self._logger.info("GhostMic: shutting down …")
         self._stop_audio_capture()
 
-        for thread in (self._transcription_thread, self._ai_thread, self._model_loader):
-            if thread and hasattr(thread, "isRunning") and thread.isRunning():
-                if hasattr(thread, "stop"):
-                    thread.stop()
-                thread.wait(3000)
+        # Graceful shutdown of all registered threads in reverse order
+        orphans = self._thread_coordinator.shutdown(timeout_ms=5000)
+        if orphans:
+            self._logger.warning("Threads that did not stop cleanly: %s", orphans)
 
         if self._hotkey_manager:
             self._hotkey_manager.stop()
 
         # Save transcript
-        if self._transcript_history:
-            self._save_transcript()
+        with self._transcript_lock:
+            if self._transcript_history:
+                self._save_transcript()
 
-        # Save window position
+        # Save window position and UI state
         if self._window:
             geo = self._window.geometry()
             self._config.setdefault("ui", {})
@@ -884,6 +930,9 @@ class GhostMicApp:
             self._config["ui"]["window_y"] = geo.y()
             self._config["ui"]["window_width"] = geo.width()
             self._config["ui"]["window_height"] = geo.height()
+            self._config["ui"]["compact_mode"] = getattr(
+                self._window, "_compact_mode", False
+            )
 
         _save_config(self._config, self._config_path)
         self._logger.info("GhostMic: shutdown complete.")

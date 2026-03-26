@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import List
 
-from ghostmic.core.transcription_engine import TranscriptSegment
+from ghostmic.domain import TranscriptSegment
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)

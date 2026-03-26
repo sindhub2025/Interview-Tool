@@ -15,6 +15,8 @@ import threading
 import time
 from typing import Callable, List, Optional
 
+from ghostmic.utils.errors import is_rate_limited as _is_rate_limited_shared
+
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
 except ImportError:
@@ -252,9 +254,9 @@ class AIThread(QThread):  # type: ignore[misc]
                     self.ai_error.emit(f"Unknown backend: {backend}")  # type: ignore[attr-defined]
                 return False
             except Exception as exc:  # pylint: disable=broad-except
-                is_rate_limited = self._is_rate_limited_exception(exc)
+                rate_limited = _is_rate_limited_shared(exc)
                 can_retry = (
-                    is_rate_limited
+                    rate_limited
                     and attempt < retries - 1
                     and not self._stop_event.is_set()
                 )
@@ -270,10 +272,10 @@ class AIThread(QThread):  # type: ignore[misc]
                         attempt + 1,
                         retries,
                     )
-                    time.sleep(delay)
+                    self._stop_event.wait(delay)
                     continue
 
-                if is_rate_limited:
+                if rate_limited:
                     error_msg = (
                         "Rate limit reached on AI generation (HTTP 429). "
                         "Please wait a moment and try again."
@@ -289,14 +291,8 @@ class AIThread(QThread):  # type: ignore[misc]
 
     @staticmethod
     def _is_rate_limited_exception(exc: Exception) -> bool:
-        text = str(exc).lower()
-        return (
-            " 429" in text
-            or "status code: 429" in text
-            or "too many requests" in text
-            or "rate limit" in text
-            or "rate_limit" in text
-        )
+        """Delegate to shared utility. Kept for backward compatibility."""
+        return _is_rate_limited_shared(exc)
 
     def _generate_openai(
         self, context: str, system_prompt: str, temperature: float

@@ -18,19 +18,28 @@ from ghostmic.ui.styles import ACCENT_GREEN, ACCENT_RED, TEXT_SECONDARY
 
 
 class APIStatusIndicator(QWidget):
-    """Small API connection status indicator."""
+    """Small API connection status indicator with accessible text."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedSize(140, 20)
         self._connected = False
         self._backend = "Groq"
+        self.setAccessibleName("API Status")
+        self._update_accessible_description()
 
     def set_status(self, connected: bool, backend: str = "Groq") -> None:
         """Update the connection status."""
         self._connected = connected
         self._backend = backend
+        self._update_accessible_description()
         self.update()
+
+    def _update_accessible_description(self) -> None:
+        if self._connected:
+            self.setAccessibleDescription(f"Connected to {self._backend}")
+        else:
+            self.setAccessibleDescription("Offline, not connected")
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -40,7 +49,7 @@ class APIStatusIndicator(QWidget):
         dot_color = ACCENT_GREEN if self._connected else "#666666"
         painter.fillRect(4, 6, 8, 8, QColor(dot_color))
 
-        # Text
+        # Text (visible alongside dot)
         text = f"✓ {self._backend}" if self._connected else "○ Offline"
         text_color = ACCENT_GREEN if self._connected else TEXT_SECONDARY
         

@@ -175,6 +175,10 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_config()
 
+        # Restore compact mode if previously saved
+        if self._config.get("ui", {}).get("compact_mode", False):
+            self.toggle_compact_mode()
+
     # ------------------------------------------------------------------
     # Window setup
     # ------------------------------------------------------------------
@@ -314,15 +318,12 @@ class MainWindow(QMainWindow):
         )
 
     def update_config(self, config: dict) -> None:
-        """Apply updated config (called after settings dialog saves)."""
+        """Apply updated config (called after settings dialog saves).
+
+        Note: config persistence to disk is handled by the caller
+        (GhostMicApp._on_settings_saved) to avoid double writes.
+        """
         self._config = config
-        # Persist config to disk
-        if self._config_path:
-            try:
-                with open(self._config_path, "w", encoding="utf-8") as fh:
-                    json.dump(config, fh, indent=2)
-            except OSError as exc:
-                logger.error("Could not save config: %s", exc)
         ui = config.get("ui", {})
         self.setWindowOpacity(ui.get("opacity", 0.95))
         self.resize(

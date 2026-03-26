@@ -167,6 +167,12 @@ class AIResponsePanel(QScrollArea):
         self._layout.insertWidget(self._layout.count() - 1, card)
         self._scroll_to_bottom()
 
+    def get_last_response_text(self) -> str:
+        """Return the text of the most recent response card, or empty string."""
+        if self._cards:
+            return self._cards[-1].get_text()
+        return ""
+
     def clear_responses(self) -> None:
         """Remove all response cards."""
         self._remove_thinking()

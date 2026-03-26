@@ -204,18 +204,48 @@ class SettingsDialog(QDialog):
         self._openai_api_key_edit.setPlaceholderText(
             "Get your key at platform.openai.com"
         )
+        self._openai_key_toggle = QPushButton("👁")
+        self._openai_key_toggle.setFixedSize(28, 28)
+        self._openai_key_toggle.setCheckable(True)
+        self._openai_key_toggle.setToolTip("Show/hide API key")
+        self._openai_key_toggle.setStyleSheet("QPushButton { background: transparent; border: none; }")
+        self._openai_key_toggle.toggled.connect(
+            lambda checked: self._openai_api_key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
 
         self._openai_model_combo = QComboBox()
         self._openai_model_combo.addItems(["gpt-5-mini", "gpt-5-nano", "gpt-5.4-nano"])
 
         if self._expose_openai_provider:
-            form.addRow("OpenAI API key:", self._openai_api_key_edit)
+            openai_key_row = QWidget()
+            openai_key_layout = QHBoxLayout(openai_key_row)
+            openai_key_layout.setContentsMargins(0, 0, 0, 0)
+            openai_key_layout.addWidget(self._openai_api_key_edit)
+            openai_key_layout.addWidget(self._openai_key_toggle)
+            form.addRow("OpenAI API key:", openai_key_row)
             form.addRow("OpenAI model:", self._openai_model_combo)
 
         self._groq_api_key_edit = QLineEdit()
         self._groq_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._groq_api_key_edit.setPlaceholderText("Get a free key at console.groq.com")
-        form.addRow("Groq API key:", self._groq_api_key_edit)
+        self._groq_key_toggle = QPushButton("👁")
+        self._groq_key_toggle.setFixedSize(28, 28)
+        self._groq_key_toggle.setCheckable(True)
+        self._groq_key_toggle.setToolTip("Show/hide API key")
+        self._groq_key_toggle.setStyleSheet("QPushButton { background: transparent; border: none; }")
+        self._groq_key_toggle.toggled.connect(
+            lambda checked: self._groq_api_key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        groq_key_row = QWidget()
+        groq_key_layout = QHBoxLayout(groq_key_row)
+        groq_key_layout.setContentsMargins(0, 0, 0, 0)
+        groq_key_layout.addWidget(self._groq_api_key_edit)
+        groq_key_layout.addWidget(self._groq_key_toggle)
+        form.addRow("Groq API key:", groq_key_row)
 
         self._groq_model_combo = QComboBox()
         self._groq_model_combo.addItems(

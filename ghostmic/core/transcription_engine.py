@@ -17,6 +17,8 @@ import wave
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+from ghostmic.utils.errors import is_rate_limited as _is_rate_limited_shared
+
 import numpy as np
 
 try:
@@ -41,14 +43,9 @@ SOURCE_STATE_MAX_ENTRIES: int = 16
 SOURCE_STATE_TTL_SECONDS: float = 900.0
 
 
-@dataclass
-class TranscriptSegment:
-    """A single transcribed speech segment."""
+from ghostmic.domain import TranscriptSegment  # re-exported for backward compat
 
-    text: str
-    source: str                 # "speaker" or "user"
-    timestamp: float = field(default_factory=time.time)
-    confidence: float = 1.0
+__all__ = ["TranscriptSegment", "ModelLoader", "TranscriptionThread"]
 
 
 class ModelLoader(QThread):  # type: ignore[misc]
@@ -575,7 +572,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                             attempt + 1,
                             retries,
                         )
-                        time.sleep(delay)
+                        self._stop_event.wait(delay)
                         continue
 
                     logger.error(
@@ -598,14 +595,8 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
 
     @staticmethod
     def _is_rate_limited_exception(exc: Exception) -> bool:
-        text = str(exc).lower()
-        return (
-            " 429" in text
-            or "status code: 429" in text
-            or "too many requests" in text
-            or "rate limit" in text
-            or "rate_limit" in text
-        )
+        """Delegate to shared utility. Kept for backward compatibility."""
+        return _is_rate_limited_shared(exc)
 
     def _should_drop_remote_repeat(self, text: str, source: str) -> bool:
         now = time.time()
