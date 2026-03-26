@@ -10,6 +10,7 @@ Runs in a dedicated QThread and emits streaming response tokens.
 from __future__ import annotations
 
 import queue
+import random
 import threading
 import time
 from typing import Callable, List, Optional
@@ -45,6 +46,10 @@ Rules:
 
 DEBOUNCE_SECONDS: float = 3.0
 MAX_CONTEXT_SEGMENTS: int = 10
+AI_QUEUE_MAXSIZE: int = 8
+RUNTIME_RATE_LIMIT_RETRIES: int = 3
+RUNTIME_RATE_LIMIT_BASE_DELAY: float = 1.0
+RUNTIME_RATE_LIMIT_MAX_DELAY: float = 8.0
 
 
 class AIThread(QThread):  # type: ignore[misc]
@@ -80,13 +85,15 @@ class AIThread(QThread):  # type: ignore[misc]
         self._on_chunk = on_chunk
         self._on_ready = on_ready
         self._stop_event = threading.Event()
-        self._queue: "queue.Queue[List[TranscriptSegment]]" = queue.Queue()
+        self._queue: "queue.Queue[List[TranscriptSegment]]" = queue.Queue(
+            maxsize=AI_QUEUE_MAXSIZE
+        )
         self._last_request_time: float = 0.0
 
     def stop(self) -> None:
         self._stop_event.set()
 
-    def request_response(self, transcript: List[TranscriptSegment]) -> None:
+    def request_response(self, transcript: List[TranscriptSegment]) -> bool:
         """Queue a response-generation request.
 
         Applies debounce: requests closer than DEBOUNCE_SECONDS apart are
@@ -94,16 +101,50 @@ class AIThread(QThread):  # type: ignore[misc]
 
         Args:
             transcript: Recent transcript segments for context.
+
+        Returns:
+            True when accepted into the queue, otherwise False.
         """
         now = time.time()
         if now - self._last_request_time < DEBOUNCE_SECONDS:
             logger.debug("AIThread: debounce – request ignored.")
-            return
+            return False
         self._last_request_time = now
         try:
             self._queue.put_nowait(transcript)
+            return True
         except queue.Full:
-            logger.debug("AIThread: queue full – dropping request.")
+            # Keep freshest context by dropping oldest queued work.
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                logger.debug("AIThread: queue was full but empty on readback.")
+                return False
+
+            try:
+                self._queue.put_nowait(transcript)
+                logger.debug("AIThread: queue full – dropped oldest queued request.")
+                return True
+            except queue.Full:
+                logger.debug("AIThread: queue remained full – dropping request.")
+                return False
+
+    def clear_pending_requests(self) -> int:
+        """Drop queued requests that have not started execution yet.
+
+        Returns:
+            Number of dropped queued requests.
+        """
+        dropped = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        if dropped:
+            logger.debug("AIThread: dropped %d pending request(s).", dropped)
+        return dropped
 
     def update_config(self, config: dict) -> None:
         """Replace the AI configuration at runtime."""
@@ -181,19 +222,71 @@ class AIThread(QThread):  # type: ignore[misc]
         
         Returns True if successful, False if failed.
         """
-        try:
-            if backend == "openai":
-                self._generate_openai(context, system_prompt, temperature)
-                return True
-            elif backend == "groq":
-                self._generate_groq(context, system_prompt, temperature)
-                return True
-            else:
+        retries = int(self._config.get("runtime_rate_limit_retries", RUNTIME_RATE_LIMIT_RETRIES))
+        base_delay = float(
+            self._config.get("runtime_rate_limit_retry_delay", RUNTIME_RATE_LIMIT_BASE_DELAY)
+        )
+        retries = max(1, retries)
+
+        for attempt in range(retries):
+            try:
+                if backend == "openai":
+                    self._generate_openai(context, system_prompt, temperature)
+                    return True
+                if backend == "groq":
+                    self._generate_groq(context, system_prompt, temperature)
+                    return True
+
                 logger.error("AIThread: unknown backend %r", backend)
+                if pyqtSignal is not None:
+                    self.ai_error.emit(f"Unknown backend: {backend}")  # type: ignore[attr-defined]
                 return False
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.debug("AIThread: backend %r failed: %s", backend, exc)
-            return False
+            except Exception as exc:  # pylint: disable=broad-except
+                is_rate_limited = self._is_rate_limited_exception(exc)
+                can_retry = (
+                    is_rate_limited
+                    and attempt < retries - 1
+                    and not self._stop_event.is_set()
+                )
+                if can_retry:
+                    delay = min(
+                        RUNTIME_RATE_LIMIT_MAX_DELAY,
+                        base_delay * (2**attempt),
+                    ) + random.uniform(0.0, 0.25)
+                    logger.warning(
+                        "AIThread: %s rate limited, retrying in %.2fs (attempt %d/%d)",
+                        backend,
+                        delay,
+                        attempt + 1,
+                        retries,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                if is_rate_limited:
+                    error_msg = (
+                        "Rate limit reached on AI generation (HTTP 429). "
+                        "Please wait a moment and try again."
+                    )
+                else:
+                    error_msg = f"{backend.title()} generation failed: {exc}"
+
+                logger.debug("AIThread: backend %r failed: %s", backend, exc)
+                if pyqtSignal is not None:
+                    self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
+                return False
+        return False
+
+    @staticmethod
+    def _is_rate_limited_exception(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            " 429" in text
+            or "status code: 429" in text
+            or "too many requests" in text
+            or "rate limit" in text
+            or "rate_limit" in text
+        )
 
     def _generate_openai(
         self, context: str, system_prompt: str, temperature: float
@@ -283,6 +376,11 @@ class AIThread(QThread):  # type: ignore[misc]
             stream_start = time.time()
 
             for event in stream:
+                if self._stop_event.is_set():
+                    response_state = "cancelled"
+                    logger.info("AIThread (%s): stream cancelled by stop event", backend_name)
+                    break
+
                 # Hard timeout check on each event
                 elapsed = time.time() - stream_start
                 if elapsed > stream_timeout:
@@ -366,6 +464,19 @@ class AIThread(QThread):  # type: ignore[misc]
         # Final state handling
         complete = "".join(full_response)
 
+        if response_state == "cancelled":
+            if complete:
+                logger.warning(
+                    "AIThread (%s): cancelled stream emitted partial response (%d chars)",
+                    backend_name,
+                    len(complete),
+                )
+                if self._on_ready:
+                    self._on_ready(complete)
+                if pyqtSignal is not None:
+                    self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
+            return
+
         if error_to_emit:
             if complete:
                 logger.warning(
@@ -377,9 +488,8 @@ class AIThread(QThread):  # type: ignore[misc]
                     self._on_ready(complete)
                 if pyqtSignal is not None:
                     self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
-            if pyqtSignal is not None:
-                self.ai_error.emit(error_to_emit)  # type: ignore[attr-defined]
-            return
+                return
+            raise RuntimeError(error_to_emit)
 
         if response_state == "completed":
             if self._on_ready:
@@ -399,13 +509,13 @@ class AIThread(QThread):  # type: ignore[misc]
                 if pyqtSignal is not None:
                     self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
             else:
+                error_msg = f"Response incomplete: {response_state}"
                 logger.warning(
                     "AIThread (%s): stream ended in unexpected state: %s (response incomplete)",
                     backend_name,
                     response_state,
                 )
-                if pyqtSignal is not None:
-                    self.ai_error.emit(f"Response incomplete: {response_state}")  # type: ignore[attr-defined]
+                raise RuntimeError(error_msg)
 
     def _route_tool_calls(self, event, backend_name: str) -> None:
         """Route tool call events to a dedicated handler path.

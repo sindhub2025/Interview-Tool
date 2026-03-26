@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import io
 import queue
+import random
+import re
 import threading
 import time
 import wave
@@ -26,6 +28,17 @@ except ImportError:
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+TRANSCRIPTION_QUEUE_MAXSIZE: int = 24
+MAX_PENDING_SEGMENT_AGE_SECONDS: float = 8.0
+REMOTE_RATE_LIMIT_RETRIES: int = 3
+REMOTE_RATE_LIMIT_BASE_DELAY: float = 1.0
+REMOTE_RATE_LIMIT_MAX_DELAY: float = 8.0
+REMOTE_REPEAT_WINDOW_SECONDS: float = 3.0
+REMOTE_REPEAT_MAX_CHARS: int = 42
+LOCAL_PROMPT_MAX_CHARS: int = 240
+SOURCE_STATE_MAX_ENTRIES: int = 16
+SOURCE_STATE_TTL_SECONDS: float = 900.0
 
 
 @dataclass
@@ -212,12 +225,26 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         self._remote_config = remote_config or {}
         self._on_result = on_result
         self._stop_event = threading.Event()
-        self._queue: "queue.Queue[Tuple[np.ndarray, str]]" = queue.Queue()
+        self._queue: "queue.Queue[Tuple[np.ndarray, str, float]]" = queue.Queue(
+            maxsize=TRANSCRIPTION_QUEUE_MAXSIZE
+        )
         self._remote_transcription_enabled = False
         self._remote_backend: Optional[str] = None
         self._remote_model: Optional[str] = None
         self._remote_api_key: Optional[str] = None
         self._remote_base_url: Optional[str] = None
+        self._remote_client = None
+        self._max_pending_age_seconds = float(
+            self._remote_config.get(
+                "max_pending_segment_age_seconds",
+                MAX_PENDING_SEGMENT_AGE_SECONDS,
+            )
+        )
+        self._last_queue_drop_log = 0.0
+        self._last_remote_text_by_source: Dict[str, str] = {}
+        self._last_remote_text_ts_by_source: Dict[str, float] = {}
+        self._last_local_text_by_source: Dict[str, str] = {}
+        self._last_local_text_ts_by_source: Dict[str, float] = {}
 
     def set_model(self, model) -> None:
         """Attach a (newly loaded) model."""
@@ -255,14 +282,53 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
 
     def push_segment(self, audio: np.ndarray, source: str) -> None:
         """Enqueue an audio segment for transcription."""
-        self._queue.put_nowait((audio, source))
+        item = (audio, source, time.time())
+        try:
+            self._queue.put_nowait(item)
+            return
+        except queue.Full:
+            # Keep near-real-time behavior: discard oldest and keep latest.
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
+
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            now = time.time()
+            if now - self._last_queue_drop_log >= 5.0:
+                logger.warning("TranscriptionThread: queue full; dropping incoming segment.")
+                self._last_queue_drop_log = now
+
+    def clear_pending_segments(self) -> int:
+        """Drop queued segments that have not started transcription yet."""
+        dropped = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        if dropped:
+            logger.debug("TranscriptionThread: dropped %d pending queued segment(s).", dropped)
+        return dropped
 
     def run(self) -> None:
         logger.info("TranscriptionThread: started.")
         while not self._stop_event.is_set():
             try:
-                audio, source = self._queue.get(timeout=0.2)
+                audio, source, enqueued_at = self._queue.get(timeout=0.2)
             except queue.Empty:
+                continue
+
+            age = time.time() - enqueued_at
+            if age > self._max_pending_age_seconds:
+                logger.debug(
+                    "TranscriptionThread: dropping stale segment (%s, age=%.2fs)",
+                    source,
+                    age,
+                )
                 continue
 
             if self._model is None and not self._remote_transcription_enabled:
@@ -292,15 +358,20 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 return self._transcribe_remote(audio, source)
 
             audio_float = audio.astype(np.float32) / 32768.0
-            segments, info = self._model.transcribe(
-                audio_float,
-                language=self._language,
-                beam_size=self._beam_size,
-                best_of=self._beam_size,
-                word_timestamps=True,
-                no_speech_threshold=0.6,
-                condition_on_previous_text=False,
-            )
+            transcribe_kwargs: Dict[str, object] = {
+                "language": self._language,
+                "beam_size": self._beam_size,
+                "best_of": self._beam_size,
+                "word_timestamps": True,
+                "no_speech_threshold": 0.6,
+                "vad_filter": True,
+                "condition_on_previous_text": False,
+            }
+            initial_prompt = self._build_initial_prompt(source)
+            if initial_prompt:
+                transcribe_kwargs["initial_prompt"] = initial_prompt
+
+            segments, _ = self._model.transcribe(audio_float, **transcribe_kwargs)
 
             texts: List[str] = []
             avg_prob: float = 0.0
@@ -317,6 +388,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 return None
 
             full_text = " ".join(texts)
+            self._remember_local_text(source, full_text)
             # avg_logprob is in [-inf, 0]; adding 1.0 maps the typical
             # range [-1, 0] to [0, 1] as an approximate confidence score.
             confidence = float(
@@ -355,6 +427,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             if provider not in candidates:
                 candidates.append(provider)
 
+        init_errors: List[str] = []
         for provider in candidates:
             if provider == "groq":
                 api_key = str(self._ai_config.get("groq_api_key", "")).strip()
@@ -368,7 +441,12 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                         "remote_model_groq", "whisper-large-v3-turbo"
                     )
                 )
-                return True, f"groq/{self._remote_model}"
+                ok, detail = self._init_remote_client()
+                if ok:
+                    return True, f"groq/{self._remote_model}"
+                init_errors.append(detail)
+                self._remote_client = None
+                continue
 
             if provider == "openai":
                 api_key = str(self._ai_config.get("openai_api_key", "")).strip()
@@ -382,9 +460,39 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                         "remote_model_openai", "gpt-4o-mini-transcribe"
                     )
                 )
-                return True, f"openai/{self._remote_model}"
+                ok, detail = self._init_remote_client()
+                if ok:
+                    return True, f"openai/{self._remote_model}"
+                init_errors.append(detail)
+                self._remote_client = None
+                continue
+
+        if init_errors:
+            return False, "; ".join(init_errors)
 
         return False, "no configured API key for remote transcription"
+
+    def _init_remote_client(self) -> Tuple[bool, str]:
+        try:
+            from openai import OpenAI  # type: ignore[import]
+        except ImportError:
+            return False, "openai package missing for remote STT"
+
+        if not self._remote_api_key:
+            return False, "remote API key unavailable"
+
+        try:
+            if self._remote_base_url:
+                self._remote_client = OpenAI(
+                    api_key=self._remote_api_key,
+                    base_url=self._remote_base_url,
+                )
+            else:
+                self._remote_client = OpenAI(api_key=self._remote_api_key)
+        except Exception as exc:  # pylint: disable=broad-except
+            return False, f"failed to initialize remote client: {exc}"
+
+        return True, "ready"
 
     def _transcribe_remote(
         self, audio: np.ndarray, source: str
@@ -392,24 +500,16 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         if not self._remote_transcription_enabled:
             return None
 
-        try:
-            from openai import OpenAI  # type: ignore[import]
-        except ImportError:
-            logger.error("TranscriptionThread: openai package missing for remote STT.")
-            return None
-
         if not self._remote_api_key or not self._remote_model:
             logger.error("TranscriptionThread: remote STT not configured correctly.")
             return None
 
+        if self._remote_client is None:
+            logger.error("TranscriptionThread: remote STT client unavailable.")
+            return None
+
         try:
-            if self._remote_base_url:
-                client = OpenAI(
-                    api_key=self._remote_api_key,
-                    base_url=self._remote_base_url,
-                )
-            else:
-                client = OpenAI(api_key=self._remote_api_key)
+            client = self._remote_client
 
             wav_bytes = self._to_wav_bytes(audio)
             wav_file = io.BytesIO(wav_bytes)
@@ -422,20 +522,70 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             if self._language and self._language.lower() not in ("auto", ""):
                 request_kwargs["language"] = self._language
 
-            response = client.audio.transcriptions.create(**request_kwargs)
-            text = str(getattr(response, "text", "")).strip()
-            if not text and hasattr(response, "model_dump"):
-                dumped = response.model_dump()
-                text = str(dumped.get("text", "")).strip()
-
-            if not text:
-                return None
-
-            return TranscriptSegment(
-                text=text,
-                source=source,
-                confidence=0.75,
+            retries = int(
+                self._remote_config.get("remote_rate_limit_retries", REMOTE_RATE_LIMIT_RETRIES)
             )
+            base_delay = float(
+                self._remote_config.get(
+                    "remote_rate_limit_retry_delay",
+                    REMOTE_RATE_LIMIT_BASE_DELAY,
+                )
+            )
+            retries = max(1, retries)
+
+            for attempt in range(retries):
+                if self._stop_event.is_set():
+                    return None
+
+                try:
+                    wav_file.seek(0)
+                    response = client.audio.transcriptions.create(**request_kwargs)
+                    text = str(getattr(response, "text", "")).strip()
+                    if not text and hasattr(response, "model_dump"):
+                        dumped = response.model_dump()
+                        text = str(dumped.get("text", "")).strip()
+
+                    if not text:
+                        return None
+
+                    if self._should_drop_remote_repeat(text, source):
+                        return None
+
+                    return TranscriptSegment(
+                        text=text,
+                        source=source,
+                        confidence=0.75,
+                    )
+                except Exception as exc:  # pylint: disable=broad-except
+                    is_rate_limited = self._is_rate_limited_exception(exc)
+                    can_retry = (
+                        is_rate_limited
+                        and attempt < retries - 1
+                        and not self._stop_event.is_set()
+                    )
+                    if can_retry:
+                        delay = min(
+                            REMOTE_RATE_LIMIT_MAX_DELAY,
+                            base_delay * (2**attempt),
+                        ) + random.uniform(0.0, 0.25)
+                        logger.warning(
+                            "TranscriptionThread: remote STT rate limited, retrying in %.2fs "
+                            "(attempt %d/%d)",
+                            delay,
+                            attempt + 1,
+                            retries,
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    logger.error(
+                        "TranscriptionThread: remote transcription failed (%s/%s): %s",
+                        self._remote_backend,
+                        self._remote_model,
+                        exc,
+                        exc_info=True,
+                    )
+                    return None
         except Exception as exc:  # pylint: disable=broad-except
             logger.error(
                 "TranscriptionThread: remote transcription failed (%s/%s): %s",
@@ -445,6 +595,106 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 exc_info=True,
             )
             return None
+
+    @staticmethod
+    def _is_rate_limited_exception(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            " 429" in text
+            or "status code: 429" in text
+            or "too many requests" in text
+            or "rate limit" in text
+            or "rate_limit" in text
+        )
+
+    def _should_drop_remote_repeat(self, text: str, source: str) -> bool:
+        now = time.time()
+        normalized = self._normalize_remote_text(text)
+        if not normalized:
+            return True
+
+        self._prune_source_state(
+            self._last_remote_text_by_source,
+            self._last_remote_text_ts_by_source,
+            now,
+        )
+
+        prev = self._last_remote_text_by_source.get(source)
+        prev_ts = self._last_remote_text_ts_by_source.get(source, 0.0)
+        self._last_remote_text_by_source[source] = normalized
+        self._last_remote_text_ts_by_source[source] = now
+
+        if (
+            prev == normalized
+            and len(normalized) <= REMOTE_REPEAT_MAX_CHARS
+            and (now - prev_ts) <= REMOTE_REPEAT_WINDOW_SECONDS
+        ):
+            logger.debug(
+                "TranscriptionThread: dropped repeated remote text for %s: %r",
+                source,
+                normalized,
+            )
+            return True
+
+        return False
+
+    def _build_initial_prompt(self, source: str) -> Optional[str]:
+        now = time.time()
+        self._prune_source_state(
+            self._last_local_text_by_source,
+            self._last_local_text_ts_by_source,
+            now,
+        )
+        prompt = self._last_local_text_by_source.get(source, "")
+        if not prompt:
+            return None
+        return prompt[-LOCAL_PROMPT_MAX_CHARS:]
+
+    def _remember_local_text(self, source: str, text: str) -> None:
+        now = time.time()
+        normalized = self._normalize_local_text(text)
+        if not normalized:
+            return
+        self._last_local_text_by_source[source] = normalized[-LOCAL_PROMPT_MAX_CHARS:]
+        self._last_local_text_ts_by_source[source] = now
+        self._prune_source_state(
+            self._last_local_text_by_source,
+            self._last_local_text_ts_by_source,
+            now,
+        )
+
+    def _prune_source_state(
+        self,
+        text_map: Dict[str, str],
+        ts_map: Dict[str, float],
+        now: Optional[float] = None,
+    ) -> None:
+        current = time.time() if now is None else now
+        stale_sources = [
+            source
+            for source, ts in ts_map.items()
+            if (current - ts) > SOURCE_STATE_TTL_SECONDS
+        ]
+        for source in stale_sources:
+            text_map.pop(source, None)
+            ts_map.pop(source, None)
+
+        if len(text_map) <= SOURCE_STATE_MAX_ENTRIES:
+            return
+
+        overflow = len(text_map) - SOURCE_STATE_MAX_ENTRIES
+        oldest = sorted(ts_map.items(), key=lambda item: item[1])
+        for source, _ in oldest[:overflow]:
+            text_map.pop(source, None)
+            ts_map.pop(source, None)
+
+    @staticmethod
+    def _normalize_local_text(text: str) -> str:
+        return re.sub(r"\s+", " ", text.strip())
+
+    @staticmethod
+    def _normalize_remote_text(text: str) -> str:
+        return re.sub(r"\s+", " ", text.strip().lower())
 
     @staticmethod
     def _to_wav_bytes(audio: np.ndarray) -> bytes:

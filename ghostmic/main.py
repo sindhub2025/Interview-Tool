@@ -251,6 +251,7 @@ class GhostMicApp:
         self._model_ready = False
         self._model_error_message: Optional[str] = None
         self._last_transcription_drop_log = 0.0
+        self._recording_active = False
 
     def run(self) -> int:
         """Initialise everything and start the Qt event loop."""
@@ -625,6 +626,7 @@ class GhostMicApp:
         if recording:
             if self._model_loader and self._model_loader.isRunning():
                 self._logger.info("Recording blocked: model is still loading.")
+                self._recording_active = False
                 if self._window:
                     self._window.controls.set_recording(False)
                     self._window.controls.set_status(
@@ -639,6 +641,7 @@ class GhostMicApp:
                     "Recording blocked: transcription model unavailable. last_error=%s",
                     self._model_error_message,
                 )
+                self._recording_active = False
                 if self._window:
                     self._window.controls.set_recording(False)
                     self._window.controls.set_status(
@@ -655,10 +658,16 @@ class GhostMicApp:
                 return
 
             self._ensure_ai_thread()
+            self._recording_active = True
             if self._tray:
                 self._tray.set_recording(True)
         else:
+            self._recording_active = False
             self._stop_audio_capture()
+            if self._transcription_thread:
+                self._transcription_thread.clear_pending_segments()
+            if self._ai_thread:
+                self._ai_thread.clear_pending_requests()
             if self._tray:
                 self._tray.set_recording(False)
 
@@ -689,6 +698,13 @@ class GhostMicApp:
             self._window.controls.set_status("Transcribing…", "#58a6ff")
 
     def _on_transcription_ready(self, segment) -> None:
+        if not self._recording_active:
+            self._logger.debug(
+                "Ignoring transcription while recording is off (source=%s).",
+                getattr(segment, "source", "unknown"),
+            )
+            return
+
         from ghostmic.utils.text_processing import clean_text
 
         segment.text = clean_text(segment.text)
@@ -755,9 +771,12 @@ class GhostMicApp:
 
     def _generate_ai_response(self) -> None:
         if self._ai_thread and self._transcript_history:
-            if self._window:
-                self._window.ai_panel.start_response()
-            self._ai_thread.request_response(self._transcript_history)
+            accepted = self._ai_thread.request_response(self._transcript_history)
+            if accepted:
+                if self._window:
+                    self._window.ai_panel.start_response()
+            else:
+                self._logger.debug("AI request was not queued (debounced or dropped).")
 
     def _copy_last_response(self) -> None:
         # Copy from the most recent AI response card (best effort)
