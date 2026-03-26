@@ -77,6 +77,7 @@ jobs:
         with:
           name: InterviewTool-windows-exe-${{ github.run_number }}
           path: dist/InterviewTool.exe
+          compression-level: 0
 
       - name: Package release ZIP
         if: startsWith(github.ref, 'refs/tags/')
