@@ -70,6 +70,7 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
 
     def run(self) -> None:  # noqa: C901
         """Main capture loop – executed in the worker thread."""
+        self._stop_event.clear()
         try:
             import pyaudiowpatch as pyaudio  # type: ignore[import]
         except ImportError:
@@ -230,6 +231,7 @@ class MicCaptureThread(QThread):  # type: ignore[misc]
 
     def run(self) -> None:
         """Main capture loop."""
+        self._stop_event.clear()
         try:
             import sounddevice as sd  # type: ignore[import]
         except ImportError:

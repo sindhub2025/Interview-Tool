@@ -91,6 +91,7 @@ class VADThread(QThread):  # type: ignore[misc]
             logger.debug("VAD queue full – dropping chunk from %s.", source)
 
     def run(self) -> None:
+        self._stop_event.clear()
         if not self._bypass_vad:
             self._load_model()
 

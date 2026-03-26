@@ -531,6 +531,28 @@ class GhostMicApp:
     # ------------------------------------------------------------------
 
     def _start_audio_threads(self) -> None:
+        """One-time setup: create the shared audio buffer.
+
+        The actual capture and VAD threads are created fresh per
+        recording session in ``_create_audio_threads()`` because
+        QThread objects cannot be restarted once finished.
+        """
+        try:
+            from ghostmic.core.audio_buffer import AudioBuffer
+
+            audio_cfg = self._config.get("audio", {})
+            self._buffer = AudioBuffer(
+                sample_rate=audio_cfg.get("sample_rate", 16_000)
+            )
+        except ImportError as exc:
+            self._logger.warning("Audio libraries not available: %s", exc)
+
+    def _create_audio_threads(self) -> bool:
+        """Create fresh audio capture and VAD threads for a new recording.
+
+        QThread cannot be restarted after finishing, so we recreate
+        the capture and VAD threads each time recording begins.
+        """
         try:
             from ghostmic.core.audio_buffer import AudioBuffer
             from ghostmic.core.audio_capture import (
@@ -539,15 +561,17 @@ class GhostMicApp:
             )
             from ghostmic.core.vad import VADThread
 
+            if not hasattr(self, '_buffer') or self._buffer is None:
+                audio_cfg = self._config.get("audio", {})
+                self._buffer = AudioBuffer(
+                    sample_rate=audio_cfg.get("sample_rate", 16_000)
+                )
+
             audio_cfg = self._config.get("audio", {})
-            self._buffer = AudioBuffer(
-                sample_rate=audio_cfg.get("sample_rate", 16_000)
-            )
 
             self._vad_thread = VADThread(self._buffer)
             self._vad_thread.speech_segment_ready.connect(self._on_speech_segment)
             self._thread_coordinator.register("vad", self._vad_thread)
-            # Don't start yet — wait for user to click Record
 
             self._sys_audio_thread = SystemAudioCaptureThread(
                 self._buffer,
@@ -567,18 +591,26 @@ class GhostMicApp:
             )
             self._thread_coordinator.register("mic", self._mic_thread)
 
+            self._logger.info("Recreated audio/VAD threads for new recording session.")
+            return True
+
         except ImportError as exc:
             self._logger.warning("Audio libraries not available: %s", exc)
+            return False
 
     def _start_audio_capture(self) -> bool:
         if not self._is_transcription_ready():
             return False
 
-        if self._vad_thread and not self._vad_thread.isRunning():
+        # Recreate threads each time (QThread cannot restart after finishing)
+        if not self._create_audio_threads():
+            return False
+
+        if self._vad_thread:
             self._vad_thread.start()
-        if self._sys_audio_thread and not self._sys_audio_thread.isRunning():
+        if self._sys_audio_thread:
             self._sys_audio_thread.start()
-        if self._mic_thread and not self._mic_thread.isRunning():
+        if self._mic_thread:
             self._mic_thread.start()
         return True
 
@@ -586,6 +618,11 @@ class GhostMicApp:
         for name in ("sys_audio", "mic"):
             self._thread_coordinator.stop_one(name, timeout_ms=2000)
         self._thread_coordinator.stop_one("vad", timeout_ms=2000)
+
+        # Release references so fresh threads are created on next recording
+        self._sys_audio_thread = None
+        self._mic_thread = None
+        self._vad_thread = None
 
     # ------------------------------------------------------------------
     # AI engine
@@ -837,10 +874,15 @@ class GhostMicApp:
     def _generate_ai_response(self) -> None:
         with self._transcript_lock:
             if not self._transcript_history:
+                self._logger.debug("AI request skipped: transcript history is empty.")
                 if self._window:
                     self._window.controls.set_status("No transcript available for AI", "#f0883e")
                 return
             transcript_snapshot = list(self._transcript_history)
+            self._logger.info(
+                "AI request: preparing with %d transcript segment(s).",
+                len(transcript_snapshot),
+            )
 
         self._ensure_ai_thread()
         if self._ai_thread is None:
@@ -852,13 +894,14 @@ class GhostMicApp:
 
         accepted = self._ai_thread.request_response(transcript_snapshot)
         if accepted:
+            self._logger.info("AI request accepted and queued for generation.")
             if self._window:
                 self._window.ai_panel.start_response()
                 self._window.controls.set_status("Generating response…", "#58a6ff")
             return
 
         reason = self._ai_thread.last_reject_reason()
-        self._logger.debug("AI request was not queued: %s", reason)
+        self._logger.info("AI request was not queued: %s", reason)
         if self._window:
             self._window.controls.set_status(f"AI request skipped ({reason})", "#f0883e")
 

@@ -312,6 +312,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         return dropped
 
     def run(self) -> None:
+        self._stop_event.clear()
         logger.info("TranscriptionThread: started.")
         while not self._stop_event.is_set():
             try:

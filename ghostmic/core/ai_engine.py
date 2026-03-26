@@ -163,6 +163,7 @@ class AIThread(QThread):  # type: ignore[misc]
         self._config = config
 
     def run(self) -> None:
+        self._stop_event.clear()
         logger.info("AIThread: started.")
         while not self._stop_event.is_set():
             try:
