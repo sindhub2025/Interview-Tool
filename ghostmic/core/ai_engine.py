@@ -168,12 +168,18 @@ class AIThread(QThread):  # type: ignore[misc]
         while not self._stop_event.is_set():
             try:
                 transcript = self._queue.get(timeout=0.2)
+                logger.info("AIThread: got request from queue with %d segments", len(transcript))
             except queue.Empty:
                 continue
 
-            if pyqtSignal is not None:
-                self.ai_thinking.emit()  # type: ignore[attr-defined]
-            self._generate(transcript)
+            # Removed ai_thinking signal - show_thinking will be called from main thread
+            # when request is accepted instead
+            logger.info("AIThread: calling _generate() now...")
+            try:
+                self._generate(transcript)
+                logger.info("AIThread: _generate() completed")
+            except Exception as e:
+                logger.error("AIThread: _generate() raised exception: %s", e, exc_info=True)
 
         logger.info("AIThread: stopped.")
 
@@ -207,18 +213,26 @@ class AIThread(QThread):  # type: ignore[misc]
 
     def _generate(self, transcript: List[TranscriptSegment]) -> None:
         # Keep old/new config keys for compatibility, then normalize to active provider.
+        logger.info("AIThread: _generate() starting with %d segments", len(transcript))
         requested_main = self._config.get("main_backend") or self._config.get("backend", "groq")
         requested_fallback = self._config.get("fallback_backend", "groq")
         main_backend = self._resolve_active_backend(requested_main)
         fallback_backend = self._resolve_active_backend(requested_fallback)
         enable_fallback = bool(self._config.get("enable_fallback", False))
         
+        logger.info("AIThread: using main_backend=%s, fallback_backend=%s, enable_fallback=%s", 
+                   main_backend, fallback_backend, enable_fallback)
+        
         context = self._build_context(transcript)
+        logger.info("AIThread: context built (length=%d)", len(context))
         system_prompt = self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
         temperature = float(self._config.get("temperature", 0.7))
+        logger.info("AIThread: temperature=%.1f", temperature)
 
         # Try main backend first
+        logger.info("AIThread: trying main backend: %s", main_backend)
         success = self._try_generate(main_backend, context, system_prompt, temperature)
+        logger.info("AIThread: main backend result: success=%s", success)
         
         # If main failed and fallback is enabled, try fallback backend
         if not success and enable_fallback and fallback_backend != main_backend:
@@ -235,19 +249,26 @@ class AIThread(QThread):  # type: ignore[misc]
         
         Returns True if successful, False if failed.
         """
+        logger.info("AIThread: _try_generate() starting for backend=%s", backend)
         retries = int(self._config.get("runtime_rate_limit_retries", RUNTIME_RATE_LIMIT_RETRIES))
         base_delay = float(
             self._config.get("runtime_rate_limit_retry_delay", RUNTIME_RATE_LIMIT_BASE_DELAY)
         )
         retries = max(1, retries)
+        logger.info("AIThread: _try_generate() retries=%d, base_delay=%.1f", retries, base_delay)
 
         for attempt in range(retries):
+            logger.info("AIThread: _try_generate() attempt %d/%d", attempt + 1, retries)
             try:
                 if backend == "openai":
+                    logger.info("AIThread: calling _generate_openai()")
                     self._generate_openai(context, system_prompt, temperature)
+                    logger.info("AIThread: _generate_openai() completed")
                     return True
                 if backend == "groq":
+                    logger.info("AIThread: calling _generate_groq()")
                     self._generate_groq(context, system_prompt, temperature)
+                    logger.info("AIThread: _generate_groq() completed")
                     return True
 
                 logger.error("AIThread: unknown backend %r", backend)
@@ -255,6 +276,7 @@ class AIThread(QThread):  # type: ignore[misc]
                     self.ai_error.emit(f"Unknown backend: {backend}")  # type: ignore[attr-defined]
                 return False
             except Exception as exc:  # pylint: disable=broad-except
+                logger.error("AIThread: _try_generate() caught exception: %s", exc, exc_info=True)
                 rate_limited = _is_rate_limited_shared(exc)
                 can_retry = (
                     rate_limited
@@ -319,6 +341,7 @@ class AIThread(QThread):  # type: ignore[misc]
     def _generate_groq(
         self, context: str, system_prompt: str, temperature: float
     ) -> None:
+        logger.info("AIThread: _generate_groq() called")
         try:
             from openai import OpenAI  # type: ignore[import]
         except ImportError as e:
@@ -334,10 +357,12 @@ class AIThread(QThread):  # type: ignore[misc]
                 self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
             raise ValueError(error_msg)
 
+        logger.info("AIThread: creating Groq client...")
         client = OpenAI(
             api_key=api_key,
             base_url="https://api.groq.com/openai/v1",
         )
+        logger.info("AIThread: Groq client created, calling _generate_stream()...")
         self._generate_stream(client, system_prompt, context, temperature, "groq")
 
     # ------------------------------------------------------------------
@@ -347,9 +372,11 @@ class AIThread(QThread):  # type: ignore[misc]
     def _generate_stream(
         self, client, system_prompt: str, context: str, temperature: float, backend_name: str
     ) -> None:
-        """Generate response from client using Responses API streaming.
+        """Generate response using standard Chat Completions streaming API.
         
-        Handles event-driven state machine for both OpenAI and Groq backends.
+        More stable than the responses API and widely supported by both OpenAI and Groq.
+        Collects all chunks and emits complete response at the end to avoid
+        threading issues with UI updates.
         
         Args:
             client: OpenAI client instance (supports both OpenAI and Groq via base_url)
@@ -358,189 +385,91 @@ class AIThread(QThread):  # type: ignore[misc]
             temperature: Temperature setting
             backend_name: "openai" or "groq" for logging
         """
-        # Response state machine: pending → streaming → completed/refusal
+        logger.info("AIThread (%s): _generate_stream() starting", backend_name)
         full_response: List[str] = []
-        response_state = "pending"
-        error_to_emit = None
-        stream = None
-        unknown_event_types: set[str] = set()
 
         try:
-            default_model = "llama-3.3-70b-versatile" if backend_name == "groq" else "gpt-5-mini"
+            default_model = "llama-3.3-70b-versatile" if backend_name == "groq" else "gpt-4o-mini"
             model = self._config.get(f"{backend_name}_model", default_model)
-            stream = client.responses.create(
+            logger.info("AIThread (%s): using model=%s, context_length=%d", 
+                       backend_name, model, len(context))
+            
+            # Use standard Chat Completions API with streaming
+            logger.info("AIThread (%s): calling client.chat.completions.create()", backend_name)
+            stream = client.chat.completions.create(
                 model=model,
-                input=[
+                messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": context},
                 ],
                 temperature=temperature,
-                max_output_tokens=512,
+                max_tokens=512,
                 stream=True,
             )
+            logger.info("AIThread (%s): stream object created, starting iteration", backend_name)
 
             stream_timeout = self._config.get("stream_timeout", 30.0)
             stream_start = time.time()
+            chunk_count = 0
+            logger.info("AIThread (%s): stream_timeout=%s", backend_name, stream_timeout)
 
-            for event in stream:
+            for chunk in stream:
                 if self._stop_event.is_set():
-                    response_state = "cancelled"
                     logger.info("AIThread (%s): stream cancelled by stop event", backend_name)
                     break
 
-                # Hard timeout check on each event
+                # Hard timeout check on each chunk
                 elapsed = time.time() - stream_start
                 if elapsed > stream_timeout:
-                    response_state = "error"
-                    error_to_emit = f"Stream timeout after {stream_timeout}s"
-                    logger.error("AIThread (%s): %s", backend_name, error_to_emit)
-                    break
+                    error_msg = f"Stream timeout after {stream_timeout}s"
+                    logger.error("AIThread (%s): %s", backend_name, error_msg)
+                    raise RuntimeError(error_msg)
 
-                # State transition: pending → streaming on first delta
-                if response_state == "pending" and event.type == "response.output_text.delta":
-                    response_state = "streaming"
-
-                # Event-driven state machine
-                if event.type == "response.created":
-                    logger.debug("AIThread (%s): response created", backend_name)
-
-                elif event.type == "response.output_text.delta":
-                    # Events guarantee ordering - no state guard needed
-                    delta = event.delta or ""
-                    if delta:
-                        full_response.append(delta)
-                        if self._on_chunk:
-                            self._on_chunk(delta)
-                        if pyqtSignal is not None:
-                            self.ai_response_chunk.emit(delta)  # type: ignore[attr-defined]
-
-                elif event.type == "response.output_text.done":
-                    logger.debug("AIThread (%s): output text done", backend_name)
-
-                elif event.type == "response.refusal.delta":
-                    # Accumulate refusal text
-                    refusal_delta = event.delta or ""
-                    if refusal_delta:
-                        full_response.append(refusal_delta)
-
-                elif event.type == "response.refusal.done":
-                    # Refusal completed - state transition and stop processing
-                    response_state = "refusal"
-                    refusal_msg = "".join(full_response) or "Model refused to respond"
-                    error_to_emit = f"Model declined: {refusal_msg}"
-                    logger.warning("AIThread (%s): model refusal: %s", backend_name, refusal_msg)
-                    break
-
-                elif event.type == "response.completed":
-                    response_state = "completed"
-                    logger.debug("AIThread (%s): response completed", backend_name)
-
-                elif event.type == "response.tool_calls":
-                    self._route_tool_calls(event, backend_name)
-
-                else:
-                    if event.type not in unknown_event_types:
-                        unknown_event_types.add(event.type)
+                # Extract delta from chunk
+                if chunk.choices and len(chunk.choices) > 0:
+                    choice = chunk.choices[0]
+                    
+                    # Check for finish_reason to detect completion
+                    if choice.finish_reason in ("stop", "length", "tool_calls"):
                         logger.debug(
-                            "AIThread (%s): unknown event type observed: %s",
+                            "AIThread (%s): stream finished (reason: %s, chunks: %d)",
                             backend_name,
-                            event.type,
+                            choice.finish_reason,
+                            chunk_count,
                         )
+                        break
+                    
+                    # Extract and accumulate delta content
+                    if choice.delta and choice.delta.content:
+                        delta = choice.delta.content
+                        full_response.append(delta)
+                        chunk_count += 1
 
         except Exception as exc:  # pylint: disable=broad-except
-            response_state = "error"
-            error_to_emit = f"Stream error: {exc}"
-            logger.error("AIThread (%s): %s", backend_name, error_to_emit)
+            error_msg = f"Stream error: {exc}"
+            logger.error("AIThread (%s): %s", backend_name, error_msg)
+            raise RuntimeError(error_msg) from exc
 
         finally:
-            # Hard cancel: explicitly close the stream to prevent resource leak
-            if stream is not None:
+            # Explicitly close the stream to prevent resource leak
+            if hasattr(stream, 'close'):
                 try:
-                    if hasattr(stream, 'close'):
-                        stream.close()
+                    stream.close()
                 except Exception as e:  # pylint: disable=broad-except
                     logger.debug("AIThread (%s): error closing stream: %s", backend_name, e)
 
-        if unknown_event_types:
-            logger.debug(
-                "AIThread (%s): suppressed repeated unknown event logs for types: %s",
-                backend_name,
-                sorted(unknown_event_types),
-            )
-
-        # Final state handling
+        # Emit the complete response only once (thread-safe)
         complete = "".join(full_response)
-
-        if response_state == "cancelled":
-            if complete:
-                logger.warning(
-                    "AIThread (%s): cancelled stream emitted partial response (%d chars)",
-                    backend_name,
-                    len(complete),
-                )
-                if self._on_ready:
-                    self._on_ready(complete)
-                if pyqtSignal is not None:
-                    self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
-            return
-
-        if error_to_emit:
-            if complete:
-                logger.warning(
-                    "AIThread (%s): stream ended with error, emitting partial response (%d chars)",
-                    backend_name,
-                    len(complete),
-                )
-                if self._on_ready:
-                    self._on_ready(complete)
-                if pyqtSignal is not None:
-                    self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
-                return
-            raise RuntimeError(error_to_emit)
-
-        if response_state == "completed":
+        if complete:
             if self._on_ready:
                 self._on_ready(complete)
             if pyqtSignal is not None:
                 self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
-        elif response_state != "completed":
-            if complete:
-                logger.warning(
-                    "AIThread (%s): stream ended in state %s, emitting partial response (%d chars)",
-                    backend_name,
-                    response_state,
-                    len(complete),
-                )
-                if self._on_ready:
-                    self._on_ready(complete)
-                if pyqtSignal is not None:
-                    self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
-            else:
-                error_msg = f"Response incomplete: {response_state}"
-                logger.warning(
-                    "AIThread (%s): stream ended in unexpected state: %s (response incomplete)",
-                    backend_name,
-                    response_state,
-                )
-                raise RuntimeError(error_msg)
-
-    def _route_tool_calls(self, event, backend_name: str) -> None:
-        """Route tool call events to a dedicated handler path.
-
-        Agents/tool execution is not wired yet, but this keeps event handling centralized.
-        """
-        tool_calls = getattr(event, "tool_calls", None)
-        if tool_calls:
-            logger.info(
-                "AIThread (%s): received %d tool call(s); execution path not enabled yet",
-                backend_name,
-                len(tool_calls),
-            )
+            logger.info("AIThread (%s): response ready (%d chars)", backend_name, len(complete))
         else:
-            logger.info(
-                "AIThread (%s): received tool call event without payload",
-                backend_name,
-            )
+            error_msg = "No response generated from AI"
+            logger.warning("AIThread (%s): %s", backend_name, error_msg)
+            raise RuntimeError(error_msg)
 
     # ------------------------------------------------------------------
     # Connectivity Test (for startup and manual testing)
@@ -584,7 +513,7 @@ class AIThread(QThread):  # type: ignore[misc]
         if not api_key:
             raise ValueError("OpenAI API key not set")
 
-        model = self._config.get("openai_model", "gpt-5-mini")
+        model = self._config.get("openai_model", "gpt-4o-mini")
         max_retries = 3
         retry_delay = 1.0
 
@@ -596,29 +525,21 @@ class AIThread(QThread):  # type: ignore[misc]
                     raise RuntimeError("openai package not installed") from e
 
                 client = OpenAI(api_key=api_key)
-                response = client.responses.create(
+                response = client.chat.completions.create(
                     model=model,
-                    input=[{"role": "user", "content": message}],
+                    messages=[{"role": "user", "content": message}],
                     temperature=0.7,
-                    max_output_tokens=100,
+                    max_tokens=100,
                     timeout=10.0,
                 )
                 
-                # Safely extract response text from output structure
-                if hasattr(response, 'output') and response.output:
-                    text_parts = []
-                    for item in response.output:
-                        if getattr(item, 'type', None) == 'text':
-                            text_parts.append(getattr(item, 'text', ''))
-                    if text_parts:
-                        return "".join(text_parts)
+                # Extract response text from standard Chat Completions response
+                if response.choices and len(response.choices) > 0:
+                    choice = response.choices[0]
+                    if choice.message and choice.message.content:
+                        return choice.message.content
                 
-                # Fallback to output_text property if available
-                if hasattr(response, 'output_text') and response.output_text:
-                    return response.output_text
-                
-                # Last resort: empty string
-                logger.warning("AIThread: OpenAI response had no output_text or output items")
+                logger.warning("AIThread: OpenAI response had no content")
                 return ""
 
             except TimeoutError as e:
@@ -663,29 +584,21 @@ class AIThread(QThread):  # type: ignore[misc]
                     base_url="https://api.groq.com/openai/v1",
                 )
 
-                response = client.responses.create(
+                response = client.chat.completions.create(
                     model=model,
-                    input=[{"role": "user", "content": message}],
+                    messages=[{"role": "user", "content": message}],
                     temperature=0.7,
-                    max_output_tokens=100,
+                    max_tokens=100,
                     timeout=10.0,
                 )
                 
-                # Safely extract response text from output structure
-                if hasattr(response, 'output') and response.output:
-                    text_parts = []
-                    for item in response.output:
-                        if getattr(item, 'type', None) == 'text':
-                            text_parts.append(getattr(item, 'text', ''))
-                    if text_parts:
-                        return "".join(text_parts)
+                # Extract response text from standard Chat Completions response
+                if response.choices and len(response.choices) > 0:
+                    choice = response.choices[0]
+                    if choice.message and choice.message.content:
+                        return choice.message.content
                 
-                # Fallback to output_text property if available
-                if hasattr(response, 'output_text') and response.output_text:
-                    return response.output_text
-                
-                # Last resort: empty string
-                logger.warning("AIThread: Groq response had no output_text or output items")
+                logger.warning("AIThread: Groq response had no content")
                 return ""
 
             except TimeoutError as e:

@@ -95,6 +95,7 @@ class HotkeyManager:
             return
 
         hotkeys: Dict[str, Callable] = {}
+        skipped_hotkeys = []
 
         for name, default_combo in DEFAULT_HOTKEYS.items():
             combo_raw = self._config.get(name, default_combo)
@@ -111,4 +112,33 @@ class HotkeyManager:
             self._listener.start()  # type: ignore[attr-defined]
             logger.info("HotkeyManager: registered %d hotkeys.", len(hotkeys))
         except Exception as exc:  # pylint: disable=broad-except
-            logger.error("HotkeyManager: failed to start listener: %s", exc)
+            # If the entire listener fails (often due to <win> key), try without problematic hotkeys
+            error_msg = str(exc).lower()
+            logger.warning(
+                "HotkeyManager: failed to start listener with all hotkeys: %s. "
+                "Attempting to start without Windows key hotkeys...", exc
+            )
+            
+            # Remove Windows key hotkeys and retry
+            hotkeys_retry = {
+                combo: handler
+                for combo, handler in hotkeys.items()
+                if "<win>" not in combo.lower() and "meta" not in combo.lower()
+            }
+            
+            if not hotkeys_retry:
+                logger.error(
+                    "HotkeyManager: no valid hotkeys remaining after removing "
+                    "Windows key combinations. Global hotkeys unavailable."
+                )
+                return
+            
+            try:
+                self._listener = keyboard.GlobalHotKeys(hotkeys_retry)
+                self._listener.start()  # type: ignore[attr-defined]
+                logger.info(
+                    "HotkeyManager: registered %d hotkeys (excluding Windows key).",
+                    len(hotkeys_retry),
+                )
+            except Exception as exc_retry:  # pylint: disable=broad-except
+                logger.error("HotkeyManager: failed to start listener even without Windows key: %s", exc_retry)

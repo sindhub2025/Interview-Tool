@@ -19,6 +19,7 @@ from typing import Optional
 
 from PyQt6.QtCore import (
     QEvent,
+    QObject,
     QPoint,
     QRect,
     QSize,
@@ -57,7 +58,7 @@ from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-RESIZE_MARGIN = 8  # pixels from edge that trigger resize
+RESIZE_MARGIN = 12  # pixels from edge that trigger resize
 QWIDGETSIZE_MAX = 16_777_215  # Qt maximum widget dimension
 
 
@@ -164,6 +165,7 @@ class MainWindow(QMainWindow):
         self._resize_edge: Optional[str] = None
         self._resize_origin: Optional[QPoint] = None
         self._resize_geometry: Optional[QRect] = None
+        self._resize_filter_targets: list[QWidget] = []
         self._dictation_idle_ms = int(
             self._config.get("dictation", {}).get("commit_idle_ms", 1200)
         )
@@ -262,6 +264,7 @@ class MainWindow(QMainWindow):
         self._splitter = QSplitter(Qt.Orientation.Vertical)
         self._splitter.setHandleWidth(4)
         self._splitter.setStyleSheet("QSplitter::handle { background: #333366; }")
+        self._splitter.setChildrenCollapsible(False)
         root_layout.addWidget(self._splitter, stretch=1)
 
         self.transcript_panel = TranscriptPanel()
@@ -269,6 +272,8 @@ class MainWindow(QMainWindow):
 
         self.ai_panel = AIResponsePanel()
         self._splitter.addWidget(self.ai_panel)
+
+        self._install_resize_event_filters()
 
         # Hidden dictation target used for Windows native Win+H text input.
         self._dictation_input = QLineEdit()
@@ -281,9 +286,73 @@ class MainWindow(QMainWindow):
         self._dictation_input.returnPressed.connect(self._commit_dictation_text)
         root_layout.addWidget(self._dictation_input)
 
-        # 60/40 split
+        # 20/80 split so the AI response area gets the larger share.
         total_h = self._config.get("ui", {}).get("window_height", 650) - 80
-        self._splitter.setSizes([int(total_h * 0.6), int(total_h * 0.4)])
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 4)
+        self._splitter.setSizes([int(total_h * 0.20), int(total_h * 0.80)])
+
+    def _install_resize_event_filters(self) -> None:
+        """Capture edge-drag resize gestures even when child widgets are under cursor."""
+        self._resize_filter_targets = [
+            self._root,
+            self._title_bar,
+            self._controls,
+            self._splitter,
+            self.transcript_panel,
+            self.ai_panel,
+        ]
+        for widget in self._resize_filter_targets:
+            widget.setMouseTracking(True)
+            widget.installEventFilter(self)
+
+    def _is_resize_cursor(self, cursor: Qt.CursorShape) -> bool:
+        return cursor in {
+            Qt.CursorShape.SizeVerCursor,
+            Qt.CursorShape.SizeHorCursor,
+            Qt.CursorShape.SizeFDiagCursor,
+            Qt.CursorShape.SizeBDiagCursor,
+        }
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj in self._resize_filter_targets and isinstance(event, QMouseEvent):
+            event_type = event.type()
+            pos_in_window = obj.mapTo(self, event.position().toPoint())
+            edge = self._get_resize_edge(pos_in_window)
+
+            if (
+                event_type == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+                and edge
+            ):
+                self._resize_edge = edge
+                self._resize_origin = event.globalPosition().toPoint()
+                self._resize_geometry = self.geometry()
+                return True
+
+            if event_type == QEvent.Type.MouseMove:
+                if (
+                    self._resize_edge
+                    and self._resize_origin
+                    and self._resize_geometry
+                    and (event.buttons() & Qt.MouseButton.LeftButton)
+                ):
+                    delta = event.globalPosition().toPoint() - self._resize_origin
+                    self._do_resize(delta)
+                    return True
+
+                if edge:
+                    obj.setCursor(self._cursor_for_edge(edge))
+                elif self._is_resize_cursor(obj.cursor().shape()):
+                    obj.unsetCursor()
+
+            if event_type == QEvent.Type.MouseButtonRelease and self._resize_edge:
+                self._resize_edge = None
+                self._resize_origin = None
+                self._resize_geometry = None
+                return True
+
+        return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------
     # Show + stealth
@@ -388,6 +457,8 @@ class MainWindow(QMainWindow):
             self.resize(
                 ui.get("window_width", 420), ui.get("window_height", 650)
             )
+            total_h = ui.get("window_height", 650) - 80
+            self._splitter.setSizes([int(total_h * 0.20), int(total_h * 0.80)])
 
     # ------------------------------------------------------------------
     # Resize logic (frameless window)
@@ -467,7 +538,7 @@ class MainWindow(QMainWindow):
             return
         dx, dy = delta.x(), delta.y()
         x, y, w, h = g.x(), g.y(), g.width(), g.height()
-        min_w, min_h = 280, 200
+        min_w, min_h = 240, 170
 
         if "right" in edge:
             w = max(min_w, w + dx)

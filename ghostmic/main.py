@@ -264,6 +264,7 @@ class GhostMicApp:
         self._recording_lock = threading.Lock()
         self._dictation_hotkey_guard_until = 0.0
         self._startup_api_worker = None
+        self._ui_dispatcher = None
 
         # Services
         self._thread_coordinator = ThreadCoordinator()
@@ -308,8 +309,24 @@ class GhostMicApp:
 
     def _setup_main_window(self) -> None:
         from ghostmic.ui.main_window import MainWindow
+        from PyQt6.QtCore import QObject, pyqtSignal
+
+        class UiActionDispatcher(QObject):
+            toggle_recording_requested = pyqtSignal()
+            toggle_window_requested = pyqtSignal()
+            generate_response_requested = pyqtSignal()
+            copy_response_requested = pyqtSignal()
+            clear_transcript_requested = pyqtSignal()
+            win_h_dictation_requested = pyqtSignal()
 
         self._window = MainWindow(self._config, config_path=self._config_path)
+        self._ui_dispatcher = UiActionDispatcher()
+        self._ui_dispatcher.toggle_recording_requested.connect(self._toggle_recording)
+        self._ui_dispatcher.toggle_window_requested.connect(self._toggle_window)
+        self._ui_dispatcher.generate_response_requested.connect(self._generate_ai_response)
+        self._ui_dispatcher.copy_response_requested.connect(self._copy_last_response)
+        self._ui_dispatcher.clear_transcript_requested.connect(self._clear_transcript)
+        self._ui_dispatcher.win_h_dictation_requested.connect(self._on_win_h_dictation)
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)
@@ -334,12 +351,10 @@ class GhostMicApp:
             return
         if success:
             self._window.set_api_status(True, backend.title())
-            self._window.ai_panel.start_response()
-            self._window.ai_panel.finish_response(message)
             self._logger.info("Startup API test successful: %s", backend)
         else:
             self._window.set_api_status(False)
-            self._window.ai_panel.show_error(f"API Connection Failed: {message}")
+            self._window.controls.set_status("API connection failed", "#f85149")
             self._logger.warning("Startup API test failed: %s", message)
 
     def _cleanup_startup_worker(self) -> None:
@@ -635,6 +650,8 @@ class GhostMicApp:
             from ghostmic.core.ai_engine import AIThread
 
             self._ai_thread = AIThread(self._config.get("ai", {}))
+            # Use default QueuedConnection (non-blocking) for cross-thread signals
+            # This allows the AI thread to emit and continue without waiting
             self._ai_thread.ai_thinking.connect(
                 lambda: self._window.ai_panel.show_thinking() if self._window else None
             )
@@ -658,13 +675,39 @@ class GhostMicApp:
         try:
             from ghostmic.utils.hotkeys import HotkeyManager
 
+            dispatcher = self._ui_dispatcher
+
             callbacks = {
-                "toggle_recording": self._toggle_recording,
-                "toggle_window": self._toggle_window,
-                "generate_response": self._generate_ai_response,
-                "copy_response": self._copy_last_response,
-                "clear_transcript": self._clear_transcript,
-                "win_h_dictation": self._on_win_h_dictation,
+                "toggle_recording": (
+                    (lambda: dispatcher.toggle_recording_requested.emit())
+                    if dispatcher
+                    else self._toggle_recording
+                ),
+                "toggle_window": (
+                    (lambda: dispatcher.toggle_window_requested.emit())
+                    if dispatcher
+                    else self._toggle_window
+                ),
+                "generate_response": (
+                    (lambda: dispatcher.generate_response_requested.emit())
+                    if dispatcher
+                    else self._generate_ai_response
+                ),
+                "copy_response": (
+                    (lambda: dispatcher.copy_response_requested.emit())
+                    if dispatcher
+                    else self._copy_last_response
+                ),
+                "clear_transcript": (
+                    (lambda: dispatcher.clear_transcript_requested.emit())
+                    if dispatcher
+                    else self._clear_transcript
+                ),
+                "win_h_dictation": (
+                    (lambda: dispatcher.win_h_dictation_requested.emit())
+                    if dispatcher
+                    else self._on_win_h_dictation
+                ),
             }
             self._hotkey_manager = HotkeyManager(
                 self._config.get("hotkeys", {}), callbacks
@@ -778,10 +821,17 @@ class GhostMicApp:
 
         segment.text = clean_text(getattr(segment, "text", ""))
         if not segment.text:
+            self._logger.debug("Transcript segment text was empty after cleaning; ignoring.")
             return False
 
         with self._transcript_lock:
             self._transcript_history.append(segment)
+            self._logger.info(
+                "Transcript segment added: source=%s, text=%r, total_segments=%d",
+                getattr(segment, "source", "unknown"),
+                segment.text[:50],  # First 50 chars
+                len(self._transcript_history),
+            )
             if len(self._transcript_history) > 1000:
                 self._transcript_history = self._transcript_history[-1000:]
 
@@ -810,8 +860,11 @@ class GhostMicApp:
             self._window.controls.set_status("Dictation captured", "#58a6ff")
 
     def _on_ai_response_ready(self, full_text: str) -> None:
+        self._logger.info("_on_ai_response_ready called with %d chars", len(full_text))
         if self._window:
             self._window.ai_panel.finish_response(full_text)
+            self._window.controls.set_status("✓ Response ready", "#3fb950")
+            self._logger.info("AI response displayed successfully (%d chars).", len(full_text))
 
     def _on_settings_requested(self) -> None:
         from ghostmic.ui.settings_dialog import SettingsDialog

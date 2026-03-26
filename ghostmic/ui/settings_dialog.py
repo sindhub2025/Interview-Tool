@@ -5,7 +5,6 @@ Stealth (WDA_EXCLUDEFROMCAPTURE) is applied to this window too.
 
 from __future__ import annotations
 
-import copy
 import sys
 from typing import Any, Dict
 
@@ -70,7 +69,6 @@ class SettingsDialog(QDialog):
         self._expose_openai_provider = bool(
             self._config.get("ai", {}).get("expose_openai_provider", False)
         )
-        self._api_test_worker: ApiConnectivityWorker | None = None
         self.setWindowTitle("GhostMic — Settings")
         self.setMinimumSize(520, 460)
         self.setStyleSheet(MAIN_STYLE)
@@ -286,15 +284,6 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Session context:", self._session_ctx)
 
-        # Test connection button
-        self._test_btn = QPushButton("Test API Connection")
-        self._test_btn.clicked.connect(self._test_api_connection)
-        form.addRow("", self._test_btn)
-
-        self._test_result_label = QLabel("")
-        self._test_result_label.setWordWrap(True)
-        form.addRow("", self._test_result_label)
-
         return w
 
     # ── Tab: Appearance ───────────────────────────────────────────────
@@ -488,69 +477,6 @@ class SettingsDialog(QDialog):
 
         self.settings_saved.emit(cfg)
         self.accept()
-
-    def _test_api_connection(self) -> None:
-        """Test the API connection with the currently configured settings."""
-        if self._api_test_worker is not None and self._api_test_worker.isRunning():
-            return
-
-        self._test_result_label.setText("Testing API connection...")
-        self._test_result_label.setStyleSheet("color: #888;")
-        self._test_btn.setEnabled(False)
-
-        # Build a temporary config with current dialog values
-        test_config = copy.deepcopy(self._config)
-        test_config.setdefault("ai", {})
-        test_config["ai"]["expose_openai_provider"] = self._expose_openai_provider
-
-        if self._expose_openai_provider:
-            test_config["ai"]["openai_api_key"] = self._openai_api_key_edit.text()
-            test_config["ai"]["openai_model"] = self._openai_model_combo.currentText()
-
-        test_config["ai"]["groq_api_key"] = self._groq_api_key_edit.text()
-        test_config["ai"]["groq_model"] = self._groq_model_combo.currentText()
-        selected_backend = (
-            self._backend_combo.currentText()
-            if self._expose_openai_provider
-            else "groq"
-        )
-        test_config["ai"]["backend"] = selected_backend
-        test_config["ai"]["main_backend"] = selected_backend
-        if not self._expose_openai_provider:
-            test_config["ai"]["fallback_backend"] = "groq"
-            test_config["ai"]["enable_fallback"] = False
-
-        ai_test_config = test_config.get("ai")
-        if not isinstance(ai_test_config, dict):
-            self._test_result_label.setText("✗ Missing AI settings in config")
-            self._test_result_label.setStyleSheet("color: #ef4444;")
-            self._test_btn.setEnabled(True)
-            return
-
-        self._api_test_worker = ApiConnectivityWorker(copy.deepcopy(ai_test_config), self)
-        self._api_test_worker.result_ready.connect(self._on_api_test_result)
-        self._api_test_worker.finished.connect(self._on_api_test_finished)
-        self._api_test_worker.start()
-
-    def _on_api_test_result(self, success: bool, backend: str, message: str) -> None:
-        if success:
-            self._test_result_label.setText(
-                f"✓ Connected to {backend.title()}!\n{message[:200]}"
-            )
-            self._test_result_label.setStyleSheet("color: #4ade80;")
-            return
-
-        self._test_result_label.setText(
-            f"✗ Connection Failed ({backend}):\n{message[:200]}"
-        )
-        self._test_result_label.setStyleSheet("color: #ef4444;")
-
-    def _on_api_test_finished(self) -> None:
-        self._test_btn.setEnabled(True)
-        if self._api_test_worker is None:
-            return
-        self._api_test_worker.deleteLater()
-        self._api_test_worker = None
 
     # ------------------------------------------------------------------
     # Device helpers
