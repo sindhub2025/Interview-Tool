@@ -127,6 +127,11 @@ def _default_config() -> dict:
             "generate_response": "ctrl+g",
             "copy_response": "ctrl+shift+c",
             "clear_transcript": "ctrl+shift+x",
+            "win_h_dictation": "win+h",
+        },
+        "dictation": {
+            "enabled": True,
+            "commit_idle_ms": 1200,
         },
     }
 
@@ -252,6 +257,7 @@ class GhostMicApp:
         self._model_error_message: Optional[str] = None
         self._last_transcription_drop_log = 0.0
         self._recording_active = False
+        self._dictation_hotkey_guard_until = 0.0
 
     def run(self) -> int:
         """Initialise everything and start the Qt event loop."""
@@ -294,6 +300,7 @@ class GhostMicApp:
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)
+        self._window.dictation_committed.connect(self._on_dictation_committed)
 
     def _test_api_startup(self) -> None:
         """Test API connectivity on startup and display result."""
@@ -603,6 +610,7 @@ class GhostMicApp:
                 "generate_response": self._generate_ai_response,
                 "copy_response": self._copy_last_response,
                 "clear_transcript": self._clear_transcript,
+                "win_h_dictation": self._on_win_h_dictation,
             }
             self._hotkey_manager = HotkeyManager(
                 self._config.get("hotkeys", {}), callbacks
@@ -621,6 +629,10 @@ class GhostMicApp:
             and self._transcription_thread
             and self._transcription_thread.is_ready()
         )
+
+    def _is_dictation_enabled(self) -> bool:
+        dcfg = self._config.get("dictation", {})
+        return bool(dcfg.get("enabled", True))
 
     def _on_record_toggled(self, recording: bool) -> None:
         if recording:
@@ -698,18 +710,23 @@ class GhostMicApp:
             self._window.controls.set_status("Transcribing…", "#58a6ff")
 
     def _on_transcription_ready(self, segment) -> None:
-        if not self._recording_active:
+        self._append_transcript_segment(segment, require_recording=True)
+
+    def _append_transcript_segment(self, segment, require_recording: bool) -> bool:
+        if require_recording and not self._recording_active:
             self._logger.debug(
                 "Ignoring transcription while recording is off (source=%s).",
                 getattr(segment, "source", "unknown"),
             )
-            return
+            return False
 
         from ghostmic.utils.text_processing import clean_text
 
-        segment.text = clean_text(segment.text)
+        segment.text = clean_text(getattr(segment, "text", ""))
+        if not segment.text:
+            return False
+
         self._transcript_history.append(segment)
-        # Cap history
         if len(self._transcript_history) > 1000:
             self._transcript_history = self._transcript_history[-1000:]
 
@@ -717,13 +734,25 @@ class GhostMicApp:
             self._window.transcript_panel.add_segment(segment)
             self._window.controls.set_status("Listening…", "#3fb950")
 
-        # Auto-trigger AI for speaker segments
         ai_cfg = self._config.get("ai", {})
         if (
             ai_cfg.get("trigger_mode", "auto") == "auto"
-            and segment.source == "speaker"
+            and getattr(segment, "source", "") == "speaker"
         ):
             self._generate_ai_response()
+
+        return True
+
+    def _on_dictation_committed(self, text: str) -> None:
+        if not text.strip():
+            return
+
+        from ghostmic.core.transcription_engine import TranscriptSegment
+
+        segment = TranscriptSegment(text=text, source="user", confidence=1.0)
+        accepted = self._append_transcript_segment(segment, require_recording=False)
+        if accepted and self._window:
+            self._window.controls.set_status("Dictation captured", "#58a6ff")
 
     def _on_ai_response_ready(self, full_text: str) -> None:
         if self._window:
@@ -769,14 +798,49 @@ class GhostMicApp:
             self._window.controls.set_recording(recording)
             self._on_record_toggled(recording)
 
+    def _on_win_h_dictation(self) -> None:
+        if sys.platform != "win32":
+            self._logger.debug("Win+H dictation is only supported on Windows.")
+            return
+        if not self._is_dictation_enabled() or not self._window:
+            return
+
+        now = time.time()
+        if now < self._dictation_hotkey_guard_until:
+            return
+        self._dictation_hotkey_guard_until = now + 0.35
+
+        focused = self._window.focus_dictation_target()
+        if focused:
+            self._window.controls.set_status("Win+H dictation ready", "#58a6ff")
+        else:
+            self._logger.warning("Unable to focus dictation target for Win+H capture.")
+
     def _generate_ai_response(self) -> None:
-        if self._ai_thread and self._transcript_history:
-            accepted = self._ai_thread.request_response(self._transcript_history)
-            if accepted:
-                if self._window:
-                    self._window.ai_panel.start_response()
-            else:
-                self._logger.debug("AI request was not queued (debounced or dropped).")
+        if not self._transcript_history:
+            if self._window:
+                self._window.controls.set_status("No transcript available for AI", "#f0883e")
+            return
+
+        self._ensure_ai_thread()
+        if self._ai_thread is None:
+            self._logger.warning("AI request skipped: AI thread is unavailable.")
+            if self._window:
+                self._window.controls.set_status("AI unavailable", "#f85149")
+                self._window.ai_panel.show_error("AI engine is unavailable. Check dependencies/API settings.")
+            return
+
+        accepted = self._ai_thread.request_response(self._transcript_history)
+        if accepted:
+            if self._window:
+                self._window.ai_panel.start_response()
+                self._window.controls.set_status("Generating response…", "#58a6ff")
+            return
+
+        reason = self._ai_thread.last_reject_reason()
+        self._logger.debug("AI request was not queued: %s", reason)
+        if self._window:
+            self._window.controls.set_status(f"AI request skipped ({reason})", "#f0883e")
 
     def _copy_last_response(self) -> None:
         # Copy from the most recent AI response card (best effort)

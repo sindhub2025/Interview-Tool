@@ -42,6 +42,11 @@
     "toggle_window": "ctrl+shift+h",
     "generate_response": "ctrl+g",
     "copy_response": "ctrl+shift+c",
-    "clear_transcript": "ctrl+shift+x"
+    "clear_transcript": "ctrl+shift+x",
+    "win_h_dictation": "win+h"
+  },
+  "dictation": {
+    "enabled": true,
+    "commit_idle_ms": 1200
   }
 }

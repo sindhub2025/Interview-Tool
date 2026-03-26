@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -122,6 +123,21 @@ class SettingsDialog(QDialog):
 
         self._hotkey_copy = QLineEdit()
         form.addRow("Copy response hotkey:", self._hotkey_copy)
+
+        self._hotkey_clear = QLineEdit()
+        form.addRow("Clear transcript hotkey:", self._hotkey_clear)
+
+        self._hotkey_dictation = QLineEdit()
+        form.addRow("Win+H dictation hotkey:", self._hotkey_dictation)
+
+        self._dictation_enabled = QCheckBox("Enable Win+H dictation capture")
+        form.addRow("Dictation:", self._dictation_enabled)
+
+        self._dictation_idle_spin = QSpinBox()
+        self._dictation_idle_spin.setRange(300, 5000)
+        self._dictation_idle_spin.setSingleStep(100)
+        self._dictation_idle_spin.setSuffix(" ms")
+        form.addRow("Dictation commit idle:", self._dictation_idle_spin)
 
         return w
 
@@ -330,6 +346,12 @@ class SettingsDialog(QDialog):
         self._hotkey_window.setText(hotkeys.get("toggle_window", "ctrl+shift+h"))
         self._hotkey_ai.setText(hotkeys.get("generate_response", "ctrl+g"))
         self._hotkey_copy.setText(hotkeys.get("copy_response", "ctrl+shift+c"))
+        self._hotkey_clear.setText(hotkeys.get("clear_transcript", "ctrl+shift+x"))
+        self._hotkey_dictation.setText(hotkeys.get("win_h_dictation", "win+h"))
+
+        dictation = self._config.get("dictation", {})
+        self._dictation_enabled.setChecked(bool(dictation.get("enabled", True)))
+        self._dictation_idle_spin.setValue(int(dictation.get("commit_idle_ms", 1200)))
 
         # Audio
         model_size = transcription.get("model_size", "base.en")
@@ -386,6 +408,12 @@ class SettingsDialog(QDialog):
         cfg["hotkeys"]["toggle_window"] = self._hotkey_window.text()
         cfg["hotkeys"]["generate_response"] = self._hotkey_ai.text()
         cfg["hotkeys"]["copy_response"] = self._hotkey_copy.text()
+        cfg["hotkeys"]["clear_transcript"] = self._hotkey_clear.text()
+        cfg["hotkeys"]["win_h_dictation"] = self._hotkey_dictation.text()
+
+        cfg.setdefault("dictation", {})
+        cfg["dictation"]["enabled"] = self._dictation_enabled.isChecked()
+        cfg["dictation"]["commit_idle_ms"] = self._dictation_idle_spin.value()
 
         # Transcription
         cfg.setdefault("transcription", {})

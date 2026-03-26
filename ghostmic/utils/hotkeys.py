@@ -24,6 +24,7 @@ DEFAULT_HOTKEYS: Dict[str, str] = {
     "generate_response": "<ctrl>+g",
     "copy_response": "<ctrl>+<shift>+c",
     "clear_transcript": "<ctrl>+<shift>+x",
+    "win_h_dictation": "<win>+h",
 }
 
 

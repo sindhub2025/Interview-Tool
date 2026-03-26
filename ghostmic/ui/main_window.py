@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QSizePolicy,
@@ -153,6 +154,8 @@ class MainWindow(QMainWindow):
         parent: Optional parent widget.
     """
 
+    dictation_committed = pyqtSignal(str)
+
     def __init__(self, config: dict, config_path: Optional[str] = None, parent=None) -> None:
         super().__init__(parent)
         self._config = config
@@ -161,6 +164,12 @@ class MainWindow(QMainWindow):
         self._resize_edge: Optional[str] = None
         self._resize_origin: Optional[QPoint] = None
         self._resize_geometry: Optional[QRect] = None
+        self._dictation_idle_ms = int(
+            self._config.get("dictation", {}).get("commit_idle_ms", 1200)
+        )
+        self._dictation_timer = QTimer(self)
+        self._dictation_timer.setSingleShot(True)
+        self._dictation_timer.timeout.connect(self._commit_dictation_text)
 
         self._setup_window()
         self._build_ui()
@@ -257,6 +266,17 @@ class MainWindow(QMainWindow):
         self.ai_panel = AIResponsePanel()
         self._splitter.addWidget(self.ai_panel)
 
+        # Hidden dictation target used for Windows native Win+H text input.
+        self._dictation_input = QLineEdit()
+        self._dictation_input.setFixedSize(1, 1)
+        self._dictation_input.setStyleSheet(
+            "QLineEdit { border: none; background: transparent; color: transparent; }"
+        )
+        self._dictation_input.setPlaceholderText("")
+        self._dictation_input.textChanged.connect(self._on_dictation_text_changed)
+        self._dictation_input.returnPressed.connect(self._commit_dictation_text)
+        root_layout.addWidget(self._dictation_input)
+
         # 60/40 split
         total_h = self._config.get("ui", {}).get("window_height", 650) - 80
         self._splitter.setSizes([int(total_h * 0.6), int(total_h * 0.4)])
@@ -289,6 +309,9 @@ class MainWindow(QMainWindow):
         font_size = ui.get("font_size", 11)
         font = QFont("Segoe UI", font_size)
         QApplication.setFont(font)
+        self._dictation_idle_ms = int(
+            self._config.get("dictation", {}).get("commit_idle_ms", 1200)
+        )
 
     def update_config(self, config: dict) -> None:
         """Apply updated config (called after settings dialog saves)."""
@@ -306,6 +329,7 @@ class MainWindow(QMainWindow):
             ui.get("window_width", 420),
             ui.get("window_height", 650),
         )
+        self._dictation_idle_ms = int(config.get("dictation", {}).get("commit_idle_ms", 1200))
 
     @property
     def controls(self) -> "ControlsBar":
@@ -322,6 +346,29 @@ class MainWindow(QMainWindow):
     def set_api_status(self, connected: bool, backend: str = "Groq") -> None:
         """Update API connection status indicator."""
         self._controls.set_api_status(connected, backend)
+
+    def focus_dictation_target(self) -> bool:
+        """Focus hidden text input so Win+H dictation inserts text into this app."""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._dictation_input.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._dictation_input.selectAll()
+        return self._dictation_input.hasFocus()
+
+    def _on_dictation_text_changed(self, text: str) -> None:
+        if not text.strip():
+            self._dictation_timer.stop()
+            return
+        self._dictation_timer.start(self._dictation_idle_ms)
+
+    def _commit_dictation_text(self) -> None:
+        text = self._dictation_input.text().strip()
+        if not text:
+            return
+        self._dictation_timer.stop()
+        self._dictation_input.clear()
+        self.dictation_committed.emit(text)
 
     # ------------------------------------------------------------------
     # Compact mode

@@ -89,6 +89,7 @@ class AIThread(QThread):  # type: ignore[misc]
             maxsize=AI_QUEUE_MAXSIZE
         )
         self._last_request_time: float = 0.0
+        self._last_reject_reason: str = ""
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -108,10 +109,12 @@ class AIThread(QThread):  # type: ignore[misc]
         now = time.time()
         if now - self._last_request_time < DEBOUNCE_SECONDS:
             logger.debug("AIThread: debounce – request ignored.")
+            self._last_reject_reason = "debounced"
             return False
         self._last_request_time = now
         try:
             self._queue.put_nowait(transcript)
+            self._last_reject_reason = ""
             return True
         except queue.Full:
             # Keep freshest context by dropping oldest queued work.
@@ -119,15 +122,22 @@ class AIThread(QThread):  # type: ignore[misc]
                 self._queue.get_nowait()
             except queue.Empty:
                 logger.debug("AIThread: queue was full but empty on readback.")
+                self._last_reject_reason = "queue-full"
                 return False
 
             try:
                 self._queue.put_nowait(transcript)
                 logger.debug("AIThread: queue full – dropped oldest queued request.")
+                self._last_reject_reason = ""
                 return True
             except queue.Full:
                 logger.debug("AIThread: queue remained full – dropping request.")
+                self._last_reject_reason = "queue-full"
                 return False
+
+    def last_reject_reason(self) -> str:
+        """Return the most recent queue-rejection reason."""
+        return self._last_reject_reason or "unknown"
 
     def clear_pending_requests(self) -> int:
         """Drop queued requests that have not started execution yet.
