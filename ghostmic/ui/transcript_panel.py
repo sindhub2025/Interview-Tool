@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ghostmic.core.transcription_engine import TranscriptSegment
+from ghostmic.domain import TranscriptSegment
 from ghostmic.ui.styles import ACCENT_BLUE, FONT, TEXT_SECONDARY
 
 

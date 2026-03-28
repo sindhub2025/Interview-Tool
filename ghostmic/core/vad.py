@@ -14,7 +14,10 @@ import time
 from typing import Callable, Optional, Tuple
 
 import numpy as np
-import torch  # type: ignore[import]
+
+# NOTE: torch is imported lazily (inside _load_shared_model) to avoid a
+# Windows DLL conflict when PyQt6's QApplication is created before torch
+# is loaded.  The preload happens in main._preload_torch_runtime().
 
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
@@ -186,6 +189,8 @@ class VADThread(QThread):  # type: ignore[misc]
                 return False
 
             try:
+                import torch  # type: ignore[import]
+
                 logger.info("VADThread: loading Silero VAD model …")
                 model, utils = torch.hub.load(
                     "snakers4/silero-vad",

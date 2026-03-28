@@ -19,8 +19,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from ghostmic.utils.errors import is_rate_limited as _is_rate_limited_shared
 
+
 import numpy as np
-import torch  # type: ignore[import]
+
+# NOTE: torch is imported lazily (inside methods) to avoid a Windows DLL
+# conflict when PyQt6's QApplication is created before torch is loaded.
+# See _preload_torch_runtime() in main.py which ensures torch is loaded
+# before QApplication on startup.
 
 try:
     from PyQt6.QtCore import QThread, pyqtSignal

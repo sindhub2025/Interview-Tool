@@ -15,7 +15,7 @@ import platform
 import sys
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # ── Ensure the project root is on sys.path ────────────────────────────
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -458,25 +458,14 @@ class GhostMicApp:
 
     def _start_model_loader(self) -> None:
         try:
-            self._preload_torch_runtime()
-            from ghostmic.core.transcription_engine import ModelLoader, TranscriptionThread
+            # Start transcription thread but skip local Whisper model entirely.
+            from ghostmic.core.transcription_engine import TranscriptionThread
 
             tcfg = self._config.get("transcription", {})
             self._model_ready = False
             self._model_error_message = None
-            loader = ModelLoader(
-                model_size=tcfg.get("model_size", "small.en"),
-                compute_type=tcfg.get("compute_type", "int8"),
-                device="auto",
-            )
-            self._logger.info(
-                "Initialising model loader: model=%s compute_type=%s device=%s",
-                loader.model_size,
-                loader.compute_type,
-                loader.device,
-            )
 
-            # Set up transcription thread
+            # Create transcription thread which will use remote STT only.
             self._transcription_thread = TranscriptionThread(
                 language=tcfg.get("language", "en"),
                 beam_size=tcfg.get("beam_size", 5),
@@ -486,115 +475,42 @@ class GhostMicApp:
             self._transcription_thread.transcription_ready.connect(
                 self._on_transcription_ready
             )
-            self._transcription_thread.transcribing.connect(
-                self._on_transcribing
-            )
+            self._transcription_thread.transcribing.connect(self._on_transcribing)
             self._thread_coordinator.register("transcription", self._transcription_thread)
 
-            if self._should_skip_local_model_load():
-                enabled, detail = self._transcription_thread.enable_remote_fallback()
-                if enabled:
-                    self._model_loader = None
-                    self._model_loader_thread = None
-                    self._model_ready = True
-                    self._model_error_message = (
-                        self._runtime_state.get(
-                            "known_local_torch_error",
-                            "Local torch runtime previously failed (WinError 1114).",
-                        )
-                    )
-                    if not self._transcription_thread.isRunning():
-                        self._transcription_thread.start()
-                    self._logger.warning(
-                        "Skipping local Whisper model load on Windows (known-broken torch). "
-                        "Using cloud transcription fallback (%s).",
-                        detail,
-                    )
-                    if self._window:
-                        self._window.controls.set_status(
-                            "Cloud transcription mode (local model skipped)",
-                            "#f0883e",
-                        )
-                    return
-
-                self._logger.warning(
-                    "Known-broken local model flag set, but cloud fallback is unavailable (%s). "
-                    "Attempting local model load anyway.",
-                    detail,
-                )
-
-            def _on_model_ready():
-                self._logger.info("Model loader reported ready.")
+            # Attempt to enable cloud transcription immediately and mark ready.
+            enabled, detail = self._transcription_thread.enable_remote_fallback()
+            if enabled:
+                self._model_loader = None
+                self._model_loader_thread = None
                 self._model_ready = True
                 self._model_error_message = None
-                self._clear_local_model_known_broken()
-                self._transcription_thread.set_model(loader.model)
                 if not self._transcription_thread.isRunning():
                     self._transcription_thread.start()
-                    self._logger.info("Transcription thread started.")
-                if self._window:
-                    self._window.controls.set_status("Model ready", "#3fb950")
-
-            def _on_model_error(msg: str):
-                self._mark_local_model_known_broken(msg)
-                fallback_enabled = False
-                fallback_detail = ""
-                if self._transcription_thread:
-                    fallback_enabled, fallback_detail = (
-                        self._transcription_thread.enable_remote_fallback()
-                    )
-
-                self._model_ready = fallback_enabled
-                self._model_error_message = msg
-                log_path = get_log_file_path()
-                self._logger.error("Model load error: %s", msg)
-                self._logger.error("Model diagnostics log path: %s", log_path)
-
-                if fallback_enabled:
-                    if not self._transcription_thread.isRunning():
-                        self._transcription_thread.start()
-                        self._logger.info(
-                            "Transcription thread started with cloud fallback (%s).",
-                            fallback_detail,
-                        )
-                    if self._window:
-                        self._window.controls.set_status(
-                            "Local model failed. Cloud transcription ready.",
-                            "#f0883e",
-                        )
-                        self._window.ai_panel.show_error(
-                            "Local Whisper model failed to load, switched to cloud transcription "
-                            f"({fallback_detail}).\n\nModel error: {msg}\n\nLog file: {log_path}"
-                        )
-                    return
-
+                self._logger.info(
+                    "Cloud-only STT enabled at startup (%s).", detail
+                )
                 if self._window:
                     self._window.controls.set_status(
-                        "Model error. See AI panel/log file.", "#f85149"
+                        "Cloud transcription ready", "#f0883e"
                     )
-                    self._window.ai_panel.show_error(
-                        f"Model load failed. {msg}\n\nLog file: {log_path}"
-                    )
+                return
 
-            loader.model_ready.connect(_on_model_ready)
-            loader.model_error.connect(_on_model_error)
-            loader.progress.connect(
-                lambda msg: self._window.controls.set_status(msg) if self._window else None
-            )
+            # Remote STT not configured/available.
+            self._model_ready = False
+            self._model_error_message = detail
+            self._model_loader = None
+            self._model_loader_thread = None
+            self._logger.warning("Cloud transcription unavailable at startup: %s", detail)
+            if self._window:
+                self._window.controls.set_status(
+                    "Cloud transcription unavailable. See AI panel/logs.", "#f85149"
+                )
 
-            self._model_loader = loader
-            self._model_loader_thread = threading.Thread(
-                target=loader.run,
-                name="model-loader",
-                daemon=True,
-            )
-            self._model_loader_thread.start()
-            self._logger.info("Model loader thread started.")
-
-        except ImportError as exc:
+        except Exception as exc:  # pylint: disable=broad-except
             self._model_ready = False
             self._model_error_message = str(exc)
-            self._logger.warning("faster-whisper not available: %s", exc)
+            self._logger.warning("Cloud STT startup failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Audio threads
@@ -814,23 +730,66 @@ class GhostMicApp:
             and self._transcription_thread.is_ready()
         )
 
+    def _try_enable_cloud_fast_start(self) -> Tuple[bool, str]:
+        """Enable remote transcription so recording can start before local model is ready."""
+        if not self._transcription_thread:
+            return False, "transcription thread unavailable"
+
+        enabled, detail = self._transcription_thread.enable_remote_fallback()
+        if not enabled:
+            return False, detail
+
+        # Mark transcription backend as ready when cloud STT is active.
+        self._model_ready = True
+
+        if not self._transcription_thread.isRunning():
+            self._transcription_thread.start()
+            self._logger.info(
+                "Transcription thread started with startup cloud fallback (%s).",
+                detail,
+            )
+
+        return True, detail
+
     def _is_dictation_enabled(self) -> bool:
         dcfg = self._config.get("dictation", {})
         return bool(dcfg.get("enabled", True))
 
     def _on_record_toggled(self, recording: bool) -> None:
         if recording:
+            started_with_cloud_fallback = False
             if self._is_model_loader_running():
-                self._logger.info("Recording blocked: model is still loading.")
-                self._recording_active = False
-                if self._window:
-                    self._window.controls.set_recording(False)
-                    self._window.controls.set_status(
-                        "Model is still loading. Please wait.", "#f0883e"
+                enabled, detail = self._try_enable_cloud_fast_start()
+                if enabled:
+                    started_with_cloud_fallback = True
+                    self._logger.info(
+                        "Recording started while local model loads; using cloud transcription (%s).",
+                        detail,
                     )
-                if self._tray:
-                    self._tray.set_recording(False)
-                return
+                    if self._window:
+                        self._window.controls.set_status(
+                            "Starting now with cloud transcription while local model loads…",
+                            "#f0883e",
+                        )
+                else:
+                    self._logger.info(
+                        "Recording blocked: local model still loading and cloud fallback unavailable (%s).",
+                        detail,
+                    )
+                    self._recording_active = False
+                    if self._window:
+                        self._window.controls.set_recording(False)
+                        self._window.controls.set_status(
+                            "Model is still loading and cloud fallback is unavailable.",
+                            "#f0883e",
+                        )
+                        self._window.ai_panel.show_error(
+                            "Cannot start recording yet because local model is still loading and "
+                            f"cloud transcription fallback is unavailable. Details: {detail}"
+                        )
+                    if self._tray:
+                        self._tray.set_recording(False)
+                    return
 
             if not self._start_audio_capture():
                 self._logger.warning(
@@ -855,6 +814,11 @@ class GhostMicApp:
 
             self._ensure_ai_thread()
             self._recording_active = True
+            if started_with_cloud_fallback and self._window:
+                self._window.controls.set_status(
+                    "Recording… cloud transcription active",
+                    "#f0883e",
+                )
             if self._tray:
                 self._tray.set_recording(True)
         else:
@@ -1293,6 +1257,19 @@ def main() -> None:
         logger.info("Running on %s — stealth features are Windows-only.", sys.platform)
 
     app = GhostMicApp(args)
+
+    # ── Preload torch BEFORE QApplication is created ──────────────
+    # On Windows, PyQt6's QApplication alters the DLL search order.
+    # If torch is imported *after* QApplication, c10.dll fails to load
+    # (WinError 1114).  Importing torch first avoids the conflict
+    # because its DLLs are already mapped into the process.
+    try:
+        import torch  # type: ignore[import]
+        _ = torch
+        logger.info("Torch preloaded successfully: %s", torch.__version__)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.debug("Torch preload skipped: %s", exc)
+
     exit_code = app.run()
     sys.exit(exit_code)
 

@@ -179,6 +179,17 @@ class SettingsDialog(QDialog):
         self._compute_combo.addItems(["int8", "float16", "float32"])
         form.addRow("Compute type:", self._compute_combo)
 
+        self._beam_size_spin = QSpinBox()
+        self._beam_size_spin.setRange(1, 10)
+        self._beam_size_spin.setValue(5)
+        self._beam_size_spin.setToolTip("Lower values are faster; higher values can improve accuracy.")
+        form.addRow("Beam size:", self._beam_size_spin)
+
+        self._remote_fallback_check = QCheckBox(
+            "Use cloud transcription while local model loads/fails"
+        )
+        form.addRow("Cloud fallback:", self._remote_fallback_check)
+
         return w
 
     # ── Tab: AI ───────────────────────────────────────────────────────
@@ -381,6 +392,10 @@ class SettingsDialog(QDialog):
         c_idx = self._compute_combo.findText(compute)
         if c_idx >= 0:
             self._compute_combo.setCurrentIndex(c_idx)
+        self._beam_size_spin.setValue(int(transcription.get("beam_size", 5)))
+        self._remote_fallback_check.setChecked(
+            bool(transcription.get("remote_fallback", True))
+        )
 
         # AI
         backend = ai.get("main_backend") or ai.get("backend", "groq")
@@ -439,6 +454,10 @@ class SettingsDialog(QDialog):
         cfg["transcription"]["language"] = self._lang_combo.currentText()
         cfg["transcription"]["model_size"] = self._model_combo.currentText()
         cfg["transcription"]["compute_type"] = self._compute_combo.currentText()
+        cfg["transcription"]["beam_size"] = int(self._beam_size_spin.value())
+        cfg["transcription"]["remote_fallback"] = bool(
+            self._remote_fallback_check.isChecked()
+        )
 
         # AI
         cfg.setdefault("ai", {})
