@@ -14,7 +14,7 @@ import random
 import re
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ghostmic.utils.errors import is_rate_limited as _is_rate_limited_shared
 
@@ -25,6 +25,11 @@ except ImportError:
     pyqtSignal = None  # type: ignore[assignment]
 
 from ghostmic.core.transcription_engine import TranscriptSegment
+from ghostmic.utils.resume_context import (
+    apply_resume_corrections,
+    build_resume_context_summary,
+    is_resume_related_text,
+)
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -56,6 +61,8 @@ AI_QUEUE_MAXSIZE: int = 8
 RUNTIME_RATE_LIMIT_RETRIES: int = 3
 RUNTIME_RATE_LIMIT_BASE_DELAY: float = 1.0
 RUNTIME_RATE_LIMIT_MAX_DELAY: float = 8.0
+RESUME_CORRECTION_HIGH_THRESHOLD: float = 0.87
+RESUME_CORRECTION_MEDIUM_THRESHOLD: float = 0.74
 
 # Jaccard similarity threshold below which two questions are considered
 # different topics.  0.25 means less than 25 % word overlap → new topic.
@@ -293,13 +300,53 @@ class AIThread(QThread):  # type: ignore[misc]
                    main_backend, fallback_backend, enable_fallback)
         
         session_context = str(self._config.get("session_context", "")).strip()
+        resume_context_enabled = bool(self._config.get("resume_context_enabled", True))
+        resume_profile_raw = self._config.get("resume_profile")
+        resume_profile = (
+            resume_profile_raw
+            if resume_context_enabled and isinstance(resume_profile_raw, dict)
+            else None
+        )
+        correction_high_raw = self._config.get(
+            "resume_correction_threshold_high",
+            RESUME_CORRECTION_HIGH_THRESHOLD,
+        )
+        try:
+            correction_high_threshold = float(correction_high_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "AIThread: invalid resume_correction_threshold_high=%r; using default %.2f",
+                correction_high_raw,
+                RESUME_CORRECTION_HIGH_THRESHOLD,
+            )
+            correction_high_threshold = RESUME_CORRECTION_HIGH_THRESHOLD
+
+        correction_medium_raw = self._config.get(
+            "resume_correction_threshold_medium",
+            RESUME_CORRECTION_MEDIUM_THRESHOLD,
+        )
+        try:
+            correction_medium_threshold = float(correction_medium_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "AIThread: invalid resume_correction_threshold_medium=%r; using default %.2f",
+                correction_medium_raw,
+                RESUME_CORRECTION_MEDIUM_THRESHOLD,
+            )
+            correction_medium_threshold = RESUME_CORRECTION_MEDIUM_THRESHOLD
         context = self._build_context(
-            transcript, session_context=session_context, is_new_topic=is_new_topic
+            transcript,
+            session_context=session_context,
+            is_new_topic=is_new_topic,
+            resume_profile=resume_profile,
+            correction_high_threshold=correction_high_threshold,
+            correction_medium_threshold=correction_medium_threshold,
         )
         logger.info("AIThread: context built (length=%d, is_new_topic=%s)", len(context), is_new_topic)
         system_prompt = self._build_system_prompt(
             self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
             session_context,
+            resume_profile=resume_profile,
         )
         temperature = float(self._config.get("temperature", 0.7))
         logger.info("AIThread: temperature=%.1f", temperature)
@@ -762,6 +809,9 @@ class AIThread(QThread):  # type: ignore[misc]
         transcript: List[TranscriptSegment],
         session_context: str = "",
         is_new_topic: bool = False,
+        resume_profile: Optional[Dict[str, Any]] = None,
+        correction_high_threshold: float = RESUME_CORRECTION_HIGH_THRESHOLD,
+        correction_medium_threshold: float = RESUME_CORRECTION_MEDIUM_THRESHOLD,
     ) -> str:
         """Format the most recent question-focused transcript block.
 
@@ -806,18 +856,98 @@ class AIThread(QThread):  # type: ignore[misc]
             for keyword in ETL_CONTEXT_KEYWORDS
         )
 
-        lines: List[str] = []
-        if session_context:
-            lines.append(f"[Session Context]: {session_context}")
-        if previous_answer_context:
-            lines.append(f"[Follow-up Context]: {previous_answer_context}")
+        segment_payloads: List[Dict[str, Any]] = []
+        resume_related = False
+        latest_speaker_text = ""
+        for seg in reversed(recent):
+            if seg.source == "speaker":
+                latest_speaker_text = seg.text
+                break
+        if resume_profile and latest_speaker_text:
+            resume_related = is_resume_related_text(latest_speaker_text, resume_profile)
 
         for seg in recent:
             label = "Speaker" if seg.source == "speaker" else "You"
             text = seg.text
             if etl_context_active:
                 text = AIThread._normalize_etl_transcript_terms(text)
-            lines.append(f"[{label}]: {text}")
+
+            high_matches: List[Dict[str, Any]] = []
+            medium_matches: List[Dict[str, Any]] = []
+
+            if resume_profile and seg.source == "speaker":
+                try:
+                    correction_result = apply_resume_corrections(
+                        text,
+                        resume_profile,
+                        high_threshold=correction_high_threshold,
+                        medium_threshold=correction_medium_threshold,
+                    )
+                except Exception as exc:  # Defensive: ensure failures here don't break context building
+                    logger.exception("AIThread: apply_resume_corrections failed: %s", exc)
+                    correction_result = {"high_confidence": [], "medium_confidence": [], "text": text}
+
+                # Ensure the result is a mapping/dict before using .get()
+                if not isinstance(correction_result, dict):
+                    logger.debug("AIThread: apply_resume_corrections returned non-dict; falling back to defaults")
+                    correction_result = {"high_confidence": [], "medium_confidence": [], "text": text}
+
+                high_matches = list(correction_result.get("high_confidence", []))
+                medium_matches = list(correction_result.get("medium_confidence", []))
+                corrected_text = str(correction_result.get("text", text))
+                if high_matches:
+                    text = corrected_text
+                if high_matches or medium_matches:
+                    resume_related = True
+
+            segment_payloads.append(
+                {
+                    "label": label,
+                    "text": text,
+                    "high_matches": high_matches,
+                    "medium_matches": medium_matches,
+                }
+            )
+
+        resume_summary_lines: List[str] = []
+        if resume_profile and resume_related:
+            resume_summary_lines = build_resume_context_summary(resume_profile)
+
+        lines: List[str] = []
+        if session_context:
+            lines.append(f"[Session Context]: {session_context}")
+        if previous_answer_context:
+            lines.append(f"[Follow-up Context]: {previous_answer_context}")
+
+        if resume_summary_lines:
+            lines.append("[Resume Context]:")
+            for item in resume_summary_lines:
+                lines.append(f"- {item}")
+
+        for payload in segment_payloads:
+            lines.append(f"[{payload['label']}]: {payload['text']}")
+
+            high_matches = payload.get("high_matches", [])
+            medium_matches = payload.get("medium_matches", [])
+            for match in high_matches[:2]:
+                original = str(match.get("original", "")).strip()
+                corrected = str(match.get("corrected", "")).strip()
+                category = str(match.get("category", "term")).strip()
+                if original and corrected:
+                    lines.append(
+                        f"[Resume Correction Applied]: \"{original}\" -> \"{corrected}\" ({category}, high confidence)"
+                    )
+
+            if not high_matches:
+                for match in medium_matches[:2]:
+                    original = str(match.get("original", "")).strip()
+                    corrected = str(match.get("corrected", "")).strip()
+                    category = str(match.get("category", "term")).strip()
+                    if original and corrected:
+                        lines.append(
+                            f"[Resume Correction Candidate]: \"{original}\" -> \"{corrected}\" ({category}, medium confidence)"
+                        )
+
         return "\n".join(lines)
 
     @staticmethod
@@ -837,13 +967,31 @@ class AIThread(QThread):  # type: ignore[misc]
         return normalized
 
     @staticmethod
-    def _build_system_prompt(system_prompt: str, session_context: str) -> str:
-        if not session_context:
-            return system_prompt
-        addendum = (
-            "\n\nSession context (role/background): "
-            f"{session_context}\n"
-            "Tailor your response to this context if relevant, but do not force it "
-            "into answers for general concepts (e.g., general SQL or programming questions)."
-        )
-        return f"{system_prompt}{addendum}"
+    def _build_system_prompt(
+        system_prompt: str,
+        session_context: str,
+        resume_profile: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        prompt = system_prompt
+        if session_context:
+            addendum = (
+                "\n\nSession context (role/background): "
+                f"{session_context}\n"
+                "Tailor your response to this context if relevant, but do not force it "
+                "into answers for general concepts (e.g., general SQL or programming questions)."
+            )
+            prompt = f"{prompt}{addendum}"
+
+        if resume_profile:
+            resume_policy = (
+                "\n\nResume usage policy:\n"
+                "- The structured resume context is the source of truth for the user's professional background.\n"
+                "- Use resume facts for resume/background questions (companies, roles, dates, projects, skills, education, certifications).\n"
+                "- Apply transcript corrections only when confidence is high and the corrected term is grounded in the resume context.\n"
+                "- When confidence is medium, mention the likely correction cautiously or ask for confirmation if needed.\n"
+                "- If a detail is not present in the resume context, explicitly say it is not available rather than inventing details.\n"
+                "- For non-resume questions, do not let resume context dominate the answer."
+            )
+            prompt = f"{prompt}{resume_policy}"
+
+        return prompt

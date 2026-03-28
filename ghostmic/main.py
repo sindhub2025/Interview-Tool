@@ -27,6 +27,7 @@ if not getattr(sys, "frozen", False) and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from ghostmic.utils.logger import configure_logging, get_log_file_path, get_logger
+from ghostmic.services.resume_service import ResumeService
 from ghostmic.services.thread_coordinator import ThreadCoordinator
 from ghostmic.services.runtime_state import RuntimeStateCache
 
@@ -98,6 +99,9 @@ def _default_config() -> dict:
             "trigger_mode": "auto",
             "context_segments": 10,
             "session_context": "",
+            "resume_context_enabled": True,
+            "resume_correction_threshold_high": 0.87,
+            "resume_correction_threshold_medium": 0.74,
         },
         "audio": {"input_device": None, "loopback_device": None, "sample_rate": 16000},
         "transcription": {
@@ -297,6 +301,8 @@ class GhostMicApp:
             os.path.expanduser("~"), ".ghostmic", ".runtime_state.json"
         )
         self._runtime_state = RuntimeStateCache(runtime_state_path)
+        self._resume_service = ResumeService()
+        self._resume_profile = self._resume_service.get_profile()
 
     def run(self) -> int:
         """Initialise everything and start the Qt event loop."""
@@ -652,7 +658,7 @@ class GhostMicApp:
         try:
             from ghostmic.core.ai_engine import AIThread
 
-            self._ai_thread = AIThread(self._config.get("ai", {}))
+            self._ai_thread = AIThread(self._build_ai_runtime_config())
             # Use default QueuedConnection (non-blocking) for cross-thread signals
             # This allows the AI thread to emit and continue without waiting
             self._ai_thread.ai_thinking.connect(
@@ -669,6 +675,16 @@ class GhostMicApp:
             self._ai_thread.start()
         except ImportError as exc:
             self._logger.warning("AI engine not available: %s", exc)
+
+    def _build_ai_runtime_config(self) -> dict:
+        """Return AI config augmented with transient runtime context."""
+        ai_config = dict(self._config.get("ai", {}))
+        ai_config["resume_profile"] = self._resume_profile
+        return ai_config
+
+    def _refresh_ai_runtime_context(self) -> None:
+        if self._ai_thread:
+            self._ai_thread.update_config(self._build_ai_runtime_config())
 
     # ------------------------------------------------------------------
     # Hotkeys
@@ -963,17 +979,102 @@ class GhostMicApp:
         from ghostmic.ui.settings_dialog import SettingsDialog
 
         if self._window:
-            dlg = SettingsDialog(self._config, parent=self._window)
+            dlg = SettingsDialog(
+                self._config,
+                resume_status=self._resume_service.get_status(),
+                parent=self._window,
+            )
             dlg.settings_saved.connect(self._on_settings_saved)
+            dlg.resume_upload_requested.connect(
+                lambda file_path, dialog=dlg: self._on_resume_upload_requested(file_path, dialog)
+            )
+            dlg.resume_remove_requested.connect(
+                lambda dialog=dlg: self._on_resume_remove_requested(dialog)
+            )
             dlg.exec()
+
+    def _on_resume_upload_requested(self, file_path: str, dialog=None) -> None:
+        # Run resume ingestion on a background thread to avoid freezing the UI.
+        if dialog and hasattr(dialog, "set_resume_busy"):
+            dialog.set_resume_busy(True, "Processing resume…")
+
+        # Define a small QThread-based worker that emits (status, error_message)
+        # when ingestion completes. We define it here to avoid importing
+        # PyQt6 at module import time.
+        from PyQt6.QtCore import QThread, pyqtSignal
+
+        class ResumeIngestWorker(QThread):
+            finished = pyqtSignal(object, str)
+
+            def __init__(self, resume_service: ResumeService, file_path: str, parent=None) -> None:
+                super().__init__(parent)
+                self._resume_service = resume_service
+                self._file_path = file_path
+
+            def run(self) -> None:
+                try:
+                    status = self._resume_service.ingest_resume(self._file_path)
+                    self.finished.emit(status, "")
+                except Exception as exc:  # pylint: disable=broad-except
+                    self.finished.emit({}, str(exc))
+
+        worker = ResumeIngestWorker(self._resume_service, file_path, parent=self)
+
+        def _on_ingest_finished(status: object, error: str) -> None:
+            try:
+                if error:
+                    # Failure path: report error to UI
+                    self._logger.warning("Resume upload failed: %s", error)
+                    if self._window:
+                        self._window.controls.set_status("Resume upload failed", "#f85149")
+                    if dialog and hasattr(dialog, "set_resume_error"):
+                        dialog.set_resume_error(error)
+                else:
+                    # Success path: refresh profile/context and update UI
+                    self._resume_profile = self._resume_service.get_profile()
+                    self._refresh_ai_runtime_context()
+                    if self._window:
+                        self._window.controls.set_status("Resume uploaded", "#3fb950")
+                    if dialog and hasattr(dialog, "set_resume_status"):
+                        dialog.set_resume_status(status, "Resume uploaded successfully.")
+            finally:
+                if dialog and hasattr(dialog, "set_resume_busy"):
+                    dialog.set_resume_busy(False)
+                # Ensure worker is cleaned up
+                try:
+                    worker.deleteLater()
+                except Exception:
+                    pass
+
+        worker.finished.connect(_on_ingest_finished)
+        worker.start()
+
+    def _on_resume_remove_requested(self, dialog=None) -> None:
+        try:
+            self._resume_service.remove_resume()
+            self._resume_profile = None
+            self._refresh_ai_runtime_context()
+            if self._window:
+                self._window.controls.set_status("Resume removed", "#f0883e")
+            if dialog and hasattr(dialog, "set_resume_status"):
+                dialog.set_resume_status(self._resume_service.get_status(), "Resume removed.")
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.warning("Resume removal failed: %s", exc)
+            if dialog and hasattr(dialog, "set_resume_error"):
+                dialog.set_resume_error(str(exc))
+        finally:
+            # Clear the busy state set by SettingsDialog._on_resume_remove_clicked
+            # (triggered via the `resume_remove_requested` signal) so the
+            # UI buttons are re-enabled regardless of success or failure.
+            if dialog and hasattr(dialog, "set_resume_busy"):
+                dialog.set_resume_busy(False)
 
     def _on_settings_saved(self, new_config: dict) -> None:
         self._config = new_config
         _save_config(new_config, self._config_path)
         if self._window:
             self._window.update_config(new_config)
-        if self._ai_thread:
-            self._ai_thread.update_config(new_config.get("ai", {}))
+        self._refresh_ai_runtime_context()
         if self._hotkey_manager:
             self._hotkey_manager.reload(new_config.get("hotkeys", {}))
 

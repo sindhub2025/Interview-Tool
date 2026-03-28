@@ -36,6 +36,9 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ai.temperature":          (float, 0.7,      lambda v: 0.0 <= v <= 2.0),
     "ai.trigger_mode":         (str,   "auto",   lambda v: v in ("auto", "manual", "continuous")),
     "ai.max_tokens":           (int,   2048,     lambda v: 1 <= v <= 32768),
+    "ai.resume_context_enabled": (bool, True, None),
+    "ai.resume_correction_threshold_high": (float, 0.87, lambda v: 0.5 <= v <= 1.0),
+    "ai.resume_correction_threshold_medium": (float, 0.74, lambda v: 0.4 <= v <= 1.0),
     # Audio
     "audio.sample_rate":       (int,   16000,    lambda v: v in (8000, 16000, 44100, 48000)),
     "audio.channels":          (int,   1,        lambda v: v in (1, 2)),
@@ -207,6 +210,29 @@ class ConfigService:
                     continue
 
             node[leaf] = val
+        # Cross-field validation: ensure medium < high for resume correction thresholds.
+        try:
+            ai_node = cfg.setdefault("ai", {})
+            high_key = "resume_correction_threshold_high"
+            med_key = "resume_correction_threshold_medium"
+            high_val = ai_node.get(high_key, CONFIG_SCHEMA["ai.resume_correction_threshold_high"][1])
+            med_val = ai_node.get(med_key, CONFIG_SCHEMA["ai.resume_correction_threshold_medium"][1])
+            # Only enforce when both are numeric
+            if isinstance(high_val, (int, float)) and isinstance(med_val, (int, float)):
+                if med_val >= high_val:
+                    logger.warning(
+                        "Config ai: %s (%.3f) >= %s (%.3f); resetting both to defaults",
+                        f"ai.{med_key}",
+                        med_val,
+                        f"ai.{high_key}",
+                        high_val,
+                    )
+                    ai_node[high_key] = CONFIG_SCHEMA["ai.resume_correction_threshold_high"][1]
+                    ai_node[med_key] = CONFIG_SCHEMA["ai.resume_correction_threshold_medium"][1]
+        except Exception:
+            # Non-fatal: continue with validated cfg
+            logger.exception("ConfigService: error during cross-field validation")
+
         return cfg
 
     # ------------------------------------------------------------------

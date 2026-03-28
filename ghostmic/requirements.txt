@@ -1,12 +1,5 @@
-PyQt6>=6.6.0
-faster-whisper>=1.0.0
-torch>=2.1.0
-torchaudio>=2.1.0
-numpy>=1.24.0
-sounddevice>=0.4.6
-pyaudiowpatch>=0.2.12.6; sys_platform == "win32"
-groq>=0.4.0
-openai>=1.0.0,<2.0.0
-pynput>=1.7.6
-requests>=2.31.0
-mss>=9.0.1
+# This file delegates to the canonical project-level requirements.txt.
+# Keep a single source of truth at the repository root. Use the top-level
+# requirements.txt to manage dependency versions. This helper allows
+# installing from the `ghostmic` directory with the same dependency set.
+-r ../requirements.txt

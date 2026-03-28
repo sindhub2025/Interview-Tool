@@ -31,7 +31,6 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements_windows.txt
-            ghostmic/requirements_windows.txt
 
       - name: Install dependencies
         shell: pwsh

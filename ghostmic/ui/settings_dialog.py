@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -62,10 +63,16 @@ class SettingsDialog(QDialog):
     """
 
     settings_saved = pyqtSignal(dict)
+    resume_upload_requested = pyqtSignal(str)
+    resume_remove_requested = pyqtSignal()
 
-    def __init__(self, config: dict, parent=None) -> None:
+    def __init__(self, config: dict, resume_status: Dict[str, Any] | None = None, parent=None) -> None:
         super().__init__(parent)
         self._config = config
+        self._resume_status = dict(resume_status or {})
+        # Explicit busy flag for resume operations. Use this instead of
+        # inspecting `_resume_message_label` text to determine busy state.
+        self._resume_busy = False
         self._expose_openai_provider = bool(
             self._config.get("ai", {}).get("expose_openai_provider", False)
         )
@@ -89,6 +96,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._make_audio_tab(), "Audio")
         tabs.addTab(self._make_ai_tab(), "AI")
         tabs.addTab(self._make_appearance_tab(), "Appearance")
+        tabs.addTab(self._make_resume_tab(), "Resume")
         tabs.addTab(self._make_about_tab(), "About")
         layout.addWidget(tabs)
 
@@ -295,6 +303,62 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Session context:", self._session_ctx)
 
+        self._resume_context_enabled = QCheckBox("Use uploaded resume as context for resume-related questions")
+        self._resume_context_enabled.setChecked(True)
+        form.addRow("Resume context:", self._resume_context_enabled)
+
+        return w
+
+    # ── Tab: Resume ───────────────────────────────────────────────────
+
+    def _make_resume_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        heading = QLabel("Upload Resume")
+        heading.setStyleSheet("font-size: 11pt; font-weight: 700;")
+        layout.addWidget(heading)
+
+        detail = QLabel(
+            "Supported formats: PDF, DOCX, TXT. Resume data is extracted into a structured "
+            "local profile used for resume-aware answer correction."
+        )
+        detail.setWordWrap(True)
+        detail.setStyleSheet("color: #8b949e;")
+        layout.addWidget(detail)
+
+        self._resume_status_label = QLabel("")
+        self._resume_status_label.setWordWrap(True)
+        self._resume_status_label.setStyleSheet(
+            "background-color: rgba(88, 166, 255, 0.08);"
+            "border: 1px solid rgba(88, 166, 255, 0.35);"
+            "border-radius: 6px;"
+            "padding: 8px;"
+            "color: #dce7ff;"
+        )
+        layout.addWidget(self._resume_status_label)
+
+        self._resume_message_label = QLabel("")
+        self._resume_message_label.setWordWrap(True)
+        self._resume_message_label.setStyleSheet("color: #8b949e;")
+        layout.addWidget(self._resume_message_label)
+
+        button_row = QHBoxLayout()
+        self._resume_upload_btn = QPushButton("Upload / Replace")
+        self._resume_upload_btn.clicked.connect(self._on_resume_upload_clicked)
+        button_row.addWidget(self._resume_upload_btn)
+
+        self._resume_remove_btn = QPushButton("Remove")
+        self._resume_remove_btn.clicked.connect(self._on_resume_remove_clicked)
+        button_row.addWidget(self._resume_remove_btn)
+
+        button_row.addStretch()
+        layout.addLayout(button_row)
+        layout.addStretch()
+
+        self.set_resume_status(self._resume_status)
         return w
 
     # ── Tab: Appearance ───────────────────────────────────────────────
@@ -426,6 +490,7 @@ class SettingsDialog(QDialog):
             ai.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
         )
         self._session_ctx.setText(ai.get("session_context", ""))
+        self._resume_context_enabled.setChecked(bool(ai.get("resume_context_enabled", True)))
 
         # Appearance
         self._opacity_slider.setValue(int(ui.get("opacity", 0.95) * 100))
@@ -486,6 +551,7 @@ class SettingsDialog(QDialog):
         cfg["ai"]["temperature"] = self._temp_slider.value() / 100.0
         cfg["ai"]["system_prompt"] = self._system_prompt.toPlainText()
         cfg["ai"]["session_context"] = self._session_ctx.text()
+        cfg["ai"]["resume_context_enabled"] = self._resume_context_enabled.isChecked()
 
         # Appearance / UI
         cfg.setdefault("ui", {})
@@ -520,6 +586,79 @@ class SettingsDialog(QDialog):
                 self._loopback_combo.addItem(dev["name"], dev["index"])
         except Exception:  # pylint: disable=broad-except
             pass
+
+    # ------------------------------------------------------------------
+    # Resume actions
+    # ------------------------------------------------------------------
+
+    def _on_resume_upload_clicked(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Resume",
+            "",
+            "Resume files (*.pdf *.docx *.txt);;All files (*.*)",
+        )
+        if not file_path:
+            return
+        self.set_resume_busy(True, "Processing resume…")
+        self.resume_upload_requested.emit(file_path)
+
+    def _on_resume_remove_clicked(self) -> None:
+        # Prevent duplicate clicks by entering a busy state before emitting the
+        # `resume_remove_requested` signal. See `_on_resume_remove_clicked` and
+        # the `resume_remove_requested` signal handler in `main.py` which must
+        # clear this busy state when removal completes or fails.
+        self.set_resume_busy(True, "Removing resume…")
+        self.resume_remove_requested.emit()
+
+    def set_resume_busy(self, busy: bool, message: str = "") -> None:
+        # Remember previous busy state so we can clear processing messages only
+        # when transitioning from busy -> not-busy (instead of inspecting
+        # the label text for the word "Processing").
+        prev_busy = getattr(self, "_resume_busy", False)
+        self._resume_busy = busy
+
+        self._resume_upload_btn.setEnabled(not busy)
+        self._resume_remove_btn.setEnabled(not busy)
+
+        if message:
+            self._resume_message_label.setText(message)
+            self._resume_message_label.setStyleSheet("color: #58a6ff;")
+        # If we're leaving the busy state and there was no explicit message,
+        # clear any previous processing message.
+        elif not busy and prev_busy:
+            self._resume_message_label.setText("")
+
+    def set_resume_error(self, message: str) -> None:
+        # Show the error message and ensure resume controls are re-enabled.
+        # Call `set_resume_busy(False)` so callers don't need to remember to
+        # clear the busy state after reporting an error.
+        self._resume_message_label.setText(message)
+        self._resume_message_label.setStyleSheet("color: #f85149;")
+        self.set_resume_busy(False)
+
+    def set_resume_status(self, status: Dict[str, Any], message: str = "") -> None:
+        self._resume_status = dict(status or {})
+        has_resume = bool(self._resume_status.get("has_resume", False))
+        if has_resume:
+            source_name = str(self._resume_status.get("source_file_name", "Uploaded resume"))
+            skills_count = int(self._resume_status.get("skills_count", 0) or 0)
+            companies_count = int(self._resume_status.get("companies_count", 0) or 0)
+            projects_count = int(self._resume_status.get("projects_count", 0) or 0)
+            certifications_count = int(self._resume_status.get("certifications_count", 0) or 0)
+            self._resume_status_label.setText(
+                f"Active resume: {source_name}\n"
+                f"Skills: {skills_count} | Companies: {companies_count} | "
+                f"Projects: {projects_count} | Certifications: {certifications_count}"
+            )
+        else:
+            self._resume_status_label.setText("No resume uploaded.")
+
+        self._resume_upload_btn.setEnabled(True)
+        self._resume_remove_btn.setEnabled(has_resume)
+        if message:
+            self._resume_message_label.setText(message)
+            self._resume_message_label.setStyleSheet("color: #3fb950;")
 
     # ------------------------------------------------------------------
     # Stealth

@@ -156,3 +156,83 @@ def test_build_context_includes_follow_up_block_when_not_new_topic():
 
     assert "[Follow-up Context]" in context
     assert "rank skips numbers" in context.lower()
+
+
+def test_build_context_includes_resume_context_for_resume_related_question():
+    transcript = [_seg("Can you summarize your experience at Microsoft?", "speaker")]
+    resume_profile = {
+        "identity": {"full_name": "Jane Doe"},
+        "companies": ["Microsoft"],
+        "job_titles": ["Senior Data Engineer"],
+        "skills": ["Python", "SQL"],
+        "projects": ["Customer 360"],
+        "certifications": ["AWS Certified Solutions Architect"],
+        "tools": ["Azure Data Factory"],
+        "technologies": ["Spark"],
+        "aliases": {},
+    }
+
+    context = AIThread._build_context(
+        transcript,
+        resume_profile=resume_profile,
+    )
+
+    assert "[Resume Context]:" in context
+    assert "Companies: Microsoft" in context
+    assert "Job Titles: Senior Data Engineer" in context
+
+
+def test_build_context_applies_resume_grounded_high_confidence_correction():
+    transcript = [_seg("I worked at Micro hard as a senior data engineer.", "speaker")]
+    resume_profile = {
+        "identity": {"full_name": "Jane Doe"},
+        "companies": ["Microsoft"],
+        "job_titles": ["Senior Data Engineer"],
+        "skills": ["Python"],
+        "projects": [],
+        "certifications": [],
+        "tools": [],
+        "technologies": [],
+        "aliases": {"Microsoft": ["micro soft"]},
+    }
+
+    context = AIThread._build_context(
+        transcript,
+        resume_profile=resume_profile,
+    )
+
+    assert "Microsoft" in context
+    assert "[Resume Correction Applied]" in context
+
+
+def test_build_context_does_not_force_resume_context_for_general_question():
+    transcript = [_seg("What is CAP theorem in distributed systems?", "speaker")]
+    resume_profile = {
+        "identity": {"full_name": "Jane Doe"},
+        "companies": ["Microsoft"],
+        "job_titles": ["Senior Data Engineer"],
+        "skills": ["Python"],
+        "projects": [],
+        "certifications": [],
+        "tools": [],
+        "technologies": [],
+        "aliases": {},
+    }
+
+    context = AIThread._build_context(
+        transcript,
+        resume_profile=resume_profile,
+    )
+
+    assert "[Resume Context]:" not in context
+
+
+def test_build_system_prompt_includes_resume_policy_when_profile_available():
+    prompt = AIThread._build_system_prompt(
+        "Base prompt",
+        session_context="",
+        resume_profile={"companies": ["Microsoft"]},
+    )
+
+    assert "Resume usage policy:" in prompt
+    assert "source of truth" in prompt
