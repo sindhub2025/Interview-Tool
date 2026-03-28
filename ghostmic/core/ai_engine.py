@@ -110,7 +110,68 @@ FOLLOW_UP_PATTERNS = (
     r"\bexpand on (?:that|this|it|the topic)\b",
     r"\bcontinue\b",
     r"\bwhat else\b",
+    r"\bcan you give (?:an?|another) example\b",
+    r"\bgive (?:an?|another) example\b",
+    r"\b(?:what|how) about (?:this|that|it)\b",
+    r"\bwhy (?:is|was) (?:this|that|it)\b",
+    r"\bhow so\b",
+    r"\bcan you clarify\b",
+    r"\bclarify (?:this|that|it)\b",
+    r"\bwhat do you mean\b",
+    r"\bwhat does (?:this|that|it) mean\b",
+    r"\bcould you expand on (?:this|that|it)\b",
+    r"\bwalk me through (?:this|that|it)\b",
 )
+FOLLOW_UP_CONTEXT_PREFIX = "Previous AI answer context:"
+PRIOR_QUESTION_CONTEXT_PREFIX = "Previous speaker question context:"
+FOLLOW_UP_REFERENCE_TERMS: frozenset = frozenset(
+    {
+        "this",
+        "that",
+        "it",
+        "those",
+        "these",
+        "them",
+        "same",
+        "earlier",
+        "previous",
+        "above",
+        "example",
+        "examples",
+        "again",
+        "more",
+        "detail",
+        "details",
+        "part",
+        "step",
+        "steps",
+        "approach",
+    }
+)
+SELECTION_FOLLOW_UP_PATTERNS = (
+    r"\bwhich one\b",
+    r"\bwhich (?:is|one) (?:better|best)\b",
+    r"\bwhich (?:should|would) (?:i|we) use\b",
+    r"\bshould (?:i|we) (?:use|choose|pick)\b",
+    r"\bwhat should (?:i|we) use\b",
+    r"\bwhich (?:would you|do you) (?:use|choose|pick|recommend)\b",
+    r"\bwhat (?:would you|do you) recommend\b",
+)
+GENERIC_SELECTION_TERMS: frozenset = frozenset(
+    {
+        "better",
+        "best",
+        "choose",
+        "choice",
+        "option",
+        "prefer",
+        "recommend",
+        "recommended",
+        "versus",
+        "vs",
+    }
+)
+SHORT_FOLLOW_UP_MAX_TOKENS: int = 12
 
 
 class AIThread(QThread):  # type: ignore[misc]
@@ -754,6 +815,53 @@ class AIThread(QThread):  # type: ignore[misc]
         return any(re.search(pattern, cleaned) for pattern in FOLLOW_UP_PATTERNS)
 
     @staticmethod
+    def is_context_dependent_follow_up(prev_question: str, new_question: str) -> bool:
+        """Return True when *new_question* likely depends on prior context.
+
+        Detects explicit continuation phrases plus short referential prompts like
+        "Can you give an example?" or "Why is that?" which often have low lexical
+        overlap with the previous question but are still follow-ups.
+        """
+        cleaned_new = new_question.strip().lower()
+        if not cleaned_new:
+            return False
+        if AIThread.is_explicit_follow_up_request(cleaned_new):
+            return True
+        if not prev_question.strip():
+            return False
+
+        tokens = re.findall(r"[a-z0-9']+", cleaned_new)
+        if not tokens:
+            return False
+
+        short_follow_up = len(tokens) <= SHORT_FOLLOW_UP_MAX_TOKENS
+        has_reference_term = any(token in FOLLOW_UP_REFERENCE_TERMS for token in tokens)
+        has_selection_phrase = any(
+            re.search(pattern, cleaned_new) for pattern in SELECTION_FOLLOW_UP_PATTERNS
+        )
+        starts_with_bridge = cleaned_new.startswith(
+            ("and ", "also ", "so ", "then ", "right ", "okay ", "ok ")
+        )
+
+        content_words = [
+            token
+            for token in re.sub(r"[^a-z0-9\s]", "", cleaned_new).split()
+            if len(token) >= 4 and token not in _STOP_WORDS
+        ]
+        non_generic_content = [
+            token
+            for token in content_words
+            if token not in FOLLOW_UP_REFERENCE_TERMS and token not in GENERIC_SELECTION_TERMS
+        ]
+        likely_standalone_question = len(non_generic_content) >= 2
+
+        return bool(
+            short_follow_up
+            and not likely_standalone_question
+            and (has_reference_term or starts_with_bridge or has_selection_phrase)
+        )
+
+    @staticmethod
     def classify_topic_shift(prev_question: str, new_question: str) -> bool:
         """Return True when *new_question* is a semantically different topic.
 
@@ -770,8 +878,8 @@ class AIThread(QThread):  # type: ignore[misc]
         if not prev_question.strip():
             return True  # No prior question means this is always the first one.
 
-        # Explicit follow-ups are never a topic shift regardless of wording.
-        if AIThread.is_explicit_follow_up_request(new_question):
+        # Context-dependent follow-ups are never a topic shift.
+        if AIThread.is_context_dependent_follow_up(prev_question, new_question):
             return False
 
         def _content_words(text: str) -> frozenset:
@@ -825,6 +933,7 @@ class AIThread(QThread):  # type: ignore[misc]
             return ""
 
         last_speaker_index = -1
+        speaker_block_start = -1
         for index in range(len(transcript) - 1, -1, -1):
             if transcript[index].source == "speaker":
                 last_speaker_index = index
@@ -833,20 +942,30 @@ class AIThread(QThread):  # type: ignore[misc]
         if last_speaker_index < 0:
             recent = transcript[-MAX_CONTEXT_SEGMENTS:]
         else:
+            speaker_block_start = last_speaker_index
+            while (
+                speaker_block_start > 0
+                and transcript[speaker_block_start - 1].source == "speaker"
+            ):
+                speaker_block_start -= 1
             recent = [
                 seg
-                for seg in transcript[last_speaker_index:]
+                for seg in transcript[speaker_block_start:]
                 if seg.source == "speaker"
             ]
 
         previous_answer_context = ""
+        previous_question_context = ""
         if not is_new_topic:
             # Only look for a follow-up context block when we are genuinely
             # continuing on the same topic.
-            for seg in transcript:
-                text = str(getattr(seg, "text", ""))
-                if text.startswith("Previous AI answer context:"):
-                    previous_answer_context = text
+            for seg in reversed(transcript):
+                text = str(getattr(seg, "text", "")).strip()
+                if not previous_answer_context and text.startswith(FOLLOW_UP_CONTEXT_PREFIX):
+                    previous_answer_context = text[len(FOLLOW_UP_CONTEXT_PREFIX):].strip()
+                if not previous_question_context and text.startswith(PRIOR_QUESTION_CONTEXT_PREFIX):
+                    previous_question_context = text[len(PRIOR_QUESTION_CONTEXT_PREFIX):].strip()
+                if previous_answer_context and previous_question_context:
                     break
 
         lower_session_context = session_context.lower()
@@ -858,11 +977,41 @@ class AIThread(QThread):  # type: ignore[misc]
 
         segment_payloads: List[Dict[str, Any]] = []
         resume_related = False
-        latest_speaker_text = ""
-        for seg in reversed(recent):
-            if seg.source == "speaker":
-                latest_speaker_text = seg.text
-                break
+        latest_speaker_text = " ".join(
+            seg.text.strip() for seg in recent if seg.source == "speaker" and seg.text.strip()
+        ).strip()
+
+        if (
+            not is_new_topic
+            and not previous_question_context
+            and latest_speaker_text
+            and speaker_block_start > 0
+        ):
+            prior_speaker_end = -1
+            for index in range(speaker_block_start - 1, -1, -1):
+                if transcript[index].source == "speaker":
+                    prior_speaker_end = index
+                    break
+
+            if prior_speaker_end >= 0:
+                prior_speaker_start = prior_speaker_end
+                while (
+                    prior_speaker_start > 0
+                    and transcript[prior_speaker_start - 1].source == "speaker"
+                ):
+                    prior_speaker_start -= 1
+
+                prior_speaker_text = " ".join(
+                    str(transcript[idx].text).strip()
+                    for idx in range(prior_speaker_start, prior_speaker_end + 1)
+                    if str(transcript[idx].text).strip()
+                )
+                if AIThread.is_context_dependent_follow_up(
+                    prior_speaker_text,
+                    latest_speaker_text,
+                ):
+                    previous_question_context = prior_speaker_text
+
         if resume_profile and latest_speaker_text:
             resume_related = is_resume_related_text(latest_speaker_text, resume_profile)
 
@@ -916,6 +1065,8 @@ class AIThread(QThread):  # type: ignore[misc]
         lines: List[str] = []
         if session_context:
             lines.append(f"[Session Context]: {session_context}")
+        if previous_question_context:
+            lines.append(f"[Prior Question Context]: {previous_question_context}")
         if previous_answer_context:
             lines.append(f"[Follow-up Context]: {previous_answer_context}")
 
@@ -993,5 +1144,13 @@ class AIThread(QThread):  # type: ignore[misc]
                 "- For non-resume questions, do not let resume context dominate the answer."
             )
             prompt = f"{prompt}{resume_policy}"
+
+        follow_up_policy = (
+            "\n\nFollow-up handling policy:\n"
+            "- If [Prior Question Context] and/or [Follow-up Context] is provided, treat it as authoritative for resolving references like 'this', 'that', 'it', 'why', and 'example'.\n"
+            "- Keep your answer focused on the current speaker question, while using prior context only to disambiguate what the follow-up refers to.\n"
+            "- Do not ignore follow-up context unless it clearly conflicts with the current question."
+        )
+        prompt = f"{prompt}{follow_up_policy}"
 
         return prompt

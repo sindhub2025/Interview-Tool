@@ -62,6 +62,23 @@ def test_follow_up_detector_matches_explicit_continuation_requests():
     assert AIThread.is_explicit_follow_up_request("Can you explain further on this topic?")
     assert AIThread.is_explicit_follow_up_request("Please elaborate.")
     assert AIThread.is_explicit_follow_up_request("Go deeper into this")
+    assert AIThread.is_explicit_follow_up_request("Can you give an example?")
+    assert AIThread.is_explicit_follow_up_request("What does that mean?")
+
+
+def test_follow_up_detector_catches_short_context_dependent_requests():
+    prev = "How do you validate ETL source and target table counts?"
+
+    assert AIThread.is_context_dependent_follow_up(prev, "Can you give an example?")
+    assert AIThread.is_context_dependent_follow_up(prev, "Why is that?")
+    assert AIThread.is_context_dependent_follow_up(prev, "And what about this case?")
+    assert AIThread.is_context_dependent_follow_up(prev, "Which one should I use?")
+
+    assert not AIThread.is_context_dependent_follow_up(prev, "How do indexes improve query performance?")
+    assert not AIThread.is_context_dependent_follow_up(
+        prev,
+        "Which algorithm should I use for graph traversal?",
+    )
 
 
 def test_follow_up_detector_rejects_new_topic_questions():
@@ -84,9 +101,35 @@ def test_build_context_preserves_injected_follow_up_context():
         session_context="ETL Tester with 8 years of Experience",
     )
 
-    assert "[Follow-up Context]: Previous AI answer context:" in context
+    assert "[Follow-up Context]: Focus on source and target table validation." in context
     assert "source and target table validation" in context.lower()
     assert "can you explain further on this topic" in context.lower()
+
+
+def test_build_context_prefers_latest_injected_follow_up_context():
+    transcript = [
+        _seg("Previous AI answer context: Old context should not be used.", "user"),
+        _seg("Previous AI answer context: Use this latest context.", "user"),
+        _seg("Can you explain more?", "speaker"),
+    ]
+
+    context = AIThread._build_context(transcript)
+
+    assert "[Follow-up Context]: Use this latest context." in context
+    assert "Old context should not be used" not in context
+
+
+def test_build_context_includes_prior_question_context_for_follow_up():
+    transcript = [
+        _seg("What is the difference between rank and dense rank?", "speaker"),
+        _seg("Rank does not skip tied positions while dense_rank does.", "user"),
+        _seg("Can you give an example?", "speaker"),
+    ]
+
+    context = AIThread._build_context(transcript, is_new_topic=False)
+
+    assert "[Prior Question Context]: What is the difference between rank and dense rank?" in context
+    assert "[Speaker]: Can you give an example?" in context
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +165,14 @@ def test_topic_shift_explicit_follow_up_is_not_a_shift():
     assert AIThread.classify_topic_shift(prev, "Can you explain more?") is False
     assert AIThread.classify_topic_shift(prev, "Please elaborate.") is False
     assert AIThread.classify_topic_shift(prev, "Tell me more.") is False
+
+
+def test_topic_shift_context_dependent_follow_up_is_not_a_shift():
+    prev = "What is the difference between rank and dense rank?"
+
+    assert AIThread.classify_topic_shift(prev, "Can you give an example?") is False
+    assert AIThread.classify_topic_shift(prev, "Why is that?") is False
+    assert AIThread.classify_topic_shift(prev, "Which one should I use?") is False
 
 
 def test_topic_shift_overlapping_etl_questions_are_same_topic():

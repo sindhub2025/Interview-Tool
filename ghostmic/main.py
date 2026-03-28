@@ -937,18 +937,6 @@ class GhostMicApp:
         from ghostmic.core.transcription_engine import TranscriptSegment
 
         with self._transcript_lock:
-            if refine and self._last_ai_response_text:
-                prior_answer = self._last_ai_response_text.strip()
-                if len(prior_answer) > 900:
-                    prior_answer = prior_answer[:900] + "..."
-                self._ai_context_history.append(
-                    TranscriptSegment(
-                        text=f"Previous AI answer context: {prior_answer}",
-                        source="user",
-                        confidence=1.0,
-                    )
-                )
-
             # Treat manual prompt as current question/topic from the speaker side
             # so it can run through existing topic-shift and generation pipeline.
             self._ai_context_history.append(
@@ -963,7 +951,7 @@ class GhostMicApp:
             self._window.controls.set_status("Generating from typed prompt…", "#58a6ff")
             self._window.ai_panel.show_thinking()
 
-        self._generate_ai_response()
+        self._generate_ai_response(force_follow_up=refine)
 
     def _on_ai_response_ready(self, full_text: str) -> None:
         self._logger.info("_on_ai_response_ready called with %d chars", len(full_text))
@@ -1132,7 +1120,7 @@ class GhostMicApp:
         else:
             self._logger.warning("Unable to focus dictation target for Win+H capture.")
 
-    def _generate_ai_response(self) -> None:
+    def _generate_ai_response(self, force_follow_up: bool = False) -> None:
         from ghostmic.core.ai_engine import AIThread
         from ghostmic.core.transcription_engine import TranscriptSegment
 
@@ -1149,14 +1137,30 @@ class GhostMicApp:
                     latest_speaker_text = str(getattr(seg, "text", "")).strip()
                     break
 
+            prev_question_text = self._last_question_text.strip()
+            is_follow_up = force_follow_up or AIThread.is_context_dependent_follow_up(
+                prev_question_text,
+                latest_speaker_text,
+            )
+
             # ── Dynamic topic-shift detection ─────────────────────────────
             # 1. An explicit follow-up phrase ("explain more", "elaborate", …)
             #    is never a topic shift — carry existing answer context.
             # 2. Otherwise use Jaccard word-overlap: <25 % shared content words
             #    → the interviewer moved to a new topic.
-            is_new_topic = AIThread.classify_topic_shift(
-                self._last_question_text, latest_speaker_text
-            )
+            if force_follow_up:
+                is_new_topic = False
+            else:
+                is_new_topic = AIThread.classify_topic_shift(
+                    prev_question_text,
+                    latest_speaker_text,
+                )
+
+            def _snapshot_has_prefix(prefix: str) -> bool:
+                return any(
+                    str(getattr(seg, "text", "")).startswith(prefix)
+                    for seg in transcript_snapshot
+                )
 
             if is_new_topic:
                 # Wipe the old answer so it is never silently re-injected.
@@ -1164,13 +1168,34 @@ class GhostMicApp:
                 self._logger.info(
                     "AI request: topic shift detected — clearing previous answer context. "
                     "prev=%r new=%r",
-                    self._last_question_text[:60],
+                    prev_question_text[:60],
                     latest_speaker_text[:60],
                 )
-            elif (
-                latest_speaker_text
-                and AIThread.is_explicit_follow_up_request(latest_speaker_text)
+            else:
+                if (
+                    is_follow_up
+                    and prev_question_text
+                    and latest_speaker_text
+                    and prev_question_text.lower() != latest_speaker_text.lower()
+                    and not _snapshot_has_prefix("Previous speaker question context:")
+                ):
+                    transcript_snapshot.insert(
+                        0,
+                        TranscriptSegment(
+                            text=f"Previous speaker question context: {prev_question_text}",
+                            source="user",
+                            confidence=1.0,
+                        ),
+                    )
+                    self._logger.info(
+                        "AI request: injected previous speaker question context for follow-up."
+                    )
+
+            if (
+                not is_new_topic
                 and self._last_ai_response_text
+                and (is_follow_up or force_follow_up)
+                and not _snapshot_has_prefix("Previous AI answer context:")
             ):
                 prior_answer = self._last_ai_response_text.strip()
                 if len(prior_answer) > 700:
@@ -1183,10 +1208,21 @@ class GhostMicApp:
                         confidence=1.0,
                     ),
                 )
-                self._logger.info("AI request: explicit follow-up detected, previous answer context injected.")
+                if force_follow_up:
+                    self._logger.info(
+                        "AI request: forced follow-up mode, previous answer context injected."
+                    )
+                else:
+                    self._logger.info(
+                        "AI request: follow-up detected, previous answer context injected."
+                    )
+            elif not is_new_topic:
+                self._logger.info(
+                    "AI request: same topic detected, no previous-answer context injection."
+                )
             else:
                 self._logger.info(
-                    "AI request: same topic (no explicit follow-up phrase), no context injection."
+                    "AI request: new topic detected, no follow-up context injection."
                 )
 
             # Update last question for the next comparison.
