@@ -35,6 +35,12 @@ def defaults():
             "window_width": 420,
             "window_height": 650,
             "compact_mode": False,
+            "docked": False,
+            "dock_height": 56,
+            "pre_dock_x": 0,
+            "pre_dock_y": 0,
+            "pre_dock_width": 420,
+            "pre_dock_height": 650,
         },
         "transcription": {
             "language": "en",
@@ -104,6 +110,13 @@ class TestConfigServiceValidation:
         svc = ConfigService(tmp_config, defaults)
         cfg = svc.load()
         assert cfg["ai"]["trigger_mode"] == "auto"
+
+    def test_invalid_dock_height_resets_to_default(self, tmp_config, defaults):
+        with open(tmp_config, "w") as f:
+            json.dump({"ui": {"dock_height": 5}}, f)
+        svc = ConfigService(tmp_config, defaults)
+        cfg = svc.load()
+        assert cfg["ui"]["dock_height"] == 56
 
     def test_corrupt_json_uses_defaults(self, tmp_config, defaults):
         with open(tmp_config, "w") as f:

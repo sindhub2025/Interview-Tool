@@ -14,6 +14,7 @@ import time
 from typing import Callable, Optional, Tuple
 
 import numpy as np
+import torch  # type: ignore[import]
 
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
@@ -63,6 +64,13 @@ class VADThread(QThread):  # type: ignore[misc]
     if pyqtSignal is not None:
         speech_segment_ready = pyqtSignal(object, str)
 
+    _shared_model = None
+    _shared_torch = None
+    _shared_get_speech_ts = None
+    _shared_model_failed: bool = False
+    _shared_model_error: str = ""
+    _shared_model_lock = threading.Lock()
+
     def __init__(
         self,
         buffer: AudioBuffer,
@@ -79,6 +87,11 @@ class VADThread(QThread):  # type: ignore[misc]
         self._model = None
         self._torch = None
         self._get_speech_ts = None
+
+    @classmethod
+    def preload_model(cls) -> bool:
+        """Preload Silero model once so first recording starts faster."""
+        return cls._load_shared_model()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -147,32 +160,58 @@ class VADThread(QThread):  # type: ignore[misc]
         }
 
     def _load_model(self) -> None:
-        """Load Silero VAD from torch.hub."""
-        try:
-            import torch  # type: ignore[import]
-            logger.info("VADThread: loading Silero VAD model …")
-            model, utils = torch.hub.load(
-                "snakers4/silero-vad",
-                "silero_vad",
-                force_reload=False,
-                trust_repo=True,
-            )
-            self._model = model
-            self._torch = torch
-            (
-                self._get_speech_ts,
-                _,
-                _,
-                _,
-                _,
-            ) = utils
-            logger.info("VADThread: Silero VAD model loaded.")
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.error(
-                "VADThread: failed to load Silero VAD: %s - bypassing VAD.",
-                exc,
-            )
+        """Load Silero VAD from shared cache, or bypass on failure."""
+        loaded = self._load_shared_model()
+        if not loaded:
             self._bypass_vad = True
+            return
+
+        self._model = self.__class__._shared_model
+        self._torch = self.__class__._shared_torch
+        self._get_speech_ts = self.__class__._shared_get_speech_ts
+
+    @classmethod
+    def _load_shared_model(cls) -> bool:
+        """Load Silero model once for all VADThread instances."""
+        with cls._shared_model_lock:
+            if cls._shared_model is not None and cls._shared_torch is not None:
+                return True
+
+            if cls._shared_model_failed:
+                if cls._shared_model_error:
+                    logger.warning(
+                        "VADThread: using bypass mode (previous Silero load failed: %s)",
+                        cls._shared_model_error,
+                    )
+                return False
+
+            try:
+                logger.info("VADThread: loading Silero VAD model …")
+                model, utils = torch.hub.load(
+                    "snakers4/silero-vad",
+                    "silero_vad",
+                    force_reload=False,
+                    trust_repo=True,
+                )
+                cls._shared_model = model
+                cls._shared_torch = torch
+                (
+                    cls._shared_get_speech_ts,
+                    _,
+                    _,
+                    _,
+                    _,
+                ) = utils
+                logger.info("VADThread: Silero VAD model loaded.")
+                return True
+            except Exception as exc:  # pylint: disable=broad-except
+                cls._shared_model_failed = True
+                cls._shared_model_error = str(exc)
+                logger.error(
+                    "VADThread: failed to load Silero VAD: %s - bypassing VAD.",
+                    exc,
+                )
+                return False
 
     def _vad_probability(self, window: np.ndarray) -> float:
         """Return the speech probability for a 512-sample window."""

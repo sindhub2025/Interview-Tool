@@ -101,15 +101,29 @@ def _default_config() -> dict:
         },
         "audio": {"input_device": None, "loopback_device": None, "sample_rate": 16000},
         "transcription": {
-            "model_size": "base.en",
+            "model_size": "small.en",
             "compute_type": "int8",
             "language": "en",
-            "beam_size": 3,
-            "remote_fallback": True,
+            "beam_size": 5,
+            "use_context_prompt": False,
+            "min_segment_seconds": 0.45,
+            "min_segment_rms": 140.0,
+            "trim_silence": True,
+            "silence_trim_threshold": 220,
+            "silence_trim_pad_seconds": 0.08,
+            "target_rms": 2200.0,
+            "max_gain": 8.0,
+            "no_speech_threshold": 0.7,
+            "log_prob_threshold": -1.0,
+            "compression_ratio_threshold": 2.0,
+            "temperature": 0.0,
+            "patience": 1.2,
+            "repetition_penalty": 1.05,
+            "remote_fallback": False,
             "remote_backend": "auto",
             "remote_model_groq": "whisper-large-v3-turbo",
             "remote_model_openai": "gpt-4o-mini-transcribe",
-            "auto_skip_local_on_windows_broken": True,
+            "auto_skip_local_on_windows_broken": False,
             "known_local_torch_broken": False,
             "known_local_torch_error": "",
             "known_local_torch_marked_at": 0,
@@ -123,6 +137,12 @@ def _default_config() -> dict:
             "window_y": None,
             "always_on_top": True,
             "compact_mode": False,
+            "docked": False,
+            "dock_height": 56,
+            "pre_dock_x": None,
+            "pre_dock_y": None,
+            "pre_dock_width": None,
+            "pre_dock_height": None,
         },
         "hotkeys": {
             "toggle_recording": "ctrl+shift+g",
@@ -252,10 +272,14 @@ class GhostMicApp:
         self._transcription_thread = None
         self._ai_thread = None
         self._model_loader = None
+        self._model_loader_thread = None
         self._hotkey_manager = None
         self._tray = None
         self._window = None
         self._transcript_history: List = []
+        self._ai_context_history: List = []
+        self._last_ai_response_text: str = ""
+        self._last_question_text: str = ""  # tracks most recent speaker question for topic-shift detection
         self._transcript_lock = threading.Lock()
         self._model_ready = False
         self._model_error_message: Optional[str] = None
@@ -265,6 +289,7 @@ class GhostMicApp:
         self._dictation_hotkey_guard_until = 0.0
         self._startup_api_worker = None
         self._ui_dispatcher = None
+        self._audio_backends_prewarmed = False
 
         # Services
         self._thread_coordinator = ThreadCoordinator()
@@ -299,6 +324,10 @@ class GhostMicApp:
         if not self._args.minimized and self._window:
             self._window.show()
 
+        if self._tray and self._window:
+            self._tray.set_window_visible(self._window.isVisible())
+            self._tray.set_docked(self._window.is_docked)
+
         app.aboutToQuit.connect(self._on_quit)
 
         return app.exec()
@@ -314,6 +343,7 @@ class GhostMicApp:
         class UiActionDispatcher(QObject):
             toggle_recording_requested = pyqtSignal()
             toggle_window_requested = pyqtSignal()
+            toggle_dock_requested = pyqtSignal()
             generate_response_requested = pyqtSignal()
             copy_response_requested = pyqtSignal()
             clear_transcript_requested = pyqtSignal()
@@ -323,14 +353,17 @@ class GhostMicApp:
         self._ui_dispatcher = UiActionDispatcher()
         self._ui_dispatcher.toggle_recording_requested.connect(self._toggle_recording)
         self._ui_dispatcher.toggle_window_requested.connect(self._toggle_window)
+        self._ui_dispatcher.toggle_dock_requested.connect(self._toggle_dock_window)
         self._ui_dispatcher.generate_response_requested.connect(self._generate_ai_response)
         self._ui_dispatcher.copy_response_requested.connect(self._copy_last_response)
         self._ui_dispatcher.clear_transcript_requested.connect(self._clear_transcript)
         self._ui_dispatcher.win_h_dictation_requested.connect(self._on_win_h_dictation)
+        self._window.dock_state_changed.connect(self._on_window_dock_state_changed)
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)
         self._window.dictation_committed.connect(self._on_dictation_committed)
+        self._window.ai_panel.text_prompt_submitted.connect(self._on_ai_text_prompt_submitted)
 
     def _test_api_startup_async(self) -> None:
         """Test API connectivity in a background thread (non-blocking)."""
@@ -371,9 +404,13 @@ class GhostMicApp:
 
         self._tray = SystemTrayIcon()
         self._tray.show_hide_requested.connect(self._toggle_window)
+        self._tray.dock_toggle_requested.connect(self._toggle_dock_window)
         self._tray.start_stop_requested.connect(self._toggle_recording)
         self._tray.mode_changed.connect(self._on_mode_changed)
         self._tray.quit_requested.connect(app.quit)
+        if self._window:
+            self._tray.set_docked(self._window.is_docked)
+            self._tray.set_window_visible(self._window.isVisible())
 
     # ------------------------------------------------------------------
     # Whisper model loading
@@ -393,6 +430,18 @@ class GhostMicApp:
             and self._runtime_state.get("known_local_torch_broken", False)
         )
 
+    def _is_model_loader_running(self) -> bool:
+        return bool(self._model_loader_thread and self._model_loader_thread.is_alive())
+
+    def _preload_torch_runtime(self) -> None:
+        """Import torch on the main thread before background loaders start."""
+        try:
+            import torch  # type: ignore[import]
+
+            _ = torch
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.debug("Torch preload skipped: %s", exc)
+
     def _mark_local_model_known_broken(self, msg: str) -> None:
         if sys.platform != "win32" or not self._is_torch_dll_failure(msg):
             return
@@ -409,13 +458,14 @@ class GhostMicApp:
 
     def _start_model_loader(self) -> None:
         try:
+            self._preload_torch_runtime()
             from ghostmic.core.transcription_engine import ModelLoader, TranscriptionThread
 
             tcfg = self._config.get("transcription", {})
             self._model_ready = False
             self._model_error_message = None
             loader = ModelLoader(
-                model_size=tcfg.get("model_size", "base.en"),
+                model_size=tcfg.get("model_size", "small.en"),
                 compute_type=tcfg.get("compute_type", "int8"),
                 device="auto",
             )
@@ -429,7 +479,7 @@ class GhostMicApp:
             # Set up transcription thread
             self._transcription_thread = TranscriptionThread(
                 language=tcfg.get("language", "en"),
-                beam_size=tcfg.get("beam_size", 3),
+                beam_size=tcfg.get("beam_size", 5),
                 ai_config=self._config.get("ai", {}),
                 remote_config=tcfg,
             )
@@ -445,6 +495,7 @@ class GhostMicApp:
                 enabled, detail = self._transcription_thread.enable_remote_fallback()
                 if enabled:
                     self._model_loader = None
+                    self._model_loader_thread = None
                     self._model_ready = True
                     self._model_error_message = (
                         self._runtime_state.get(
@@ -532,8 +583,12 @@ class GhostMicApp:
             )
 
             self._model_loader = loader
-            self._thread_coordinator.register("model_loader", loader)
-            loader.start()
+            self._model_loader_thread = threading.Thread(
+                target=loader.run,
+                name="model-loader",
+                daemon=True,
+            )
+            self._model_loader_thread.start()
             self._logger.info("Model loader thread started.")
 
         except ImportError as exc:
@@ -553,14 +608,46 @@ class GhostMicApp:
         QThread objects cannot be restarted once finished.
         """
         try:
+            self._preload_torch_runtime()
             from ghostmic.core.audio_buffer import AudioBuffer
+            from ghostmic.core.vad import VADThread
 
             audio_cfg = self._config.get("audio", {})
             self._buffer = AudioBuffer(
                 sample_rate=audio_cfg.get("sample_rate", 16_000)
             )
+
+            # Preload Silero in the background so first Record click is responsive.
+            threading.Thread(
+                target=VADThread.preload_model,
+                name="vad-preload",
+                daemon=True,
+            ).start()
+
+            # Warm audio imports + device probing off the UI thread so
+            # first Record click avoids lazy backend initialization cost.
+            threading.Thread(
+                target=self._prewarm_audio_backends,
+                name="audio-backend-prewarm",
+                daemon=True,
+            ).start()
         except ImportError as exc:
             self._logger.warning("Audio libraries not available: %s", exc)
+
+    def _prewarm_audio_backends(self) -> None:
+        """Warm common audio backend imports and basic device enumeration."""
+        if self._audio_backends_prewarmed:
+            return
+        try:
+            from ghostmic.core import audio_capture
+
+            # Trigger import of heavy native bindings during startup idle.
+            _ = audio_capture.list_input_devices()
+            _ = audio_capture.list_loopback_devices()
+            self._audio_backends_prewarmed = True
+            self._logger.info("Audio backends prewarmed.")
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.debug("Audio backend prewarm skipped: %s", exc)
 
     def _create_audio_threads(self) -> bool:
         """Create fresh audio capture and VAD threads for a new recording.
@@ -733,7 +820,7 @@ class GhostMicApp:
 
     def _on_record_toggled(self, recording: bool) -> None:
         if recording:
-            if self._model_loader and self._model_loader.isRunning():
+            if self._is_model_loader_running():
                 self._logger.info("Recording blocked: model is still loading.")
                 self._recording_active = False
                 if self._window:
@@ -777,6 +864,8 @@ class GhostMicApp:
                 self._transcription_thread.clear_pending_segments()
             if self._ai_thread:
                 self._ai_thread.clear_pending_requests()
+            with self._transcript_lock:
+                self._ai_context_history.clear()
             if self._tray:
                 self._tray.set_recording(False)
 
@@ -826,6 +915,7 @@ class GhostMicApp:
 
         with self._transcript_lock:
             self._transcript_history.append(segment)
+            self._ai_context_history.append(segment)
             self._logger.info(
                 "Transcript segment added: source=%s, text=%r, total_segments=%d",
                 getattr(segment, "source", "unknown"),
@@ -859,8 +949,47 @@ class GhostMicApp:
         if accepted and self._window:
             self._window.controls.set_status("Dictation captured", "#58a6ff")
 
+    def _on_ai_text_prompt_submitted(self, prompt: str, refine: bool) -> None:
+        prompt = prompt.strip()
+        if not prompt:
+            return
+
+        from ghostmic.core.transcription_engine import TranscriptSegment
+
+        with self._transcript_lock:
+            if refine and self._last_ai_response_text:
+                prior_answer = self._last_ai_response_text.strip()
+                if len(prior_answer) > 900:
+                    prior_answer = prior_answer[:900] + "..."
+                self._ai_context_history.append(
+                    TranscriptSegment(
+                        text=f"Previous AI answer context: {prior_answer}",
+                        source="user",
+                        confidence=1.0,
+                    )
+                )
+
+            # Treat manual prompt as current question/topic from the speaker side
+            # so it can run through existing topic-shift and generation pipeline.
+            self._ai_context_history.append(
+                TranscriptSegment(
+                    text=prompt,
+                    source="speaker",
+                    confidence=1.0,
+                )
+            )
+
+        if self._window:
+            self._window.controls.set_status("Generating from typed prompt…", "#58a6ff")
+            self._window.ai_panel.show_thinking()
+
+        self._generate_ai_response()
+
     def _on_ai_response_ready(self, full_text: str) -> None:
         self._logger.info("_on_ai_response_ready called with %d chars", len(full_text))
+        with self._transcript_lock:
+            self._last_ai_response_text = full_text
+            self._ai_context_history.clear()
         if self._window:
             self._window.ai_panel.finish_response(full_text)
             self._window.controls.set_status("✓ Response ready", "#3fb950")
@@ -900,6 +1029,20 @@ class GhostMicApp:
             if self._tray:
                 self._tray.set_window_visible(self._window.isVisible())
 
+    def _toggle_dock_window(self) -> None:
+        if not self._window:
+            return
+        if not self._window.isVisible():
+            self._window.show()
+        self._window.toggle_dock_mode()
+        if self._tray:
+            self._tray.set_docked(self._window.is_docked)
+            self._tray.set_window_visible(self._window.isVisible())
+
+    def _on_window_dock_state_changed(self, docked: bool) -> None:
+        if self._tray:
+            self._tray.set_docked(docked)
+
     def _toggle_recording(self) -> None:
         if self._window:
             recording = not self._window.controls.is_recording
@@ -925,16 +1068,70 @@ class GhostMicApp:
             self._logger.warning("Unable to focus dictation target for Win+H capture.")
 
     def _generate_ai_response(self) -> None:
+        from ghostmic.core.ai_engine import AIThread
+        from ghostmic.core.transcription_engine import TranscriptSegment
+
         with self._transcript_lock:
-            if not self._transcript_history:
-                self._logger.debug("AI request skipped: transcript history is empty.")
+            if not self._ai_context_history:
+                self._logger.debug("AI request skipped: AI context history is empty.")
                 if self._window:
                     self._window.controls.set_status("No transcript available for AI", "#f0883e")
                 return
-            transcript_snapshot = list(self._transcript_history)
+            transcript_snapshot = list(self._ai_context_history)
+            latest_speaker_text = ""
+            for seg in reversed(transcript_snapshot):
+                if getattr(seg, "source", "") == "speaker":
+                    latest_speaker_text = str(getattr(seg, "text", "")).strip()
+                    break
+
+            # ── Dynamic topic-shift detection ─────────────────────────────
+            # 1. An explicit follow-up phrase ("explain more", "elaborate", …)
+            #    is never a topic shift — carry existing answer context.
+            # 2. Otherwise use Jaccard word-overlap: <25 % shared content words
+            #    → the interviewer moved to a new topic.
+            is_new_topic = AIThread.classify_topic_shift(
+                self._last_question_text, latest_speaker_text
+            )
+
+            if is_new_topic:
+                # Wipe the old answer so it is never silently re-injected.
+                self._last_ai_response_text = ""
+                self._logger.info(
+                    "AI request: topic shift detected — clearing previous answer context. "
+                    "prev=%r new=%r",
+                    self._last_question_text[:60],
+                    latest_speaker_text[:60],
+                )
+            elif (
+                latest_speaker_text
+                and AIThread.is_explicit_follow_up_request(latest_speaker_text)
+                and self._last_ai_response_text
+            ):
+                prior_answer = self._last_ai_response_text.strip()
+                if len(prior_answer) > 700:
+                    prior_answer = prior_answer[:700] + "..."
+                transcript_snapshot.insert(
+                    0,
+                    TranscriptSegment(
+                        text=f"Previous AI answer context: {prior_answer}",
+                        source="user",
+                        confidence=1.0,
+                    ),
+                )
+                self._logger.info("AI request: explicit follow-up detected, previous answer context injected.")
+            else:
+                self._logger.info(
+                    "AI request: same topic (no explicit follow-up phrase), no context injection."
+                )
+
+            # Update last question for the next comparison.
+            if latest_speaker_text:
+                self._last_question_text = latest_speaker_text
+
             self._logger.info(
-                "AI request: preparing with %d transcript segment(s).",
+                "AI request: preparing with %d context segment(s), is_new_topic=%s.",
                 len(transcript_snapshot),
+                is_new_topic,
             )
 
         self._ensure_ai_thread()
@@ -945,7 +1142,7 @@ class GhostMicApp:
                 self._window.ai_panel.show_error("AI engine is unavailable. Check dependencies/API settings.")
             return
 
-        accepted = self._ai_thread.request_response(transcript_snapshot)
+        accepted = self._ai_thread.request_response(transcript_snapshot, is_new_topic=is_new_topic)
         if accepted:
             self._logger.info("AI request accepted and queued for generation.")
             if self._window:
@@ -975,6 +1172,8 @@ class GhostMicApp:
         if not self._window:
             with self._transcript_lock:
                 self._transcript_history.clear()
+                self._ai_context_history.clear()
+                self._last_ai_response_text = ""
             return
 
         from PyQt6.QtWidgets import QMessageBox
@@ -995,6 +1194,8 @@ class GhostMicApp:
             self._window.transcript_panel.clear_transcript()
             with self._transcript_lock:
                 self._transcript_history.clear()
+                self._ai_context_history.clear()
+                self._last_ai_response_text = ""
             self._window.controls.set_status("Transcript cleared", "#3fb950")
 
     # ------------------------------------------------------------------
@@ -1020,15 +1221,29 @@ class GhostMicApp:
 
         # Save window position and UI state
         if self._window:
-            geo = self._window.geometry()
             self._config.setdefault("ui", {})
-            self._config["ui"]["window_x"] = geo.x()
-            self._config["ui"]["window_y"] = geo.y()
-            self._config["ui"]["window_width"] = geo.width()
-            self._config["ui"]["window_height"] = geo.height()
-            self._config["ui"]["compact_mode"] = getattr(
+            ui_cfg = self._config["ui"]
+            ui_cfg["docked"] = self._window.is_docked
+
+            if self._window.is_docked and self._window.pre_dock_geometry is not None:
+                geo = self._window.pre_dock_geometry
+            else:
+                geo = self._window.geometry()
+
+            ui_cfg["window_x"] = geo.x()
+            ui_cfg["window_y"] = geo.y()
+            ui_cfg["window_width"] = geo.width()
+            ui_cfg["window_height"] = geo.height()
+            ui_cfg["compact_mode"] = getattr(
                 self._window, "_compact_mode", False
             )
+
+            if self._window.pre_dock_geometry is not None:
+                pre_geo = self._window.pre_dock_geometry
+                ui_cfg["pre_dock_x"] = pre_geo.x()
+                ui_cfg["pre_dock_y"] = pre_geo.y()
+                ui_cfg["pre_dock_width"] = pre_geo.width()
+                ui_cfg["pre_dock_height"] = pre_geo.height()
 
         _save_config(self._config, self._config_path)
         self._logger.info("GhostMic: shutdown complete.")

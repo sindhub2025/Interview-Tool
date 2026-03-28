@@ -45,12 +45,14 @@ class SystemTrayIcon(QSystemTrayIcon):
 
     Signals:
         show_hide_requested()
+        dock_toggle_requested()
         start_stop_requested()
         mode_changed(str)
         quit_requested()
     """
 
     show_hide_requested = pyqtSignal()
+    dock_toggle_requested = pyqtSignal()
     start_stop_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)
     quit_requested = pyqtSignal()
@@ -77,6 +79,10 @@ class SystemTrayIcon(QSystemTrayIcon):
         self._show_action = QAction("👁  Show Window", menu)
         self._show_action.triggered.connect(self.show_hide_requested)
         menu.addAction(self._show_action)
+
+        self._dock_action = QAction("📌  Dock Window", menu)
+        self._dock_action.triggered.connect(self.dock_toggle_requested)
+        menu.addAction(self._dock_action)
 
         menu.addSeparator()
 
@@ -113,6 +119,9 @@ class SystemTrayIcon(QSystemTrayIcon):
         self._show_action.setText(
             "🙈  Hide Window" if visible else "👁  Show Window"
         )
+
+    def set_docked(self, docked: bool) -> None:
+        self._dock_action.setText("↩  Undock Window" if docked else "📌  Dock Window")
 
     # ------------------------------------------------------------------
     # Slots

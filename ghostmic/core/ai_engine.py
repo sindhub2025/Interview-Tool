@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import queue
 import random
+import re
 import threading
 import time
 from typing import Callable, List, Optional
@@ -37,6 +38,9 @@ Based on the conversation transcript provided, generate:
 2. Key talking points the user should mention
 
 Rules:
+- Answer ONLY the current question shown in the transcript. Do NOT reference, \
+explain, or repeat content from any previous questions or answers unless \
+the interviewer explicitly asks you to.
 - Keep responses concise (2-4 sentences max for the main response)
 - Sound natural and conversational, not robotic
 - If it's a technical question, provide accurate technical details
@@ -52,6 +56,54 @@ AI_QUEUE_MAXSIZE: int = 8
 RUNTIME_RATE_LIMIT_RETRIES: int = 3
 RUNTIME_RATE_LIMIT_BASE_DELAY: float = 1.0
 RUNTIME_RATE_LIMIT_MAX_DELAY: float = 8.0
+
+# Jaccard similarity threshold below which two questions are considered
+# different topics.  0.25 means less than 25 % word overlap → new topic.
+TOPIC_SHIFT_THRESHOLD: float = 0.25
+
+# Common English stop-words excluded from topic-shift comparison.
+_STOP_WORDS: frozenset = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "used", "to", "of", "in", "on", "at", "by", "for", "with", "from",
+    "up", "about", "into", "through", "during", "before", "after",
+    "above", "below", "between", "out", "and", "but", "or", "nor",
+    "so", "yet", "both", "either", "neither", "not", "only", "own",
+    "same", "than", "too", "very", "just", "that", "this", "these",
+    "those", "which", "who", "whom", "what", "how", "when", "where",
+    "why", "if", "as", "its", "it", "your", "you", "me", "my",
+    "we", "our", "they", "their", "them", "he", "she", "his", "her",
+    "i", "im", "ive", "dont", "doesnt", "didnt", "wont", "wouldnt",
+    "between", "difference", "explain", "describe", "give",
+})
+
+ETL_CONTEXT_KEYWORDS = (
+    "etl",
+    "data warehouse",
+    "data warehousing",
+    "source table",
+    "target table",
+    "staging",
+    "pipeline",
+    "fact table",
+    "dimension table",
+)
+FOLLOW_UP_PATTERNS = (
+    r"\bexplain more\b",
+    r"\bexplain further\b",
+    r"\bexplain further on (?:this|that) topic\b",
+    r"\belaborate\b",
+    r"\belaborate more\b",
+    r"\bcan you elaborate\b",
+    r"\bcan you explain (?:that|this|it) more\b",
+    r"\btell me more\b",
+    r"\bmore detail(?:s)?\b",
+    r"\bgo deeper\b",
+    r"\bexpand on (?:that|this|it|the topic)\b",
+    r"\bcontinue\b",
+    r"\bwhat else\b",
+)
 
 
 class AIThread(QThread):  # type: ignore[misc]
@@ -87,7 +139,8 @@ class AIThread(QThread):  # type: ignore[misc]
         self._on_chunk = on_chunk
         self._on_ready = on_ready
         self._stop_event = threading.Event()
-        self._queue: "queue.Queue[List[TranscriptSegment]]" = queue.Queue(
+        # Queue carries (transcript, is_new_topic) tuples.
+        self._queue: "queue.Queue[tuple]" = queue.Queue(
             maxsize=AI_QUEUE_MAXSIZE
         )
         self._last_request_time: float = 0.0
@@ -96,7 +149,11 @@ class AIThread(QThread):  # type: ignore[misc]
     def stop(self) -> None:
         self._stop_event.set()
 
-    def request_response(self, transcript: List[TranscriptSegment]) -> bool:
+    def request_response(
+        self,
+        transcript: List[TranscriptSegment],
+        is_new_topic: bool = False,
+    ) -> bool:
         """Queue a response-generation request.
 
         Applies debounce: requests closer than DEBOUNCE_SECONDS apart are
@@ -104,6 +161,8 @@ class AIThread(QThread):  # type: ignore[misc]
 
         Args:
             transcript: Recent transcript segments for context.
+            is_new_topic: When True the AI will not use any previous-answer
+                context so the response focuses strictly on the new question.
 
         Returns:
             True when accepted into the queue, otherwise False.
@@ -114,8 +173,9 @@ class AIThread(QThread):  # type: ignore[misc]
             self._last_reject_reason = "debounced"
             return False
         self._last_request_time = now
+        payload = (transcript, is_new_topic)
         try:
-            self._queue.put_nowait(transcript)
+            self._queue.put_nowait(payload)
             self._last_reject_reason = ""
             return True
         except queue.Full:
@@ -128,7 +188,7 @@ class AIThread(QThread):  # type: ignore[misc]
                 return False
 
             try:
-                self._queue.put_nowait(transcript)
+                self._queue.put_nowait(payload)
                 logger.debug("AIThread: queue full – dropped oldest queued request.")
                 self._last_reject_reason = ""
                 return True
@@ -167,8 +227,13 @@ class AIThread(QThread):  # type: ignore[misc]
         logger.info("AIThread: started.")
         while not self._stop_event.is_set():
             try:
-                transcript = self._queue.get(timeout=0.2)
-                logger.info("AIThread: got request from queue with %d segments", len(transcript))
+                payload = self._queue.get(timeout=0.2)
+                transcript, is_new_topic = payload if isinstance(payload, tuple) else (payload, False)
+                logger.info(
+                    "AIThread: got request from queue with %d segments, is_new_topic=%s",
+                    len(transcript),
+                    is_new_topic,
+                )
             except queue.Empty:
                 continue
 
@@ -176,7 +241,7 @@ class AIThread(QThread):  # type: ignore[misc]
             # when request is accepted instead
             logger.info("AIThread: calling _generate() now...")
             try:
-                self._generate(transcript)
+                self._generate(transcript, is_new_topic=is_new_topic)
                 logger.info("AIThread: _generate() completed")
             except Exception as e:
                 logger.error("AIThread: _generate() raised exception: %s", e, exc_info=True)
@@ -211,9 +276,13 @@ class AIThread(QThread):  # type: ignore[misc]
         )
         return "groq"
 
-    def _generate(self, transcript: List[TranscriptSegment]) -> None:
+    def _generate(self, transcript: List[TranscriptSegment], is_new_topic: bool = False) -> None:
         # Keep old/new config keys for compatibility, then normalize to active provider.
-        logger.info("AIThread: _generate() starting with %d segments", len(transcript))
+        logger.info(
+            "AIThread: _generate() starting with %d segments, is_new_topic=%s",
+            len(transcript),
+            is_new_topic,
+        )
         requested_main = self._config.get("main_backend") or self._config.get("backend", "groq")
         requested_fallback = self._config.get("fallback_backend", "groq")
         main_backend = self._resolve_active_backend(requested_main)
@@ -223,9 +292,15 @@ class AIThread(QThread):  # type: ignore[misc]
         logger.info("AIThread: using main_backend=%s, fallback_backend=%s, enable_fallback=%s", 
                    main_backend, fallback_backend, enable_fallback)
         
-        context = self._build_context(transcript)
-        logger.info("AIThread: context built (length=%d)", len(context))
-        system_prompt = self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+        session_context = str(self._config.get("session_context", "")).strip()
+        context = self._build_context(
+            transcript, session_context=session_context, is_new_topic=is_new_topic
+        )
+        logger.info("AIThread: context built (length=%d, is_new_topic=%s)", len(context), is_new_topic)
+        system_prompt = self._build_system_prompt(
+            self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
+            session_context,
+        )
         temperature = float(self._config.get("temperature", 0.7))
         logger.info("AIThread: temperature=%.1f", temperature)
 
@@ -387,6 +462,7 @@ class AIThread(QThread):  # type: ignore[misc]
         """
         logger.info("AIThread (%s): _generate_stream() starting", backend_name)
         full_response: List[str] = []
+        stream = None
 
         try:
             default_model = "llama-3.3-70b-versatile" if backend_name == "groq" else "gpt-4o-mini"
@@ -452,7 +528,7 @@ class AIThread(QThread):  # type: ignore[misc]
 
         finally:
             # Explicitly close the stream to prevent resource leak
-            if hasattr(stream, 'close'):
+            if stream is not None and hasattr(stream, 'close'):
                 try:
                     stream.close()
                 except Exception as e:  # pylint: disable=broad-except
@@ -623,11 +699,151 @@ class AIThread(QThread):  # type: ignore[misc]
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_context(transcript: List[TranscriptSegment]) -> str:
-        """Format the last N transcript segments as a conversation string."""
-        recent = transcript[-MAX_CONTEXT_SEGMENTS:]
+    def is_explicit_follow_up_request(text: str) -> bool:
+        """Return True when *text* explicitly asks to continue prior topic."""
+        cleaned = text.strip().lower()
+        if not cleaned:
+            return False
+        return any(re.search(pattern, cleaned) for pattern in FOLLOW_UP_PATTERNS)
+
+    @staticmethod
+    def classify_topic_shift(prev_question: str, new_question: str) -> bool:
+        """Return True when *new_question* is a semantically different topic.
+
+        Uses Jaccard similarity on content words (non-stop-words ≥ 4 chars).
+        A similarity below ``TOPIC_SHIFT_THRESHOLD`` is treated as a new topic.
+
+        Special cases:
+        - If *prev_question* is empty it is the first question → new topic.
+        - If *new_question* is empty, return False (not enough info to judge).
+        - Explicit follow-up phrases always override (return False).
+        """
+        if not new_question.strip():
+            return False
+        if not prev_question.strip():
+            return True  # No prior question means this is always the first one.
+
+        # Explicit follow-ups are never a topic shift regardless of wording.
+        if AIThread.is_explicit_follow_up_request(new_question):
+            return False
+
+        def _content_words(text: str) -> frozenset:
+            # Lowercase, strip punctuation, keep words ≥ 4 chars that are not stop-words.
+            words = re.sub(r"[^a-z0-9\s]", "", text.lower()).split()
+            return frozenset(
+                w for w in words if len(w) >= 4 and w not in _STOP_WORDS
+            )
+
+        prev_words = _content_words(prev_question)
+        new_words = _content_words(new_question)
+
+        # If both sets are empty (e.g. very short questions) fall back to
+        # character-level comparison: treat as different if texts differ.
+        if not prev_words and not new_words:
+            return prev_question.strip().lower() != new_question.strip().lower()
+
+        # Jaccard similarity = |intersection| / |union|
+        intersection = len(prev_words & new_words)
+        union = len(prev_words | new_words)
+        similarity = intersection / union if union else 0.0
+
+        logger.debug(
+            "classify_topic_shift: similarity=%.2f (threshold=%.2f) "
+            "prev=%r new=%r",
+            similarity,
+            TOPIC_SHIFT_THRESHOLD,
+            prev_question[:60],
+            new_question[:60],
+        )
+        return similarity < TOPIC_SHIFT_THRESHOLD
+
+    @staticmethod
+    def _build_context(
+        transcript: List[TranscriptSegment],
+        session_context: str = "",
+        is_new_topic: bool = False,
+    ) -> str:
+        """Format the most recent question-focused transcript block.
+
+        Args:
+            transcript: Full transcript history including any injected segments.
+            session_context: Optional domain/role context set by the user.
+            is_new_topic: When True, suppress the Follow-up Context block so
+                the AI focuses solely on the current question.
+        """
+        if not transcript:
+            return ""
+
+        last_speaker_index = -1
+        for index in range(len(transcript) - 1, -1, -1):
+            if transcript[index].source == "speaker":
+                last_speaker_index = index
+                break
+
+        if last_speaker_index < 0:
+            recent = transcript[-MAX_CONTEXT_SEGMENTS:]
+        else:
+            recent = [
+                seg
+                for seg in transcript[last_speaker_index:]
+                if seg.source == "speaker"
+            ]
+
+        previous_answer_context = ""
+        if not is_new_topic:
+            # Only look for a follow-up context block when we are genuinely
+            # continuing on the same topic.
+            for seg in transcript:
+                text = str(getattr(seg, "text", ""))
+                if text.startswith("Previous AI answer context:"):
+                    previous_answer_context = text
+                    break
+
+        lower_session_context = session_context.lower()
+        joined_recent_text = " ".join(seg.text.lower() for seg in recent)
+        etl_context_active = any(
+            keyword in lower_session_context or keyword in joined_recent_text
+            for keyword in ETL_CONTEXT_KEYWORDS
+        )
+
         lines: List[str] = []
+        if session_context:
+            lines.append(f"[Session Context]: {session_context}")
+        if previous_answer_context:
+            lines.append(f"[Follow-up Context]: {previous_answer_context}")
+
         for seg in recent:
             label = "Speaker" if seg.source == "speaker" else "You"
-            lines.append(f"[{label}]: {seg.text}")
+            text = seg.text
+            if etl_context_active:
+                text = AIThread._normalize_etl_transcript_terms(text)
+            lines.append(f"[{label}]: {text}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_etl_transcript_terms(text: str) -> str:
+        """Repair common ETL-specific speech-to-text homophone mistakes."""
+        normalized = text
+        replacements = [
+            (r"\bsort and target table\b", "source and target table"),
+            (r"\bsort table\b", "source table"),
+            (r"\bsort to target\b", "source to target"),
+            (r"\bsort and target tables\b", "source and target tables"),
+            (r"\bsort tables\b", "source tables"),
+            (r"\bsort-to-target\b", "source-to-target"),
+        ]
+        for pattern, replacement in replacements:
+            normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+        return normalized
+
+    @staticmethod
+    def _build_system_prompt(system_prompt: str, session_context: str) -> str:
+        if not session_context:
+            return system_prompt
+        addendum = (
+            "\n\nSession context (role/background): "
+            f"{session_context}\n"
+            "Tailor your response to this context if relevant, but do not force it "
+            "into answers for general concepts (e.g., general SQL or programming questions)."
+        )
+        return f"{system_prompt}{addendum}"

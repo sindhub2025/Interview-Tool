@@ -67,6 +67,7 @@ class TitleBar(QWidget):
 
     close_requested = pyqtSignal()
     minimise_requested = pyqtSignal()
+    dock_toggle_requested = pyqtSignal()
     pin_toggled = pyqtSignal(bool)
     double_clicked = pyqtSignal()
 
@@ -75,6 +76,7 @@ class TitleBar(QWidget):
         self.setFixedHeight(28)
         self._drag_pos: Optional[QPoint] = None
         self._pinned = True
+        self._docked = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -102,6 +104,24 @@ class TitleBar(QWidget):
             "QPushButton:checked { color: #58a6ff; }"
         )
         layout.addWidget(self._pin_btn)
+
+        # Dock toggle button
+        self._dock_btn = QPushButton("Dock")
+        self._dock_btn.setFixedSize(44, 22)
+        self._dock_btn.setToolTip("Dock/Undock window")
+        self._dock_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: rgba(88, 166, 255, 0.16);"
+            "  border: 1px solid rgba(88, 166, 255, 0.6);"
+            "  border-radius: 6px;"
+            "  color: #dce7ff;"
+            "  font-size: 9pt;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton:hover { background-color: rgba(88, 166, 255, 0.28); }"
+        )
+        self._dock_btn.clicked.connect(self.dock_toggle_requested)
+        layout.addWidget(self._dock_btn)
 
         # Minimise
         min_btn = QPushButton("—")
@@ -145,6 +165,10 @@ class TitleBar(QWidget):
         self.double_clicked.emit()
         super().mouseDoubleClickEvent(event)
 
+    def set_docked(self, docked: bool) -> None:
+        self._docked = docked
+        self._dock_btn.setText("Undock" if docked else "Dock")
+
 
 class MainWindow(QMainWindow):
     """Main GhostMic overlay window.
@@ -156,12 +180,17 @@ class MainWindow(QMainWindow):
     """
 
     dictation_committed = pyqtSignal(str)
+    dock_state_changed = pyqtSignal(bool)
 
     def __init__(self, config: dict, config_path: Optional[str] = None, parent=None) -> None:
         super().__init__(parent)
         self._config = config
         self._config_path = config_path
         self._compact_mode = False
+        self._docked = bool(self._config.get("ui", {}).get("docked", False))
+        self._dock_needs_apply = self._docked
+        self._dock_transition_in_progress = False
+        self._pre_dock_geometry: Optional[QRect] = self._load_pre_dock_geometry()
         self._resize_edge: Optional[str] = None
         self._resize_origin: Optional[QPoint] = None
         self._resize_geometry: Optional[QRect] = None
@@ -175,6 +204,8 @@ class MainWindow(QMainWindow):
 
         self._setup_window()
         self._build_ui()
+        if self._docked:
+            self._title_bar.set_docked(True)
         self._apply_config()
 
         # Restore compact mode if previously saved
@@ -206,8 +237,10 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         if screen:
             geo = screen.availableGeometry()
-            x = ui.get("window_x") or (geo.right() - w - 20)
-            y = ui.get("window_y") or (geo.bottom() - h - 20)
+            cfg_x = ui.get("window_x")
+            cfg_y = ui.get("window_y")
+            x = cfg_x if cfg_x is not None else (geo.right() - w - 20)
+            y = cfg_y if cfg_y is not None else (geo.bottom() - h - 20)
             self.move(x, y)
 
         opacity = ui.get("opacity", 0.95)
@@ -244,15 +277,16 @@ class MainWindow(QMainWindow):
         self._title_bar = TitleBar()
         self._title_bar.close_requested.connect(self._on_close)
         self._title_bar.minimise_requested.connect(self.showMinimized)
+        self._title_bar.dock_toggle_requested.connect(self.toggle_dock_mode)
         self._title_bar.pin_toggled.connect(self._on_pin_toggled)
         self._title_bar.double_clicked.connect(self.toggle_compact_mode)
         root_layout.addWidget(self._title_bar)
 
         # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #333366;")
-        root_layout.addWidget(sep)
+        self._title_separator = QFrame()
+        self._title_separator.setFrameShape(QFrame.Shape.HLine)
+        self._title_separator.setStyleSheet("color: #333366;")
+        root_layout.addWidget(self._title_separator)
 
         # Controls bar
         self._controls = ControlsBar()
@@ -268,9 +302,15 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._splitter, stretch=1)
 
         self.transcript_panel = TranscriptPanel()
+        self.transcript_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self._splitter.addWidget(self.transcript_panel)
 
         self.ai_panel = AIResponsePanel()
+        self.ai_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self._splitter.addWidget(self.ai_panel)
 
         self._install_resize_event_filters()
@@ -291,6 +331,19 @@ class MainWindow(QMainWindow):
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 4)
         self._splitter.setSizes([int(total_h * 0.20), int(total_h * 0.80)])
+
+    def _apply_splitter_proportions(self) -> None:
+        """Keep the transcript/AI split close to the intended 20/80 ratio."""
+        if self._docked or self._compact_mode or not self._splitter.isVisible():
+            return
+
+        available_height = self._splitter.height()
+        if available_height <= 0:
+            return
+
+        transcript_height = max(80, int(available_height * 0.20))
+        ai_height = max(120, available_height - transcript_height)
+        self._splitter.setSizes([transcript_height, ai_height])
 
     def _install_resize_event_filters(self) -> None:
         """Capture edge-drag resize gestures even when child widgets are under cursor."""
@@ -317,6 +370,15 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj in self._resize_filter_targets and isinstance(event, QMouseEvent):
             event_type = event.type()
+
+            if (
+                self._docked
+                and event_type == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                self.exit_dock_mode()
+                return True
+
             pos_in_window = obj.mapTo(self, event.position().toPoint())
             edge = self._get_resize_edge(pos_in_window)
 
@@ -395,11 +457,24 @@ class MainWindow(QMainWindow):
         self._config = config
         ui = config.get("ui", {})
         self.setWindowOpacity(ui.get("opacity", 0.95))
-        self.resize(
-            ui.get("window_width", 420),
-            ui.get("window_height", 650),
-        )
+        if self._docked:
+            self._apply_docked_state()
+        else:
+            self.resize(
+                ui.get("window_width", 420),
+                ui.get("window_height", 650),
+            )
         self._dictation_idle_ms = int(config.get("dictation", {}).get("commit_idle_ms", 1200))
+
+    @property
+    def is_docked(self) -> bool:
+        return self._docked
+
+    @property
+    def pre_dock_geometry(self) -> Optional[QRect]:
+        if self._pre_dock_geometry is None:
+            return None
+        return QRect(self._pre_dock_geometry)
 
     @property
     def controls(self) -> "ControlsBar":
@@ -440,11 +515,17 @@ class MainWindow(QMainWindow):
         self._dictation_input.clear()
         self.dictation_committed.emit(text)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._apply_splitter_proportions)
+
     # ------------------------------------------------------------------
     # Compact mode
     # ------------------------------------------------------------------
 
     def toggle_compact_mode(self) -> None:
+        if self._docked:
+            return
         self._compact_mode = not self._compact_mode
         if self._compact_mode:
             self.ai_panel.setMaximumHeight(80)
@@ -453,12 +534,7 @@ class MainWindow(QMainWindow):
         else:
             self.transcript_panel.setMaximumHeight(QWIDGETSIZE_MAX)
             self.ai_panel.setMaximumHeight(QWIDGETSIZE_MAX)
-            ui = self._config.get("ui", {})
-            self.resize(
-                ui.get("window_width", 420), ui.get("window_height", 650)
-            )
-            total_h = ui.get("window_height", 650) - 80
-            self._splitter.setSizes([int(total_h * 0.20), int(total_h * 0.80)])
+            QTimer.singleShot(0, self._apply_splitter_proportions)
 
     # ------------------------------------------------------------------
     # Resize logic (frameless window)
@@ -466,6 +542,8 @@ class MainWindow(QMainWindow):
 
     def _get_resize_edge(self, pos: QPoint) -> Optional[str]:
         """Return which edge/corner the cursor is on, or None."""
+        if self._docked:
+            return None
         r = self.rect()
         m = RESIZE_MARGIN
         x, y = pos.x(), pos.y()
@@ -506,6 +584,9 @@ class MainWindow(QMainWindow):
         return mapping.get(edge, Qt.CursorShape.ArrowCursor)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._docked and event.button() == Qt.MouseButton.LeftButton:
+            self.exit_dock_mode()
+            return
         edge = self._get_resize_edge(event.position().toPoint())
         if edge and event.button() == Qt.MouseButton.LeftButton:
             self._resize_edge = edge
@@ -579,6 +660,9 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event: QEvent) -> None:
         super().showEvent(event)
+        if self._dock_needs_apply:
+            self._dock_needs_apply = False
+            QTimer.singleShot(0, self._apply_docked_state)
         QTimer.singleShot(100, self._apply_stealth)
 
     # ------------------------------------------------------------------
@@ -596,6 +680,105 @@ class MainWindow(QMainWindow):
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.show()
+
+    def toggle_dock_mode(self) -> None:
+        if self._dock_transition_in_progress:
+            return
+        self._dock_transition_in_progress = True
+        QTimer.singleShot(220, self._clear_dock_transition_lock)
+        if self._docked:
+            self.exit_dock_mode()
+        else:
+            self.enter_dock_mode()
+
+    def enter_dock_mode(self) -> None:
+        if self._docked:
+            return
+        self._pre_dock_geometry = QRect(self.geometry())
+        self._persist_pre_dock_geometry(self._pre_dock_geometry)
+        self._docked = True
+        self._config.setdefault("ui", {})["docked"] = True
+        self._title_bar.set_docked(True)
+        self._apply_docked_state()
+        self.dock_state_changed.emit(True)
+
+    def exit_dock_mode(self) -> None:
+        if not self._docked:
+            return
+        self._docked = False
+        self._config.setdefault("ui", {})["docked"] = False
+        self._title_bar.set_docked(False)
+        self._set_docked_ui(False)
+
+        geo = self._pre_dock_geometry or self._load_pre_dock_geometry()
+        if geo is None:
+            ui = self._config.get("ui", {})
+            x = ui.get("window_x")
+            y = ui.get("window_y")
+            w = ui.get("window_width")
+            h = ui.get("window_height")
+            geo = QRect(
+                int(x) if isinstance(x, int) else self.x(),
+                int(y) if isinstance(y, int) else self.y(),
+                int(w) if isinstance(w, int) else self.width(),
+                int(h) if isinstance(h, int) else self.height(),
+            )
+        self.setGeometry(geo)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(60, self._apply_stealth)
+        self.dock_state_changed.emit(False)
+
+    def _apply_docked_state(self) -> None:
+        if not self._docked:
+            return
+        self._set_docked_ui(True)
+        ui = self._config.get("ui", {})
+        screen = QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        dock_height = int(ui.get("dock_height", 56))
+        dock_height = max(38, min(120, dock_height))
+        current_width = self._pre_dock_geometry.width() if self._pre_dock_geometry else self.width()
+        max_width = max(260, available.width() - 40)
+        dock_width = min(max_width, max(120, int(current_width * 0.1)))
+        x = available.x() + (available.width() - dock_width) // 2
+        y = available.y() + 4
+
+        self.setGeometry(x, y, dock_width, dock_height)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(60, self._apply_stealth)
+
+    def _set_docked_ui(self, docked: bool) -> None:
+        self._title_separator.setVisible(not docked)
+        self._controls.setVisible(not docked)
+        self._splitter.setVisible(not docked)
+        self._dictation_input.setVisible(not docked)
+
+    def _persist_pre_dock_geometry(self, geo: QRect) -> None:
+        ui = self._config.setdefault("ui", {})
+        ui["pre_dock_x"] = geo.x()
+        ui["pre_dock_y"] = geo.y()
+        ui["pre_dock_width"] = geo.width()
+        ui["pre_dock_height"] = geo.height()
+
+    def _load_pre_dock_geometry(self) -> Optional[QRect]:
+        ui = self._config.get("ui", {})
+        x = ui.get("pre_dock_x")
+        y = ui.get("pre_dock_y")
+        w = ui.get("pre_dock_width")
+        h = ui.get("pre_dock_height")
+        if all(isinstance(v, int) for v in (x, y, w, h)):
+            return QRect(x, y, w, h)
+        return None
+
+    def _clear_dock_transition_lock(self) -> None:
+        self._dock_transition_in_progress = False
 
     def _on_record_toggled(self, recording: bool) -> None:
         # This signal is wired up by main.py to start/stop audio threads

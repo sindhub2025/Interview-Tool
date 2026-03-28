@@ -6,15 +6,15 @@ from __future__ import annotations
 
 from typing import List
 
-from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -37,6 +37,9 @@ class AIResponseCard(QFrame):
         self.show()
 
     def _build_ui(self) -> None:
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.setStyleSheet(
             f"background-color: {BG_CARD}; border: 1px solid #333366; "
             "border-radius: 8px; padding: 4px;"
@@ -70,8 +73,7 @@ class AIResponseCard(QFrame):
         self._text_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        # Set minimum height so text is visible
-        self._text_edit.setMinimumHeight(60)
+        self._text_edit.setMinimumHeight(0)
         layout.addWidget(self._text_edit)
 
     def append_text(self, chunk: str) -> None:
@@ -88,8 +90,7 @@ class AIResponseCard(QFrame):
         logger = get_logger(__name__)
         self._text = text
         self._text_edit.setPlainText(text)
-        # Force layout recalculation
-        self._text_edit.adjustSize()
+        self._text_edit.updateGeometry()
         logger.info("AIResponseCard.set_text() called - set %d chars to QTextEdit, new height=%d", 
                    len(text), self._text_edit.height())
 
@@ -100,15 +101,10 @@ class AIResponseCard(QFrame):
         QApplication.clipboard().setText(self._text)
 
 
-class AIResponsePanel(QScrollArea):
-    """Panel that shows the last AI responses with streaming support.
+class AIResponsePanel(QWidget):
+    """Panel that shows only the latest AI response with streaming support."""
 
-    Keeps the last 3 responses visible (scrollable).
-
-    Signals emitted through the parent widget's ``regenerate_requested``.
-    """
-
-    MAX_RESPONSES = 3
+    text_prompt_submitted = pyqtSignal(str, bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -117,14 +113,14 @@ class AIResponsePanel(QScrollArea):
         self._thinking_label: QLabel | None = None
         self._collapsed = False
 
-        self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.setObjectName("ai_response_panel")
         self.setStyleSheet(
-            f"QScrollArea {{"
+            f"QWidget#ai_response_panel {{"
             f" background-color: {BG_DEEP};"
-            f" border: 1px solid {BORDER};"
-            f" border-radius: 10px;"
+            f" border: none;"
             f"}}"
             f"QWidget#ai_panel_outer {{"
             f" background-color: {BG_DEEP};"
@@ -145,9 +141,7 @@ class AIResponsePanel(QScrollArea):
             f"}}"
         )
 
-        outer = QWidget()
-        outer.setObjectName("ai_panel_outer")
-        outer_layout = QVBoxLayout(outer)
+        outer_layout = QVBoxLayout(self)
         outer_layout.setSpacing(0)
         outer_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -172,13 +166,43 @@ class AIResponsePanel(QScrollArea):
 
         self._content = QWidget()
         self._content.setObjectName("ai_panel_content")
-        self._layout = QVBoxLayout(self._content)
-        self._layout.setSpacing(8)
-        self._layout.setContentsMargins(6, 6, 6, 6)
-        self._layout.addStretch()
-        outer_layout.addWidget(self._content)
+        self._content.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
-        self.setWidget(outer)
+        content_layout = QVBoxLayout(self._content)
+        content_layout.setSpacing(8)
+        content_layout.setContentsMargins(6, 6, 6, 6)
+
+        self._responses_container = QWidget()
+        self._responses_layout = QVBoxLayout(self._responses_container)
+        self._responses_layout.setSpacing(8)
+        self._responses_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addWidget(self._responses_container, 1)
+
+        input_row = QHBoxLayout()
+        input_row.setSpacing(6)
+
+        self._prompt_input = QLineEdit()
+        self._prompt_input.setPlaceholderText(
+            "Ask AI a question or type a refinement for the current response"
+        )
+        self._prompt_input.returnPressed.connect(self._on_ask_clicked)
+        input_row.addWidget(self._prompt_input, 1)
+
+        self._ask_btn = QPushButton("Ask")
+        self._ask_btn.setFixedHeight(26)
+        self._ask_btn.clicked.connect(self._on_ask_clicked)
+        input_row.addWidget(self._ask_btn)
+
+        self._refine_btn = QPushButton("Refine")
+        self._refine_btn.setFixedHeight(26)
+        self._refine_btn.clicked.connect(self._on_refine_clicked)
+        input_row.addWidget(self._refine_btn)
+
+        content_layout.addLayout(input_row)
+
+        outer_layout.addWidget(self._content, 1)
 
     # ------------------------------------------------------------------
     # Public API
@@ -189,24 +213,20 @@ class AIResponsePanel(QScrollArea):
         from ghostmic.utils.logger import get_logger
         logger = get_logger(__name__)
         logger.info("AIResponsePanel.start_response() called")
+        self.clear_responses()
         self._remove_thinking()
         card = AIResponseCard()
         self._active_card = card
-        self._cards.append(card)
-        # Evict oldest if over limit
-        while len(self._cards) > self.MAX_RESPONSES:
-            old = self._cards.pop(0)
-            old.deleteLater()
-        
-        # Insert before the stretch
-        insert_pos = self._layout.count() - 1
-        self._layout.insertWidget(insert_pos, card)
+        self._cards = [card]
+        self._responses_layout.addWidget(card, 1)
         
         # CRITICAL: Explicitly show the card
         card.show()
         
-        logger.info("AIResponsePanel.start_response() - card inserted at position %d, layout count=%d", 
-                   insert_pos, self._layout.count())
+        logger.info(
+            "AIResponsePanel.start_response() - card inserted, layout count=%d",
+            self._responses_layout.count(),
+        )
         
         # Verify card is visible
         logger.info("AIResponsePanel.start_response() - card visible=%s, card height=%d", 
@@ -244,11 +264,12 @@ class AIResponsePanel(QScrollArea):
         if self._active_card and full_text is not None:
             logger.info("AIResponsePanel.finish_response() - setting text on card, text length=%d", len(full_text))
             self._active_card.set_text(full_text)
+            self._responses_layout.setStretchFactor(self._active_card, 1)
             logger.info("AIResponsePanel.finish_response() - text set, card visible=%s, card height=%d", 
                        self._active_card.isVisible(), self._active_card.height())
             
             # Force layout recalculation
-            self._layout.update()
+            self._responses_layout.update()
             self._content.adjustSize()
         else:
             logger.warning("AIResponsePanel.finish_response() - no active card or text is None")
@@ -264,18 +285,20 @@ class AIResponsePanel(QScrollArea):
             )
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._thinking_label = lbl
-            self._layout.insertWidget(self._layout.count() - 1, lbl)
+            self._responses_layout.addWidget(lbl, 1)
             self._scroll_to_bottom()
 
     def show_error(self, message: str) -> None:
         """Display an error message in the panel."""
         self._remove_thinking()
+        self.clear_responses()
         card = AIResponseCard(f"⚠ {message}")
         card.setStyleSheet(
             "background-color: #3d0000; border: 1px solid #f85149; "
             "border-radius: 8px; padding: 4px;"
         )
-        self._layout.insertWidget(self._layout.count() - 1, card)
+        self._cards = [card]
+        self._responses_layout.addWidget(card, 1)
         self._scroll_to_bottom()
 
     def get_last_response_text(self) -> str:
@@ -289,10 +312,17 @@ class AIResponsePanel(QScrollArea):
         self._remove_thinking()
         self._active_card = None
         self._cards.clear()
-        while self._layout.count() > 1:
-            item = self._layout.takeAt(0)
+        while self._responses_layout.count() > 0:
+            item = self._responses_layout.takeAt(0)
             if item and item.widget():
-                item.widget().deleteLater()
+                widget = item.widget()
+                self._responses_layout.removeWidget(widget)
+                widget.setParent(None)
+                widget.close()
+                widget.deleteLater()
+
+    def clear_prompt_input(self) -> None:
+        self._prompt_input.clear()
 
     def toggle_visibility(self) -> None:
         """Collapse or expand the response list to reclaim space."""
@@ -316,15 +346,29 @@ class AIResponsePanel(QScrollArea):
 
     def _remove_thinking(self) -> None:
         if self._thinking_label:
+            self._responses_layout.removeWidget(self._thinking_label)
+            self._thinking_label.setParent(None)
+            self._thinking_label.close()
             self._thinking_label.deleteLater()
             self._thinking_label = None
 
+    def _submit_prompt(self, refine: bool) -> None:
+        text = self._prompt_input.text().strip()
+        if not text:
+            return
+        self.text_prompt_submitted.emit(text, refine)
+        self._prompt_input.clear()
+
+    def _on_ask_clicked(self) -> None:
+        self._submit_prompt(refine=False)
+
+    def _on_refine_clicked(self) -> None:
+        self._submit_prompt(refine=True)
+
     def _scroll_to_bottom(self) -> None:
         from PyQt6.QtCore import QTimer
-        def scroll():
-            # Force the scroll area to update layout
+
+        def scroll() -> None:
             self._content.adjustSize()
-            # Get scrollbar and set to maximum
-            scrollbar = self.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+
         QTimer.singleShot(10, scroll)

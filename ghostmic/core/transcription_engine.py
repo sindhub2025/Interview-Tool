@@ -20,6 +20,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from ghostmic.utils.errors import is_rate_limited as _is_rate_limited_shared
 
 import numpy as np
+import torch  # type: ignore[import]
 
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
@@ -41,6 +42,14 @@ REMOTE_REPEAT_MAX_CHARS: int = 42
 LOCAL_PROMPT_MAX_CHARS: int = 240
 SOURCE_STATE_MAX_ENTRIES: int = 16
 SOURCE_STATE_TTL_SECONDS: float = 900.0
+LOCAL_REPEAT_WINDOW_SECONDS: float = 2.5
+LOCAL_REPEAT_MAX_CHARS: int = 48
+DEFAULT_MIN_SEGMENT_SECONDS: float = 0.45
+DEFAULT_MIN_SEGMENT_RMS: float = 140.0
+DEFAULT_TARGET_RMS: float = 2200.0
+DEFAULT_MAX_GAIN: float = 8.0
+DEFAULT_SILENCE_TRIM_THRESHOLD: int = 220
+DEFAULT_SILENCE_TRIM_PAD_SECONDS: float = 0.08
 
 
 from ghostmic.domain import TranscriptSegment  # re-exported for backward compat
@@ -237,6 +246,32 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 MAX_PENDING_SEGMENT_AGE_SECONDS,
             )
         )
+        self._use_context_prompt = bool(
+            self._remote_config.get("use_context_prompt", False)
+        )
+        self._min_segment_seconds = float(
+            self._remote_config.get("min_segment_seconds", DEFAULT_MIN_SEGMENT_SECONDS)
+        )
+        self._min_segment_rms = float(
+            self._remote_config.get("min_segment_rms", DEFAULT_MIN_SEGMENT_RMS)
+        )
+        self._trim_silence = bool(self._remote_config.get("trim_silence", True))
+        self._silence_trim_threshold = int(
+            self._remote_config.get(
+                "silence_trim_threshold",
+                DEFAULT_SILENCE_TRIM_THRESHOLD,
+            )
+        )
+        self._silence_trim_pad_seconds = float(
+            self._remote_config.get(
+                "silence_trim_pad_seconds",
+                DEFAULT_SILENCE_TRIM_PAD_SECONDS,
+            )
+        )
+        self._target_rms = float(self._remote_config.get("target_rms", DEFAULT_TARGET_RMS))
+        self._max_gain = float(self._remote_config.get("max_gain", DEFAULT_MAX_GAIN))
+        self._last_local_emit_text_by_source: Dict[str, str] = {}
+        self._last_local_emit_ts_by_source: Dict[str, float] = {}
         self._last_queue_drop_log = 0.0
         self._last_remote_text_by_source: Dict[str, str] = {}
         self._last_remote_text_ts_by_source: Dict[str, float] = {}
@@ -355,19 +390,37 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             if self._model is None:
                 return self._transcribe_remote(audio, source)
 
-            audio_float = audio.astype(np.float32) / 32768.0
+            processed = self._prepare_local_audio(audio)
+            if processed is None:
+                return None
+
+            audio_float = processed.astype(np.float32) / 32768.0
             transcribe_kwargs: Dict[str, object] = {
                 "language": self._language,
                 "beam_size": self._beam_size,
                 "best_of": self._beam_size,
-                "word_timestamps": True,
-                "no_speech_threshold": 0.6,
+                "word_timestamps": False,
+                "no_speech_threshold": float(
+                    self._remote_config.get("no_speech_threshold", 0.7)
+                ),
+                "log_prob_threshold": float(
+                    self._remote_config.get("log_prob_threshold", -1.0)
+                ),
+                "compression_ratio_threshold": float(
+                    self._remote_config.get("compression_ratio_threshold", 2.0)
+                ),
+                "temperature": float(self._remote_config.get("temperature", 0.0)),
+                "patience": float(self._remote_config.get("patience", 1.2)),
+                "repetition_penalty": float(
+                    self._remote_config.get("repetition_penalty", 1.05)
+                ),
                 "vad_filter": True,
                 "condition_on_previous_text": False,
             }
-            initial_prompt = self._build_initial_prompt(source)
-            if initial_prompt:
-                transcribe_kwargs["initial_prompt"] = initial_prompt
+            if self._use_context_prompt:
+                initial_prompt = self._build_initial_prompt(source)
+                if initial_prompt:
+                    transcribe_kwargs["initial_prompt"] = initial_prompt
 
             segments, _ = self._model.transcribe(audio_float, **transcribe_kwargs)
 
@@ -386,7 +439,6 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 return None
 
             full_text = " ".join(texts)
-            self._remember_local_text(source, full_text)
             # avg_logprob is in [-inf, 0]; adding 1.0 maps the typical
             # range [-1, 0] to [0, 1] as an approximate confidence score.
             confidence = float(
@@ -394,6 +446,11 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 if seg_count
                 else 1.0
             )
+
+            if self._should_drop_local_artifact(full_text, confidence, source):
+                return None
+
+            self._remember_local_text(source, full_text)
 
             return TranscriptSegment(
                 text=full_text,
@@ -687,6 +744,90 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
     @staticmethod
     def _normalize_remote_text(text: str) -> str:
         return re.sub(r"\s+", " ", text.strip().lower())
+
+    def _prepare_local_audio(self, audio: np.ndarray) -> Optional[np.ndarray]:
+        mono = np.asarray(audio, dtype=np.int16)
+        if mono.size == 0:
+            return None
+
+        min_samples = int(16_000 * max(0.2, self._min_segment_seconds))
+        if mono.size < min_samples:
+            return None
+
+        if self._trim_silence:
+            mono = self._trim_edges(mono)
+            if mono.size < min_samples:
+                return None
+
+        centered = mono.astype(np.float32)
+        centered -= float(np.mean(centered))
+
+        rms = float(np.sqrt(np.mean(np.square(centered))))
+        if rms < self._min_segment_rms:
+            return None
+
+        gain = self._target_rms / max(rms, 1e-6)
+        gain = min(self._max_gain, max(0.5, gain))
+        boosted = centered * gain
+        boosted = np.clip(boosted, -32768.0, 32767.0)
+        return boosted.astype(np.int16)
+
+    def _trim_edges(self, audio: np.ndarray) -> np.ndarray:
+        threshold = max(1, self._silence_trim_threshold)
+        active = np.flatnonzero(np.abs(audio.astype(np.int32)) >= threshold)
+        if active.size == 0:
+            return audio
+        pad = int(16_000 * max(0.0, self._silence_trim_pad_seconds))
+        start = max(0, int(active[0]) - pad)
+        end = min(audio.size, int(active[-1]) + pad + 1)
+        return audio[start:end]
+
+    def _should_drop_local_artifact(
+        self,
+        text: str,
+        confidence: float,
+        source: str,
+    ) -> bool:
+        now = time.time()
+        normalized = self._normalize_remote_text(text)
+        if not normalized:
+            return True
+
+        words = normalized.split()
+        if len(words) >= 5:
+            unique_ratio = len(set(words)) / len(words)
+            if unique_ratio < 0.35 and confidence < 0.55:
+                logger.debug(
+                    "TranscriptionThread: dropped low-diversity local transcript (%s): %r",
+                    source,
+                    normalized,
+                )
+                return True
+
+        self._prune_source_state(
+            self._last_local_emit_text_by_source,
+            self._last_local_emit_ts_by_source,
+            now,
+        )
+        prev = self._last_local_emit_text_by_source.get(source)
+        prev_ts = self._last_local_emit_ts_by_source.get(source, 0.0)
+
+        self._last_local_emit_text_by_source[source] = normalized
+        self._last_local_emit_ts_by_source[source] = now
+
+        if (
+            prev == normalized
+            and len(normalized) <= LOCAL_REPEAT_MAX_CHARS
+            and (now - prev_ts) <= LOCAL_REPEAT_WINDOW_SECONDS
+        ):
+            logger.debug(
+                "TranscriptionThread: dropped repeated local text for %s: %r",
+                source,
+                normalized,
+            )
+            return True
+
+        return False
 
     @staticmethod
     def _to_wav_bytes(audio: np.ndarray) -> bytes:
