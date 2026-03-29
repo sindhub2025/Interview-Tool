@@ -233,6 +233,32 @@ def test_build_context_includes_resume_context_for_resume_related_question():
     assert "Job Titles: Senior Data Engineer" in context
 
 
+def test_build_context_includes_sql_profile_for_sql_question():
+    transcript = [_seg("How do COUNT and current timestamp work in SQL?", "speaker")]
+
+    context = AIThread._build_context(
+        transcript,
+        sql_profile_enabled=True,
+    )
+
+    assert "[SQL Profile]:" in context
+    assert "COUNT() - number of rows" in context
+    assert "CURRENT_TIMESTAMP - current date-time" in context
+    assert "COUNT()" in context
+
+
+def test_build_system_prompt_includes_sql_policy_when_enabled():
+    prompt = AIThread._build_system_prompt(
+        "Base prompt",
+        "",
+        sql_profile_enabled=True,
+    )
+
+    assert "SQL profile usage policy" in prompt
+    assert "canonical function name" in prompt
+    assert "same normalization approach for other context-backed terms" in prompt
+
+
 def test_build_context_applies_resume_grounded_high_confidence_correction():
     transcript = [_seg("I worked at Micro hard as a senior data engineer.", "speaker")]
     resume_profile = {

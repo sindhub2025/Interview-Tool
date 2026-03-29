@@ -26,6 +26,7 @@ def defaults():
             "temperature": 0.7,
             "trigger_mode": "auto",
             "resume_context_enabled": True,
+            "sql_profile_enabled": False,
         },
         "audio": {
             "sample_rate": 16000,
@@ -125,6 +126,13 @@ class TestConfigServiceValidation:
         svc = ConfigService(tmp_config, defaults)
         cfg = svc.load()
         assert cfg["ai"]["resume_context_enabled"] is True
+
+    def test_invalid_sql_profile_toggle_resets_to_default(self, tmp_config, defaults):
+        with open(tmp_config, "w") as f:
+            json.dump({"ai": {"sql_profile_enabled": "yes"}}, f)
+        svc = ConfigService(tmp_config, defaults)
+        cfg = svc.load()
+        assert cfg["ai"]["sql_profile_enabled"] is False
 
     def test_corrupt_json_uses_defaults(self, tmp_config, defaults):
         with open(tmp_config, "w") as f:

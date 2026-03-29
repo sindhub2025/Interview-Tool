@@ -30,6 +30,11 @@ from ghostmic.utils.resume_context import (
     build_resume_context_summary,
     is_resume_related_text,
 )
+from ghostmic.utils.sql_context import (
+    apply_sql_corrections,
+    build_sql_profile_summary,
+    is_sql_related_text,
+)
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -56,7 +61,9 @@ the interviewer explicitly asks you to.
 """
 
 DEBOUNCE_SECONDS: float = 3.0
-MAX_CONTEXT_SEGMENTS: int = 10
+# Keep only the most recent few transcript segments so AI generation
+# focuses on the latest 2-3 conversation turns instead of the full history.
+MAX_CONTEXT_SEGMENTS: int = 6
 AI_QUEUE_MAXSIZE: int = 8
 RUNTIME_RATE_LIMIT_RETRIES: int = 3
 RUNTIME_RATE_LIMIT_BASE_DELAY: float = 1.0
@@ -543,6 +550,7 @@ class AIThread(QThread):  # type: ignore[misc]
         resume_context_enabled = bool(
             self._config.get("resume_context_enabled", True)
         )
+        sql_profile_enabled = bool(self._config.get("sql_profile_enabled", False))
         resume_profile_raw = self._config.get("resume_profile")
         resume_profile = (
             resume_profile_raw
@@ -585,6 +593,7 @@ class AIThread(QThread):  # type: ignore[misc]
             session_context=session_context,
             is_new_topic=is_new_topic,
             resume_profile=resume_profile,
+            sql_profile_enabled=sql_profile_enabled,
             correction_high_threshold=correction_high_threshold,
             correction_medium_threshold=correction_medium_threshold,
         )
@@ -597,6 +606,7 @@ class AIThread(QThread):  # type: ignore[misc]
             self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
             session_context,
             resume_profile=resume_profile,
+            sql_profile_enabled=sql_profile_enabled,
         )
         temperature = float(self._config.get("temperature", 0.7))
         logger.info("AIThread: temperature=%.1f", temperature)
@@ -1403,6 +1413,7 @@ class AIThread(QThread):  # type: ignore[misc]
         session_context: str = "",
         is_new_topic: bool = False,
         resume_profile: Optional[Dict[str, Any]] = None,
+        sql_profile_enabled: bool = False,
         correction_high_threshold: float = RESUME_CORRECTION_HIGH_THRESHOLD,
         correction_medium_threshold: float = RESUME_CORRECTION_MEDIUM_THRESHOLD,
     ) -> str:
@@ -1467,11 +1478,17 @@ class AIThread(QThread):  # type: ignore[misc]
 
         segment_payloads: List[Dict[str, Any]] = []
         resume_related = False
+        sql_related = False
+        sql_summary_lines: List[str] = []
         latest_speaker_text = " ".join(
             seg.text.strip()
             for seg in recent
             if seg.source == "speaker" and seg.text.strip()
         ).strip()
+
+        if sql_profile_enabled:
+            sql_related = is_sql_related_text(latest_speaker_text) or is_sql_related_text(session_context)
+            sql_summary_lines = build_sql_profile_summary()
 
         # ---- Enhanced follow-up detection with confidence scoring ----
         if (
@@ -1581,6 +1598,46 @@ class AIThread(QThread):  # type: ignore[misc]
                 if high_matches or medium_matches:
                     resume_related = True
 
+            if sql_profile_enabled and sql_related and seg.source == "speaker":
+                try:
+                    sql_result = apply_sql_corrections(text)
+                except Exception as exc:
+                    logger.exception(
+                        "AIThread: apply_sql_corrections failed: %s",
+                        exc,
+                    )
+                    sql_result = {
+                        "text": text,
+                        "high_confidence": [],
+                        "medium_confidence": [],
+                    }
+
+                if isinstance(sql_result, dict):
+                    sql_text = str(sql_result.get("text", text))
+                    sql_matches = list(sql_result.get("high_confidence", []))
+                    if sql_matches and sql_text:
+                        text = sql_text
+                        sql_related = True
+                        if sql_summary_lines:
+                            for match in sql_matches[:2]:
+                                original = str(match.get("original", "")).strip()
+                                corrected = str(match.get("corrected", "")).strip()
+                                definition = str(match.get("definition", "")).strip()
+                                if original and corrected:
+                                    lines = [
+                                        f'[SQL Correction Applied]: "{original}" -> "{corrected}"',
+                                    ]
+                                    if definition:
+                                        lines[0] += f" ({definition})"
+                                    segment_payloads.append(
+                                        {
+                                            "label": "SQL",
+                                            "text": lines[0],
+                                            "high_matches": [],
+                                            "medium_matches": [],
+                                        }
+                                    )
+
             segment_payloads.append(
                 {
                     "label": label,
@@ -1618,6 +1675,19 @@ class AIThread(QThread):  # type: ignore[misc]
             lines.append("[Resume Context]:")
             for item in resume_summary_lines:
                 lines.append(f"- {item}")
+
+        if sql_profile_enabled and sql_summary_lines:
+            lines.append("[SQL Profile]:")
+            for item in sql_summary_lines:
+                lines.append(f"- {item}")
+
+            lines.append(
+                "[Normalization Guidance]: When a transcript word or phrase "
+                "sounds like a canonical term from the supplied context, "
+                "normalize it before answering. Apply the same rule to SQL "
+                "terms and any other domain terms present in session context "
+                "or resume context."
+            )
 
         for payload in segment_payloads:
             lines.append(f"[{payload['label']}]: {payload['text']}")
@@ -1759,6 +1829,7 @@ class AIThread(QThread):  # type: ignore[misc]
         system_prompt: str,
         session_context: str,
         resume_profile: Optional[Dict[str, Any]] = None,
+        sql_profile_enabled: bool = False,
     ) -> str:
         prompt = system_prompt
         if session_context:
@@ -1792,6 +1863,17 @@ class AIThread(QThread):  # type: ignore[misc]
                 "dominate the answer."
             )
             prompt = f"{prompt}{resume_policy}"
+
+        if sql_profile_enabled:
+            sql_policy = (
+                "\n\nSQL profile usage policy:\n"
+                "- A SQL function glossary is available in the prompt context for SQL-related questions.\n"
+                "- When a transcript word sounds like a listed SQL function, normalize it to the canonical function name if that improves clarity.\n"
+                "- When you correct or explain a SQL function, include its definition briefly and directly.\n"
+                "- Use the same normalization approach for other context-backed terms when the surrounding prompt makes the intended term clear.\n"
+                "- If the question is not about SQL, do not force the glossary into the answer."
+            )
+            prompt = f"{prompt}{sql_policy}"
 
         follow_up_policy = (
             "\n\nFollow-up handling policy:\n"

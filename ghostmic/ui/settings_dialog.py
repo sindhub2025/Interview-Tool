@@ -307,6 +307,12 @@ class SettingsDialog(QDialog):
         self._resume_context_enabled.setChecked(True)
         form.addRow("Resume context:", self._resume_context_enabled)
 
+        self._sql_profile_enabled = QCheckBox(
+            "Use SQL function glossary for SQL-related questions"
+        )
+        self._sql_profile_enabled.setChecked(False)
+        form.addRow("SQL Profile:", self._sql_profile_enabled)
+
         return w
 
     # ── Tab: Resume ───────────────────────────────────────────────────
@@ -491,6 +497,7 @@ class SettingsDialog(QDialog):
         )
         self._session_ctx.setText(ai.get("session_context", ""))
         self._resume_context_enabled.setChecked(bool(ai.get("resume_context_enabled", True)))
+        self._sql_profile_enabled.setChecked(bool(ai.get("sql_profile_enabled", False)))
 
         # Appearance
         self._opacity_slider.setValue(int(ui.get("opacity", 0.95) * 100))
@@ -552,6 +559,7 @@ class SettingsDialog(QDialog):
         cfg["ai"]["system_prompt"] = self._system_prompt.toPlainText()
         cfg["ai"]["session_context"] = self._session_ctx.text()
         cfg["ai"]["resume_context_enabled"] = self._resume_context_enabled.isChecked()
+        cfg["ai"]["sql_profile_enabled"] = self._sql_profile_enabled.isChecked()
 
         # Appearance / UI
         cfg.setdefault("ui", {})

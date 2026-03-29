@@ -37,6 +37,7 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ai.trigger_mode":         (str,   "auto",   lambda v: v in ("auto", "manual", "continuous")),
     "ai.max_tokens":           (int,   2048,     lambda v: 1 <= v <= 32768),
     "ai.resume_context_enabled": (bool, True, None),
+    "ai.sql_profile_enabled":  (bool,  False,    None),
     "ai.resume_correction_threshold_high": (float, 0.87, lambda v: 0.5 <= v <= 1.0),
     "ai.resume_correction_threshold_medium": (float, 0.74, lambda v: 0.4 <= v <= 1.0),
     # Audio

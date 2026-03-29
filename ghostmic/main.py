@@ -100,6 +100,7 @@ def _default_config() -> dict:
             "context_segments": 10,
             "session_context": "",
             "resume_context_enabled": True,
+            "sql_profile_enabled": False,
             "resume_correction_threshold_high": 0.87,
             "resume_correction_threshold_medium": 0.74,
         },
@@ -1125,16 +1126,21 @@ class GhostMicApp:
             self._logger.warning("Unable to focus dictation target for Win+H capture.")
 
     def _generate_ai_response(self, force_follow_up: bool = False) -> None:
-        from ghostmic.core.ai_engine import AIThread
+        from ghostmic.core.ai_engine import AIThread, MAX_CONTEXT_SEGMENTS
         from ghostmic.core.transcription_engine import TranscriptSegment
 
         with self._transcript_lock:
-            if not self._ai_context_history:
-                self._logger.debug("AI request skipped: AI context history is empty.")
+            transcript_source = self._ai_context_history or self._transcript_history
+            if not transcript_source:
+                self._logger.debug("AI request skipped: transcript history is empty.")
                 if self._window:
                     self._window.controls.set_status("No transcript available for AI", "#f0883e")
                 return
-            transcript_snapshot = list(self._ai_context_history)
+            transcript_snapshot = list(transcript_source)[-MAX_CONTEXT_SEGMENTS:]
+            if not self._ai_context_history and self._transcript_history:
+                self._logger.debug(
+                    "AI request: using transcript history fallback because AI context history is empty."
+                )
             latest_speaker_text = ""
             for seg in reversed(transcript_snapshot):
                 if getattr(seg, "source", "") == "speaker":
