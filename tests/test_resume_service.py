@@ -57,6 +57,39 @@ AWS Certified Solutions Architect
     assert "AWS Certified Solutions Architect" in profile["certifications"]
 
 
+def test_inline_section_headings_are_parsed_correctly(resume_service):
+    resume_text = """
+Jane Doe
+jane.doe@example.com
++1 (555) 123-4567
+Seattle, WA
+
+Experience
+Microsoft - Senior Data Engineer | 2021 - Present
+- Built Azure ETL pipelines in Python and SQL.
+Contoso - Data Engineer | 2018 - 2021
+- Developed data quality checks and Airflow DAGs.
+
+Skills: Python, SQL, Azure, Airflow, Spark
+
+Certifications: AWS Certified Solutions Architect, Azure Administrator Associate
+""".strip()
+
+    profile = resume_service._build_profile(
+        resume_service._normalize_text(resume_text),
+        source_file_name="resume.txt",
+        stored_file_name="stored.txt",
+    )
+
+    assert profile["skills"] == ["Python", "SQL", "Azure", "Airflow", "Spark"]
+    assert profile["companies"] == ["Microsoft", "Contoso"]
+    assert profile["certifications"] == [
+        "AWS Certified Solutions Architect",
+        "Azure Administrator Associate",
+    ]
+    assert len(profile["work_history"]) == 2
+
+
 def test_ingest_rejects_unsupported_file_type(resume_service, tmp_path):
     bad_file = tmp_path / "resume.exe"
     bad_file.write_text("binary-ish", encoding="utf-8")
@@ -107,3 +140,57 @@ def test_profile_persists_across_service_reloads(tmp_path):
 
     assert profile is not None
     assert "Microsoft" in profile.get("companies", [])
+
+
+def test_skills_inferred_from_work_history_without_skills_section(resume_service):
+    resume_text = """
+John Smith
+john.smith@example.com
+
+Summary
+Backend engineer focused on distributed systems.
+
+Experience
+Acme Corp - Senior Backend Engineer | 2021 - Present
+- Built REST APIs with Python, FastAPI, PostgreSQL, and Docker.
+- Implemented CI/CD pipelines using GitHub Actions and Terraform.
+
+Projects
+Realtime analytics platform on AWS and Kubernetes.
+""".strip()
+
+    profile = resume_service._build_profile(
+        resume_service._normalize_text(resume_text),
+        source_file_name="resume.txt",
+        stored_file_name="stored.txt",
+    )
+
+    skills = set(profile["skills"])
+    assert {"Python", "FastAPI", "PostgreSQL", "Docker", "CI/CD"}.issubset(skills)
+    assert {"GitHub Actions", "Terraform", "AWS", "Kubernetes"}.issubset(skills)
+
+
+def test_skill_extraction_filters_noise_and_keeps_compound_technical_terms(resume_service):
+    resume_text = """
+Jane Doe
+
+Skills: Proficient in Python, CI/CD, problem solving, leadership, hands-on with Node.js and React
+Tools: Docker / Kubernetes / AWS
+""".strip()
+
+    profile = resume_service._build_profile(
+        resume_service._normalize_text(resume_text),
+        source_file_name="resume.txt",
+        stored_file_name="stored.txt",
+    )
+
+    skills_lower = {value.lower() for value in profile["skills"]}
+    assert "python" in skills_lower
+    assert "ci/cd" in skills_lower
+    assert "node.js" in skills_lower
+    assert "react" in skills_lower
+    assert "docker" in skills_lower
+    assert "kubernetes" in skills_lower
+    assert "aws" in skills_lower
+    assert "problem solving" not in skills_lower
+    assert "leadership" not in skills_lower

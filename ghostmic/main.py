@@ -292,6 +292,7 @@ class GhostMicApp:
         self._recording_lock = threading.Lock()
         self._dictation_hotkey_guard_until = 0.0
         self._startup_api_worker = None
+        self._resume_upload_worker = None
         self._ui_dispatcher = None
         self._audio_backends_prewarmed = False
 
@@ -1006,7 +1007,9 @@ class GhostMicApp:
                 except Exception as exc:  # pylint: disable=broad-except
                     self.finished.emit({}, str(exc))
 
-        worker = ResumeIngestWorker(self._resume_service, file_path, parent=self)
+        worker_parent = dialog if dialog is not None else None
+        worker = ResumeIngestWorker(self._resume_service, file_path, parent=worker_parent)
+        self._resume_upload_worker = worker
 
         def _on_ingest_finished(status: object, error: str) -> None:
             try:
@@ -1033,6 +1036,7 @@ class GhostMicApp:
                     worker.deleteLater()
                 except Exception:
                     pass
+                self._resume_upload_worker = None
 
         worker.finished.connect(_on_ingest_finished)
         worker.start()

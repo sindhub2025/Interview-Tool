@@ -257,13 +257,7 @@ class MainWindow(QMainWindow):
         # Root container (clips the rounded-rect background)
         self._root = QWidget(self)
         self._root.setObjectName("root_widget")
-        self._root.setStyleSheet(
-            "#root_widget {"
-            "  background-color: rgba(26, 26, 46, 242);"  # #1a1a2e @ 95%
-            "  border: 1px solid #333366;"
-            "  border-radius: 12px;"
-            "}"
-        )
+        self._set_root_style(docked=False)
         self.setCentralWidget(self._root)
 
         root_layout = QVBoxLayout(self._root)
@@ -331,6 +325,16 @@ class MainWindow(QMainWindow):
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 4)
         self._splitter.setSizes([int(total_h * 0.20), int(total_h * 0.80)])
+
+    def _set_root_style(self, docked: bool) -> None:
+        radius = 0 if docked else 12
+        self._root.setStyleSheet(
+            "#root_widget {"
+            "  background-color: rgba(26, 26, 46, 242);"  # #1a1a2e @ 95%
+            "  border: 1px solid #333366;"
+            f"  border-radius: {radius}px;"
+            "}"
+        )
 
     def _apply_splitter_proportions(self) -> None:
         """Keep the transcript/AI split close to the intended 20/80 ratio."""
@@ -739,22 +743,22 @@ class MainWindow(QMainWindow):
         if screen is None:
             return
 
+        # Make dock a small 5x5 square centered horizontally at the very top
         available = screen.availableGeometry()
-        dock_height = int(ui.get("dock_height", 56))
-        dock_height = max(38, min(120, dock_height))
-        current_width = self._pre_dock_geometry.width() if self._pre_dock_geometry else self.width()
-        max_width = max(260, available.width() - 40)
-        dock_width = min(max_width, max(120, int(current_width * 0.1)))
-        x = available.x() + (available.width() - dock_width) // 2
-        y = available.y() + 4
+        size = 5
+        x = available.x() + (available.width() - size) // 2
+        y = available.y()
 
-        self.setGeometry(x, y, dock_width, dock_height)
+        self.setGeometry(x, y, size, size)
         self.show()
         self.raise_()
         self.activateWindow()
         QTimer.singleShot(60, self._apply_stealth)
 
     def _set_docked_ui(self, docked: bool) -> None:
+        self._set_root_style(docked)
+        # Hide the full title bar when docked so the window can be very small
+        self._title_bar.setVisible(not docked)
         self._title_separator.setVisible(not docked)
         self._controls.setVisible(not docked)
         self._splitter.setVisible(not docked)
