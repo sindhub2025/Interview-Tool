@@ -92,24 +92,27 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
 
             info = p.get_device_info_by_index(device_index)
             native_rate = int(info.get("defaultSampleRate", SAMPLE_RATE))
+            max_input_channels = int(info.get("maxInputChannels", CHANNELS) or CHANNELS)
+            capture_channels = 2 if max_input_channels >= 2 else 1
             logger.info(
                 "SystemAudioCapture: opening loopback device %d (%s) "
-                "at %d Hz",
+                "at %d Hz, channels=%d",
                 device_index,
                 info.get("name"),
                 native_rate,
+                capture_channels,
             )
 
             stream = p.open(
                 format=pyaudio.paInt16,
-                channels=CHANNELS,
+                channels=capture_channels,
                 rate=native_rate,
                 frames_per_buffer=CHUNK_FRAMES,
                 input=True,
                 input_device_index=device_index,
             )
 
-            self._capture_loop(stream, native_rate)
+            self._capture_loop(stream, native_rate, capture_channels)
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("SystemAudioCapture error: %s", exc, exc_info=True)
@@ -125,6 +128,17 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
 
     def _find_loopback_device(self, p) -> Optional[int]:
         """Return the index of the default WASAPI loopback device."""
+        # pyaudiowpatch may expose a direct helper for this.
+        if hasattr(p, "get_default_wasapi_loopback"):
+            try:
+                info = p.get_default_wasapi_loopback()
+                if isinstance(info, dict):
+                    idx = info.get("index")
+                    if idx is not None:
+                        return int(idx)
+            except Exception:  # pylint: disable=broad-except
+                pass
+
         try:
             wasapi_info = p.get_host_api_info_by_type(p.paWASAPI)  # type: ignore[attr-defined]
         except Exception:  # pylint: disable=broad-except
@@ -135,12 +149,28 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
         if default_speakers is None:
             return None
 
-        # pyaudiowpatch exposes loopback devices; find the one matching
-        # the default output device
+        default_output_name = ""
+        try:
+            output_info = p.get_device_info_by_index(int(default_speakers))
+            default_output_name = str(output_info.get("name", "")).strip().lower()
+        except Exception:  # pylint: disable=broad-except
+            default_output_name = ""
+
+        # First try strict index match for wrappers that keep paired indices.
         for i in range(p.get_device_count()):
             info = p.get_device_info_by_index(i)
             if info.get("isLoopbackDevice") and info.get("index") == default_speakers:
                 return i
+
+        # Then try name matching against the default output device.
+        if default_output_name:
+            for i in range(p.get_device_count()):
+                info = p.get_device_info_by_index(i)
+                if not info.get("isLoopbackDevice"):
+                    continue
+                loopback_name = str(info.get("name", "")).strip().lower()
+                if default_output_name in loopback_name:
+                    return i
 
         # Fallback: first loopback device
         for i in range(p.get_device_count()):
@@ -150,7 +180,7 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
 
         return None
 
-    def _capture_loop(self, stream, native_rate: int) -> None:
+    def _capture_loop(self, stream, native_rate: int, channels: int) -> None:
         """Read from *stream* until stop is requested."""
         need_resample = native_rate != SAMPLE_RATE
 
@@ -158,6 +188,12 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
             try:
                 raw = stream.read(CHUNK_FRAMES, exception_on_overflow=False)
                 data = np.frombuffer(raw, dtype=np.int16)
+
+                if channels > 1 and len(data) >= channels:
+                    # Loopback is commonly stereo. Mix to mono for the shared pipeline.
+                    frames = len(data) // channels
+                    data = data[: frames * channels].reshape(frames, channels)
+                    data = np.mean(data, axis=1).astype(np.int16)
 
                 if need_resample:
                     data = self._resample(data, native_rate, SAMPLE_RATE)

@@ -454,6 +454,15 @@ class SettingsDialog(QDialog):
         self._dictation_idle_spin.setValue(int(dictation.get("commit_idle_ms", 1200)))
 
         # Audio
+        input_device = audio.get("input_device", None)
+        loopback_device = audio.get("loopback_device", None)
+        input_idx = self._input_combo.findData(input_device)
+        if input_idx >= 0:
+            self._input_combo.setCurrentIndex(input_idx)
+        loopback_idx = self._loopback_combo.findData(loopback_device)
+        if loopback_idx >= 0:
+            self._loopback_combo.setCurrentIndex(loopback_idx)
+
         model_size = transcription.get("model_size", "base.en")
         m_idx = self._model_combo.findText(model_size)
         if m_idx >= 0:
@@ -530,6 +539,10 @@ class SettingsDialog(QDialog):
         cfg["transcription"]["remote_fallback"] = bool(
             self._remote_fallback_check.isChecked()
         )
+
+        cfg.setdefault("audio", {})
+        cfg["audio"]["input_device"] = self._input_combo.currentData()
+        cfg["audio"]["loopback_device"] = self._loopback_combo.currentData()
 
         # AI
         cfg.setdefault("ai", {})

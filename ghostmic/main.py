@@ -1063,6 +1063,9 @@ class GhostMicApp:
                 dialog.set_resume_busy(False)
 
     def _on_settings_saved(self, new_config: dict) -> None:
+        prev_audio_cfg = dict(self._config.get("audio", {}))
+        was_recording = bool(self._recording_active)
+
         self._config = new_config
         _save_config(new_config, self._config_path)
         if self._window:
@@ -1070,6 +1073,23 @@ class GhostMicApp:
         self._refresh_ai_runtime_context()
         if self._hotkey_manager:
             self._hotkey_manager.reload(new_config.get("hotkeys", {}))
+
+        new_audio_cfg = dict(new_config.get("audio", {}))
+        if new_audio_cfg != prev_audio_cfg:
+            self._logger.info("Audio settings changed; reinitializing capture threads.")
+            self._stop_audio_capture()
+            self._start_audio_threads()
+            if was_recording:
+                if not self._start_audio_capture():
+                    self._recording_active = False
+                    if self._window:
+                        self._window.controls.set_recording(False)
+                        self._window.controls.set_status(
+                            "Could not restart audio capture with new settings.",
+                            "#f85149",
+                        )
+                    if self._tray:
+                        self._tray.set_recording(False)
 
     def _on_mode_changed(self, mode: str) -> None:
         self._logger.info("Mode changed to %s", mode)
