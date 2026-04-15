@@ -67,17 +67,21 @@ class ControlsBar(QWidget):
         record_toggled(bool): Emitted when recording is toggled.
         mode_changed(str): Emitted when the mode dropdown changes.
         settings_requested(): Emitted when the settings button is clicked.
+        screenshot_requested(): Emitted when the screen analysis button is clicked.
     """
 
     record_toggled = pyqtSignal(bool)
     mode_changed = pyqtSignal(str)
     settings_requested = pyqtSignal()
+    screenshot_requested = pyqtSignal()
 
     MODES = ["Interview", "Meeting Notes", "Custom"]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._recording = False
+        self._api_connected = False
+        self._api_backend = ""
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -126,6 +130,14 @@ class ControlsBar(QWidget):
         settings_btn.clicked.connect(self._on_settings_clicked)
         layout.addWidget(settings_btn)
 
+        # Screen analysis button
+        self._screenshot_btn = QPushButton("📷")
+        self._screenshot_btn.setObjectName("screenshot_btn")
+        self._screenshot_btn.setFixedSize(32, 32)
+        self._update_screenshot_tooltip()
+        self._screenshot_btn.clicked.connect(self._on_screenshot_clicked)
+        layout.addWidget(self._screenshot_btn)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -161,7 +173,15 @@ class ControlsBar(QWidget):
 
     def set_api_status(self, connected: bool, backend: str = "Groq") -> None:
         """Update the API connection status indicator."""
+        self._api_connected = connected
+        self._api_backend = backend or "Groq"
         self._api_status.set_status(connected, backend)
+        self._update_screenshot_tooltip()
+
+    def set_screen_analysis_busy(self, busy: bool) -> None:
+        """Disable the screenshot action while a request is in flight."""
+        self._screenshot_btn.setEnabled(not busy)
+        self._screenshot_btn.setText("⌛" if busy else "📷")
 
     def current_mode(self) -> str:
         return self._mode_combo.currentText()
@@ -176,3 +196,14 @@ class ControlsBar(QWidget):
 
     def _on_settings_clicked(self) -> None:
         self.settings_requested.emit()
+
+    def _on_screenshot_clicked(self) -> None:
+        self.screenshot_requested.emit()
+
+    def _update_screenshot_tooltip(self) -> None:
+        backend_label = self._api_backend.strip()
+        if backend_label:
+            tooltip = f"Take silent full-screen screenshot and analyze with {backend_label}"
+        else:
+            tooltip = "Take silent full-screen screenshot and analyze"
+        self._screenshot_btn.setToolTip(tooltip)

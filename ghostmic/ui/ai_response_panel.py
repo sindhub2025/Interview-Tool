@@ -29,12 +29,11 @@ QWIDGETSIZE_MAX = 16_777_215
 class AIResponseCard(QFrame):
     """A single AI response card with Copy and Regenerate actions."""
 
-    def __init__(self, text: str = "", parent=None) -> None:
+    def __init__(self, text: str = "", title: str = "AI Suggestion", parent=None) -> None:
         super().__init__(parent)
         self._text = text
+        self._title = title
         self._build_ui()
-        # Ensure the card is visible
-        self.show()
 
     def _build_ui(self) -> None:
         self.setSizePolicy(
@@ -50,9 +49,11 @@ class AIResponseCard(QFrame):
 
         # Top row: title + buttons
         header = QHBoxLayout()
-        title = QLabel("AI Suggestion")
-        title.setStyleSheet(f"color: {ACCENT_BLUE}; font-weight: bold; font-size: 10pt;")
-        header.addWidget(title)
+        title_label = QLabel(self._title)
+        title_label.setStyleSheet(
+            f"color: {ACCENT_BLUE}; font-weight: bold; font-size: 10pt;"
+        )
+        header.addWidget(title_label)
         header.addStretch()
 
         self._copy_btn = QPushButton("Copy")
@@ -208,20 +209,17 @@ class AIResponsePanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def start_response(self) -> None:
+    def start_response(self, title: str = "AI Suggestion") -> None:
         """Create a new blank response card ready for streaming."""
         from ghostmic.utils.logger import get_logger
         logger = get_logger(__name__)
         logger.info("AIResponsePanel.start_response() called")
         self.clear_responses()
         self._remove_thinking()
-        card = AIResponseCard()
+        card = AIResponseCard(title=title, parent=self._responses_container)
         self._active_card = card
         self._cards = [card]
         self._responses_layout.addWidget(card, 1)
-        
-        # CRITICAL: Explicitly show the card
-        card.show()
         
         logger.info(
             "AIResponsePanel.start_response() - card inserted, layout count=%d",
@@ -276,10 +274,10 @@ class AIResponsePanel(QWidget):
         
         self._active_card = None
 
-    def show_thinking(self) -> None:
+    def show_thinking(self, message: str = "🤔 Generating response…") -> None:
         """Show a loading indicator while the AI is processing."""
         if self._thinking_label is None:
-            lbl = QLabel("🤔 Generating response…")
+            lbl = QLabel(message)
             lbl.setStyleSheet(
                 f"color: {TEXT_SECONDARY}; font-style: italic; padding: 8px;"
             )
@@ -287,12 +285,14 @@ class AIResponsePanel(QWidget):
             self._thinking_label = lbl
             self._responses_layout.addWidget(lbl, 1)
             self._scroll_to_bottom()
+        else:
+            self._thinking_label.setText(message)
 
-    def show_error(self, message: str) -> None:
+    def show_error(self, message: str, title: str = "AI Suggestion") -> None:
         """Display an error message in the panel."""
         self._remove_thinking()
         self.clear_responses()
-        card = AIResponseCard(f"⚠ {message}")
+        card = AIResponseCard(f"⚠ {message}", title=title, parent=self._responses_container)
         card.setStyleSheet(
             "background-color: #3d0000; border: 1px solid #f85149; "
             "border-radius: 8px; padding: 4px;"

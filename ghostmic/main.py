@@ -293,6 +293,7 @@ class GhostMicApp:
         self._recording_lock = threading.Lock()
         self._dictation_hotkey_guard_until = 0.0
         self._startup_api_worker = None
+        self._screen_analysis_worker = None
         self._resume_upload_worker = None
         self._ui_dispatcher = None
         self._audio_backends_prewarmed = False
@@ -370,6 +371,7 @@ class GhostMicApp:
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)
+        self._window.controls.screenshot_requested.connect(self._on_screen_analysis_requested)
         self._window.dictation_committed.connect(self._on_dictation_committed)
         self._window.ai_panel.text_prompt_submitted.connect(self._on_ai_text_prompt_submitted)
 
@@ -402,6 +404,11 @@ class GhostMicApp:
         if self._startup_api_worker:
             self._startup_api_worker.deleteLater()
             self._startup_api_worker = None
+
+    def _cleanup_screen_analysis_worker(self) -> None:
+        if self._screen_analysis_worker:
+            self._screen_analysis_worker.deleteLater()
+            self._screen_analysis_worker = None
 
     # ------------------------------------------------------------------
     # System tray
@@ -964,6 +971,50 @@ class GhostMicApp:
             self._window.ai_panel.finish_response(full_text)
             self._window.controls.set_status("✓ Response ready", "#3fb950")
             self._logger.info("AI response displayed successfully (%d chars).", len(full_text))
+
+    def _on_screen_analysis_requested(self) -> None:
+        if not self._window:
+            return
+        if self._screen_analysis_worker is not None:
+            self._window.controls.set_status("Screen analysis already running", "#f0883e")
+            return
+
+        ai_cfg = self._config.get("ai", {})
+        api_key = str(ai_cfg.get("groq_api_key", "")).strip()
+        if not api_key:
+            self._window.ai_panel.show_error(
+                "Add your Groq API key in Settings before using screen analysis.",
+                title="Screen Analysis",
+            )
+            self._window.controls.set_status("Groq API key required", "#f85149")
+            return
+
+        from ghostmic.services.screen_analysis_service import ScreenAnalysisWorker
+
+        self._window.controls.set_status("Capturing screen…", "#58a6ff")
+        self._window.controls.set_screen_analysis_busy(True)
+        self._window.ai_panel.start_response(title="Screen Analysis")
+        self._window.ai_panel.show_thinking("Analyzing screenshot…")
+
+        worker = ScreenAnalysisWorker(ai_cfg, parent=None)
+        worker.analysis_ready.connect(self._on_screen_analysis_ready)
+        worker.analysis_error.connect(self._on_screen_analysis_error)
+        worker.finished.connect(self._cleanup_screen_analysis_worker)
+        self._screen_analysis_worker = worker
+        worker.start()
+
+    def _on_screen_analysis_ready(self, full_text: str) -> None:
+        if not self._window:
+            return
+        self._window.ai_panel.finish_response(full_text)
+        self._window.controls.set_screen_analysis_busy(False)
+        self._window.controls.set_status("✓ Screen analysis ready", "#3fb950")
+
+    def _on_screen_analysis_error(self, message: str) -> None:
+        if self._window:
+            self._window.ai_panel.show_error(message, title="Screen Analysis")
+            self._window.controls.set_screen_analysis_busy(False)
+            self._window.controls.set_status("Screen analysis failed", "#f85149")
 
     def _on_settings_requested(self) -> None:
         from ghostmic.ui.settings_dialog import SettingsDialog
