@@ -41,6 +41,7 @@ SPEECH_END_WINDOWS: int = 8         # consecutive silence windows to end (~256 m
 MIN_SPEECH_SAMPLES: int = 8_000     # 0.5 s minimum
 MAX_SPEECH_SAMPLES: int = 480_000   # 30 s maximum
 PADDING_SAMPLES: int = 4_800        # 300 ms padding
+MAX_PENDING_SAMPLES: int = 1_024    # max carry-over samples (2 × VAD_WINDOW_SIZE)
 BYPASS_SEGMENT_SECONDS: float = 2.0
 BYPASS_MAX_BUFFER_SECONDS: float = 8.0
 BYPASS_MIN_RMS: float = 120.0
@@ -153,6 +154,10 @@ class VADThread(QThread):  # type: ignore[misc]
             "pre_roll_windows": [],
             "pre_roll_samples": 0,
             "prefix_audio": np.array([], dtype=np.int16),
+            # Carry-over tail to handle chunks shorter than one VAD window.
+            # This is critical for loopback chunks that may be < 512 samples
+            # after resampling from 44.1/48 kHz to 16 kHz.
+            "pending_audio": np.array([], dtype=np.int16),
         }
 
     @staticmethod
@@ -249,6 +254,18 @@ class VADThread(QThread):  # type: ignore[misc]
         self, chunk: np.ndarray, source: str, state: dict
     ) -> None:
         """Run the VAD state machine on *chunk* for *source*."""
+        if chunk.size == 0:
+            return
+
+        pending = np.asarray(
+            state.get("pending_audio", np.array([], dtype=np.int16)),
+            dtype=np.int16,
+        )
+        if pending.size:
+            chunk = np.concatenate([pending, chunk.astype(np.int16, copy=False)])
+        else:
+            chunk = chunk.astype(np.int16, copy=False)
+
         chunk_tensor = None
         torch = self._torch
         if self._model is not None and torch is not None:
@@ -308,6 +325,14 @@ class VADThread(QThread):  # type: ignore[misc]
                     self._flush_segment(state, source)
 
             pos += VAD_WINDOW_SIZE
+
+        # Keep remainder so sub-window chunks are processed across calls.
+        # Enforce upper bound to prevent unbounded growth with large chunks.
+        remainder = chunk[pos:]
+        if len(remainder) > MAX_PENDING_SAMPLES:
+            # Keep only the most recent MAX_PENDING_SAMPLES to prevent memory bloat
+            remainder = remainder[-MAX_PENDING_SAMPLES:]
+        state["pending_audio"] = remainder.astype(np.int16, copy=False)
 
     def _flush_segment(self, state: dict, source: str) -> None:
         """Concatenate and emit the buffered speech segment."""
