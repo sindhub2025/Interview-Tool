@@ -103,6 +103,11 @@ def _default_config() -> dict:
             ),
             "temperature": 0.7,
             "trigger_mode": "auto",
+            "auto_speaker_analysis_enabled": True,
+            "auto_speaker_silence_seconds": 1.2,
+            "auto_speaker_min_words": 4,
+            "auto_speaker_min_chars": 18,
+            "auto_speaker_retrigger_cooldown_seconds": 5.0,
             "context_segments": 10,
             "session_context": "",
             "resume_context_enabled": True,
@@ -309,9 +314,13 @@ class GhostMicApp:
         self._dictation_hotkey_guard_until = 0.0
         self._startup_api_worker = None
         self._screen_analysis_worker = None
+        self._question_normalization_worker = None
         self._resume_upload_worker = None
         self._ui_dispatcher = None
         self._audio_backends_prewarmed = False
+        self._auto_speaker_silence_generation = 0
+        self._auto_speaker_last_signature = ""
+        self._auto_speaker_last_trigger_ts = 0.0
 
         # Services
         self._thread_coordinator = ThreadCoordinator()
@@ -396,6 +405,13 @@ class GhostMicApp:
         self._window.controls.screenshot_requested.connect(self._on_screen_analysis_requested)
         self._window.dictation_committed.connect(self._on_dictation_committed)
         self._window.ai_panel.text_prompt_submitted.connect(self._on_ai_text_prompt_submitted)
+        self._window.transcript_panel.speaker_text_edited.connect(self._on_speaker_transcript_edited)
+        self._window.transcript_panel.speaker_normalize_requested.connect(
+            self._on_speaker_question_normalize_requested
+        )
+        self._window.transcript_panel.speaker_send_requested.connect(
+            self._on_speaker_send_requested
+        )
 
     def _test_api_startup_async(self) -> None:
         """Test API connectivity in a background thread (non-blocking)."""
@@ -431,6 +447,11 @@ class GhostMicApp:
         if self._screen_analysis_worker:
             self._screen_analysis_worker.deleteLater()
             self._screen_analysis_worker = None
+
+    def _cleanup_question_normalization_worker(self) -> None:
+        if self._question_normalization_worker:
+            self._question_normalization_worker.deleteLater()
+            self._question_normalization_worker = None
 
     # ------------------------------------------------------------------
     # System tray
@@ -870,6 +891,9 @@ class GhostMicApp:
                 self._tray.set_recording(True)
         else:
             self._recording_active = False
+            self._auto_speaker_silence_generation += 1
+            self._auto_speaker_last_signature = ""
+            self._auto_speaker_last_trigger_ts = 0.0
             self._stop_audio_capture()
             if self._transcription_thread:
                 self._transcription_thread.clear_pending_segments()
@@ -909,6 +933,85 @@ class GhostMicApp:
     def _on_transcription_ready(self, segment) -> None:
         self._append_transcript_segment(segment, require_recording=True)
 
+    def _should_merge_speaker_segments(self, previous, incoming) -> bool:
+        """Return True when *incoming* should continue the previous speaker line."""
+        if getattr(previous, "source", "") != "speaker":
+            return False
+        if getattr(incoming, "source", "") != "speaker":
+            return False
+
+        prev_text = str(getattr(previous, "text", "")).strip()
+        incoming_text = str(getattr(incoming, "text", "")).strip()
+        if not prev_text or not incoming_text:
+            return False
+
+        cfg = self._config.get("transcription", {})
+        max_gap = float(cfg.get("speaker_merge_gap_seconds", 2.4))
+        max_chars = int(cfg.get("speaker_merge_max_chars", 720))
+
+        prev_ts = float(getattr(previous, "timestamp", 0.0) or 0.0)
+        incoming_ts = float(getattr(incoming, "timestamp", 0.0) or 0.0)
+        gap = max(0.0, incoming_ts - prev_ts)
+        if gap > max_gap:
+            return False
+
+        if len(prev_text) + 1 + len(incoming_text) > max_chars:
+            return False
+
+        first_word = incoming_text.split()[0].lower()
+        continuation_starters = {
+            "and",
+            "also",
+            "then",
+            "so",
+            "because",
+            "which",
+            "that",
+            "where",
+            "when",
+            "while",
+            "with",
+            "without",
+            "if",
+            "but",
+        }
+        question_starters = {
+            "what",
+            "why",
+            "how",
+            "when",
+            "where",
+            "who",
+            "which",
+            "can",
+            "could",
+            "would",
+            "should",
+            "do",
+            "does",
+            "did",
+            "is",
+            "are",
+            "tell",
+            "explain",
+        }
+
+        previous_looks_complete = prev_text.endswith(("?", ".", "!"))
+        if not previous_looks_complete:
+            return True
+
+        if first_word in continuation_starters:
+            return True
+
+        if first_word in question_starters and gap >= 0.8:
+            return False
+
+        # Very short tails after brief pauses are usually chunk splits.
+        if len(incoming_text.split()) <= 5 and gap <= 1.2:
+            return True
+
+        return False
+
     def _append_transcript_segment(self, segment, require_recording: bool) -> bool:
         if require_recording and not self._recording_active:
             self._logger.debug(
@@ -924,17 +1027,62 @@ class GhostMicApp:
             self._logger.debug("Transcript segment text was empty after cleaning; ignoring.")
             return False
 
+        merged_target = None
         with self._transcript_lock:
-            self._transcript_history.append(segment)
-            self._ai_context_history.append(segment)
-            self._logger.info(
-                "Transcript segment added: source=%s, text=%r, total_segments=%d",
-                getattr(segment, "source", "unknown"),
-                segment.text[:50],  # First 50 chars
-                len(self._transcript_history),
-            )
-            if len(self._transcript_history) > 1000:
-                self._transcript_history = self._transcript_history[-1000:]
+            if self._transcript_history and self._should_merge_speaker_segments(
+                self._transcript_history[-1], segment
+            ):
+                merged_target = self._transcript_history[-1]
+                merged_text = clean_text(
+                    f"{getattr(merged_target, 'text', '')} {segment.text}"
+                )
+                if not merged_text:
+                    self._logger.debug("Merged transcript text was empty after cleaning; ignoring.")
+                    return False
+
+                merged_target.text = merged_text
+                merged_target.confidence = max(
+                    float(getattr(merged_target, "confidence", 1.0)),
+                    float(getattr(segment, "confidence", 1.0)),
+                )
+
+                if self._ai_context_history:
+                    last_context = self._ai_context_history[-1]
+                    if getattr(last_context, "source", "") == "speaker":
+                        last_context.text = merged_text
+                        last_context.confidence = max(
+                            float(getattr(last_context, "confidence", 1.0)),
+                            float(getattr(segment, "confidence", 1.0)),
+                        )
+
+                self._logger.info(
+                    "Transcript segment merged: source=%s, merged_len=%d",
+                    getattr(segment, "source", "unknown"),
+                    len(merged_text),
+                )
+            else:
+                self._transcript_history.append(segment)
+                self._ai_context_history.append(segment)
+                self._logger.info(
+                    "Transcript segment added: source=%s, text=%r, total_segments=%d",
+                    getattr(segment, "source", "unknown"),
+                    segment.text[:50],  # First 50 chars
+                    len(self._transcript_history),
+                )
+                if len(self._transcript_history) > 1000:
+                    self._transcript_history = self._transcript_history[-1000:]
+
+        if merged_target is not None:
+            self._session_context_store.append_transcript(merged_target)
+            if self._window:
+                self._window.transcript_panel.set_segment_text(
+                    merged_target,
+                    merged_target.text,
+                )
+                self._window.controls.set_status("Listening…", "#3fb950")
+            if getattr(merged_target, "source", "") == "speaker":
+                self._schedule_auto_speaker_analysis(merged_target)
+            return True
 
         self._session_context_store.append_transcript(segment)
 
@@ -942,12 +1090,8 @@ class GhostMicApp:
             self._window.transcript_panel.add_segment(segment)
             self._window.controls.set_status("Listening…", "#3fb950")
 
-        ai_cfg = self._config.get("ai", {})
-        if (
-            ai_cfg.get("trigger_mode", "auto") == "auto"
-            and getattr(segment, "source", "") == "speaker"
-        ):
-            self._generate_ai_response()
+        if getattr(segment, "source", "") == "speaker":
+            self._schedule_auto_speaker_analysis(segment)
 
         return True
 
@@ -1225,6 +1369,382 @@ class GhostMicApp:
         else:
             self._logger.warning("Unable to focus dictation target for Win+H capture.")
 
+    def _on_speaker_transcript_edited(self, segment, text: str) -> None:
+        from ghostmic.utils.text_processing import clean_text
+
+        cleaned = clean_text(str(text or ""))
+        if not cleaned:
+            return
+        with self._transcript_lock:
+            segment.text = cleaned
+
+    def _is_auto_speaker_analysis_enabled(self) -> bool:
+        ai_cfg = self._config.get("ai", {})
+        if not bool(ai_cfg.get("auto_speaker_analysis_enabled", True)):
+            return False
+        trigger_mode = str(ai_cfg.get("trigger_mode", "auto")).strip().lower()
+        return trigger_mode in {"auto", "continuous"}
+
+    def _auto_speaker_silence_delay_ms(self) -> int:
+        ai_cfg = self._config.get("ai", {})
+        raw_seconds = ai_cfg.get("auto_speaker_silence_seconds", 1.2)
+        try:
+            seconds = float(raw_seconds)
+        except (TypeError, ValueError):
+            seconds = 1.2
+        seconds = max(0.3, min(6.0, seconds))
+        return int(seconds * 1000)
+
+    def _is_auto_speaker_candidate_text(self, text: str) -> bool:
+        from ghostmic.utils.text_processing import clean_text
+
+        cleaned = clean_text(str(text or ""))
+        if not cleaned:
+            return False
+
+        ai_cfg = self._config.get("ai", {})
+        raw_min_words = ai_cfg.get("auto_speaker_min_words", 4)
+        raw_min_chars = ai_cfg.get("auto_speaker_min_chars", 18)
+        try:
+            min_words = int(raw_min_words)
+        except (TypeError, ValueError):
+            min_words = 4
+        try:
+            min_chars = int(raw_min_chars)
+        except (TypeError, ValueError):
+            min_chars = 18
+
+        min_words = max(1, min(24, min_words))
+        min_chars = max(1, min(500, min_chars))
+
+        if len(cleaned) < min_chars:
+            return False
+        if len(cleaned.split()) < min_words:
+            return False
+        return any(ch.isalpha() for ch in cleaned)
+
+    @staticmethod
+    def _build_auto_speaker_signature(segment, text: str) -> str:
+        normalized = " ".join(str(text or "").lower().split())
+        return f"{id(segment)}::{normalized}"
+
+    def _mark_auto_speaker_triggered(self, segment, text: str) -> None:
+        self._auto_speaker_last_signature = self._build_auto_speaker_signature(segment, text)
+        self._auto_speaker_last_trigger_ts = time.time()
+
+    def _schedule_auto_speaker_analysis(self, segment, *, delay_ms: Optional[int] = None) -> None:
+        if not self._is_auto_speaker_analysis_enabled():
+            return
+        if getattr(segment, "source", "") != "speaker":
+            return
+
+        text = str(getattr(segment, "text", ""))
+        if not self._is_auto_speaker_candidate_text(text):
+            return
+
+        self._auto_speaker_silence_generation += 1
+        generation = self._auto_speaker_silence_generation
+        timeout_ms = self._auto_speaker_silence_delay_ms() if delay_ms is None else int(delay_ms)
+        timeout_ms = max(50, timeout_ms)
+
+        try:
+            from PyQt6.QtCore import QTimer
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.debug("Auto speaker analysis timer unavailable: %s", exc)
+            return
+
+        QTimer.singleShot(
+            timeout_ms,
+            lambda seg=segment, token=generation: self._on_auto_speaker_silence_elapsed(
+                seg,
+                token,
+            ),
+        )
+
+    def _on_auto_speaker_silence_elapsed(self, segment, generation: int) -> None:
+        if generation != self._auto_speaker_silence_generation:
+            return
+        if not self._recording_active:
+            return
+        if not self._is_auto_speaker_analysis_enabled():
+            return
+        if getattr(segment, "source", "") != "speaker":
+            return
+
+        from ghostmic.utils.text_processing import clean_text
+
+        cleaned = clean_text(str(getattr(segment, "text", "")))
+        if not self._is_auto_speaker_candidate_text(cleaned):
+            return
+
+        ai_cfg = self._config.get("ai", {})
+        raw_cooldown = ai_cfg.get("auto_speaker_retrigger_cooldown_seconds", 5.0)
+        try:
+            cooldown = float(raw_cooldown)
+        except (TypeError, ValueError):
+            cooldown = 5.0
+        cooldown = max(0.5, min(30.0, cooldown))
+
+        signature = self._build_auto_speaker_signature(segment, cleaned)
+        now = time.time()
+        if (
+            signature == self._auto_speaker_last_signature
+            and (now - self._auto_speaker_last_trigger_ts) < cooldown
+        ):
+            self._logger.debug(
+                "Auto speaker analysis skipped: duplicate within %.1fs cooldown.",
+                cooldown,
+            )
+            return
+
+        if self._question_normalization_worker is not None:
+            self._logger.debug(
+                "Auto speaker analysis deferred: normalization worker busy."
+            )
+            self._schedule_auto_speaker_analysis(segment, delay_ms=700)
+            return
+
+        self._mark_auto_speaker_triggered(segment, cleaned)
+        self._on_speaker_question_normalize_requested(
+            segment,
+            cleaned,
+            auto_send_after=True,
+        )
+
+    def _on_speaker_question_normalize_requested(
+        self,
+        segment,
+        text: str,
+        *,
+        auto_send_after: bool = False,
+    ) -> None:
+        from ghostmic.utils.text_processing import clean_text
+
+        if getattr(segment, "source", "") != "speaker":
+            return
+
+        cleaned = clean_text(str(text or ""))
+        if not cleaned:
+            if self._window:
+                self._window.controls.set_status(
+                    "Speaker question is empty", "#f0883e"
+                )
+            return
+
+        self._on_speaker_transcript_edited(segment, cleaned)
+
+        if self._question_normalization_worker is not None:
+            if auto_send_after:
+                self._schedule_auto_speaker_analysis(segment, delay_ms=700)
+                return
+            if self._window:
+                self._window.controls.set_status(
+                    "Question normalization already running", "#f0883e"
+                )
+            return
+
+        try:
+            from ghostmic.services.question_normalization_service import (
+                QuestionNormalizationWorker,
+            )
+
+            worker = QuestionNormalizationWorker(
+                self._build_ai_runtime_config(),
+                cleaned,
+                parent=None,
+            )
+            worker.normalized_ready.connect(
+                lambda normalized, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalized(
+                    seg,
+                    normalized,
+                    auto_send=auto_send,
+                )
+            )
+            worker.normalization_error.connect(
+                lambda message, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalization_error(
+                    seg,
+                    message,
+                    auto_send=auto_send,
+                )
+            )
+            worker.finished.connect(self._cleanup_question_normalization_worker)
+            self._question_normalization_worker = worker
+            if self._window:
+                self._window.transcript_panel.set_segment_normalization_busy(
+                    segment,
+                    True,
+                    "Analyzing question…" if auto_send_after else "Normalizing question…",
+                )
+                self._window.controls.set_status(
+                    "Analyzing speaker question…" if auto_send_after else "Normalizing speaker question…",
+                    "#58a6ff",
+                )
+            worker.start()
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.warning("Could not start question normalization: %s", exc)
+            if self._window:
+                self._window.transcript_panel.set_segment_normalization_busy(
+                    segment,
+                    False,
+                    "",
+                )
+                self._window.controls.set_status(
+                    "Question normalization unavailable", "#f85149"
+                )
+            if auto_send_after:
+                self._on_speaker_question_normalization_error(
+                    segment,
+                    str(exc),
+                    auto_send=True,
+                )
+
+    def _on_speaker_question_normalized(
+        self,
+        segment,
+        normalized_text: str,
+        *,
+        auto_send: bool = False,
+    ) -> None:
+        from ghostmic.utils.text_processing import clean_text
+
+        normalized = clean_text(str(normalized_text or ""))
+        if not normalized:
+            normalized = str(getattr(segment, "text", "")).strip()
+        if not normalized:
+            self._on_speaker_question_normalization_error(
+                segment,
+                "Normalization produced empty text.",
+                auto_send=auto_send,
+            )
+            return
+
+        with self._transcript_lock:
+            segment.text = normalized
+
+        self._session_context_store.append_event(
+            "normalized_question",
+            normalized,
+            source="speaker",
+        )
+
+        if self._window:
+            self._window.transcript_panel.set_segment_text(segment, normalized)
+            self._window.transcript_panel.set_segment_normalization_busy(
+                segment,
+                False,
+                "Question analyzed" if auto_send else "Question normalized",
+            )
+            if auto_send:
+                self._window.controls.set_status(
+                    "Question detected. Generating response…", "#58a6ff"
+                )
+                self._window.ai_panel.show_thinking("Generating response…")
+            else:
+                self._window.controls.set_status(
+                    "Question normalized. Review, then Send to AI.", "#3fb950"
+                )
+
+        if auto_send:
+            self._session_context_store.append_event(
+                "auto_ai_request",
+                normalized,
+                source="speaker",
+            )
+            self._generate_ai_response(force_follow_up=False)
+
+    def _on_speaker_question_normalization_error(
+        self,
+        segment,
+        message: str,
+        *,
+        auto_send: bool = False,
+    ) -> None:
+        from ghostmic.utils.text_processing import clean_text
+
+        self._logger.warning("Question normalization failed: %s", message)
+        if self._window:
+            self._window.transcript_panel.set_segment_normalization_busy(
+                segment,
+                False,
+                "Normalization failed",
+            )
+
+        if auto_send:
+            fallback_question = clean_text(str(getattr(segment, "text", "")))
+            if not fallback_question:
+                if self._window:
+                    self._window.controls.set_status(
+                        "Question normalization failed", "#f85149"
+                    )
+                return
+
+            self._session_context_store.append_event(
+                "auto_ai_request",
+                fallback_question,
+                source="speaker",
+                metadata={"normalization_error": str(message or "")[:120]},
+            )
+            if self._window:
+                self._window.controls.set_status(
+                    "Normalization failed. Generating from transcript…", "#f0883e"
+                )
+                self._window.ai_panel.show_thinking("Generating response…")
+            self._generate_ai_response(force_follow_up=False)
+            return
+
+        if self._window:
+            self._window.controls.set_status(
+                "Question normalization failed", "#f85149"
+            )
+
+    def _on_speaker_send_requested(self, segment, text: str) -> None:
+        from ghostmic.core.transcription_engine import TranscriptSegment
+        from ghostmic.utils.text_processing import clean_text
+
+        if getattr(segment, "source", "") != "speaker":
+            return
+
+        question = clean_text(str(text or ""))
+        if not question:
+            if self._window:
+                self._window.controls.set_status(
+                    "Speaker question is empty", "#f0883e"
+                )
+            return
+
+        self._auto_speaker_silence_generation += 1
+        self._mark_auto_speaker_triggered(segment, question)
+
+        with self._transcript_lock:
+            segment.text = question
+            self._ai_context_history = [
+                TranscriptSegment(
+                    text=question,
+                    source="speaker",
+                    confidence=float(getattr(segment, "confidence", 1.0)),
+                )
+            ]
+
+        self._session_context_store.append_event(
+            "manual_ai_request",
+            question,
+            source="speaker",
+        )
+
+        if self._window:
+            self._window.transcript_panel.set_segment_text(segment, question)
+            self._window.transcript_panel.set_segment_normalization_busy(
+                segment,
+                False,
+                "",
+            )
+            self._window.controls.set_status(
+                "Sending selected question to AI…", "#58a6ff"
+            )
+            self._window.ai_panel.show_thinking("Generating response…")
+
+        self._generate_ai_response(force_follow_up=False)
+
     def _generate_ai_response(self, force_follow_up: bool = False) -> None:
         from ghostmic.core.ai_engine import AIThread, MAX_CONTEXT_SEGMENTS
         from ghostmic.core.transcription_engine import TranscriptSegment
@@ -1418,6 +1938,9 @@ class GhostMicApp:
                 self._transcript_history.clear()
                 self._ai_context_history.clear()
                 self._last_ai_response_text = ""
+            self._auto_speaker_silence_generation += 1
+            self._auto_speaker_last_signature = ""
+            self._auto_speaker_last_trigger_ts = 0.0
             return
 
         from PyQt6.QtWidgets import QMessageBox
@@ -1440,6 +1963,9 @@ class GhostMicApp:
                 self._transcript_history.clear()
                 self._ai_context_history.clear()
                 self._last_ai_response_text = ""
+            self._auto_speaker_silence_generation += 1
+            self._auto_speaker_last_signature = ""
+            self._auto_speaker_last_trigger_ts = 0.0
             self._window.controls.set_status("Transcript cleared", "#3fb950")
 
     # ------------------------------------------------------------------
@@ -1448,6 +1974,9 @@ class GhostMicApp:
 
     def _on_quit(self) -> None:
         self._logger.info("GhostMic: shutting down …")
+        if self._question_normalization_worker and self._question_normalization_worker.isRunning():
+            self._question_normalization_worker.requestInterruption()
+            self._question_normalization_worker.wait(1500)
         self._stop_audio_capture()
         self._session_context_compactor.stop(timeout=1.5)
 

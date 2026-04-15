@@ -385,6 +385,12 @@ class SessionContextStore:
             return "AI Response"
         if kind == "screen_summary":
             return "Screen Summary"
+        if kind == "normalized_question":
+            return "Normalized Question"
+        if kind == "manual_ai_request":
+            return "Manual AI Request"
+        if kind == "auto_ai_request":
+            return "Auto AI Request"
         if kind == "organized_context":
             return "Organized Context"
         return kind.replace("_", " ").title() or "Event"
