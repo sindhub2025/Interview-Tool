@@ -53,6 +53,9 @@ explain, or repeat content from any previous questions or answers unless \
 the interviewer explicitly asks you to.
 - Keep responses concise (2-4 sentences max for the main response)
 - Sound natural and conversational, not robotic
+- If the user asks for a sample script, sample code, code example, snippet, \
+or SQL query, provide a short generic example in a fenced code block when \
+the request does not include enough specifics, and keep it easy to adapt.
 - If it's a technical question, provide accurate technical details
 - If context is unclear, provide the most likely helpful response
 - Format: Start with the direct response, then bullet points for key points
@@ -389,6 +392,7 @@ class AIThread(QThread):  # type: ignore[misc]
         self,
         transcript: List[TranscriptSegment],
         is_new_topic: bool = False,
+        runtime_context_tail: str = "",
     ) -> bool:
         """Queue a response-generation request.
 
@@ -399,6 +403,8 @@ class AIThread(QThread):  # type: ignore[misc]
             transcript: Recent transcript segments for context.
             is_new_topic: When True the AI will not use any previous-answer
                 context so the response focuses strictly on the new question.
+            runtime_context_tail: Optional recent runtime context loaded from
+                the per-session context file when live context is thin.
 
         Returns:
             True when accepted into the queue, otherwise False.
@@ -409,7 +415,7 @@ class AIThread(QThread):  # type: ignore[misc]
             self._last_reject_reason = "debounced"
             return False
         self._last_request_time = now
-        payload = (transcript, is_new_topic)
+        payload = (transcript, is_new_topic, runtime_context_tail)
         try:
             self._queue.put_nowait(payload)
             self._last_reject_reason = ""
@@ -463,11 +469,23 @@ class AIThread(QThread):  # type: ignore[misc]
         while not self._stop_event.is_set():
             try:
                 payload = self._queue.get(timeout=0.2)
-                transcript, is_new_topic = (
-                    payload
-                    if isinstance(payload, tuple)
-                    else (payload, False)
-                )
+                runtime_context_tail = ""
+                if isinstance(payload, tuple):
+                    if len(payload) >= 2:
+                        transcript = payload[0]
+                        is_new_topic = bool(payload[1])
+                        if len(payload) >= 3:
+                            runtime_context_tail = str(payload[2] or "").strip()
+                    elif len(payload) == 1:
+                        transcript = payload[0]
+                        is_new_topic = False
+                    else:
+                        transcript = []
+                        is_new_topic = False
+                else:
+                    transcript = payload
+                    is_new_topic = False
+
                 logger.info(
                     "AIThread: got request from queue with %d segments, "
                     "is_new_topic=%s",
@@ -479,7 +497,11 @@ class AIThread(QThread):  # type: ignore[misc]
 
             logger.info("AIThread: calling _generate() now...")
             try:
-                self._generate(transcript, is_new_topic=is_new_topic)
+                self._generate(
+                    transcript,
+                    is_new_topic=is_new_topic,
+                    runtime_context_tail=runtime_context_tail,
+                )
                 logger.info("AIThread: _generate() completed")
             except Exception as e:
                 logger.error(
@@ -521,6 +543,7 @@ class AIThread(QThread):  # type: ignore[misc]
         self,
         transcript: List[TranscriptSegment],
         is_new_topic: bool = False,
+        runtime_context_tail: str = "",
     ) -> None:
         logger.info(
             "AIThread: _generate() starting with %d segments, "
@@ -591,6 +614,7 @@ class AIThread(QThread):  # type: ignore[misc]
         context = self._build_context(
             transcript,
             session_context=session_context,
+            runtime_context_tail=runtime_context_tail,
             is_new_topic=is_new_topic,
             resume_profile=resume_profile,
             sql_profile_enabled=sql_profile_enabled,
@@ -1411,6 +1435,7 @@ class AIThread(QThread):  # type: ignore[misc]
     def _build_context(
         transcript: List[TranscriptSegment],
         session_context: str = "",
+        runtime_context_tail: str = "",
         is_new_topic: bool = False,
         resume_profile: Optional[Dict[str, Any]] = None,
         sql_profile_enabled: bool = False,
@@ -1656,6 +1681,13 @@ class AIThread(QThread):  # type: ignore[misc]
         lines: List[str] = []
         if session_context:
             lines.append(f"[Session Context]: {session_context}")
+        runtime_context_tail = str(runtime_context_tail).strip()
+        if runtime_context_tail:
+            lines.append("[Runtime Session Context]:")
+            for item in runtime_context_tail.splitlines():
+                item = item.strip()
+                if item:
+                    lines.append(f"- {item}")
         if previous_question_context:
             lines.append(
                 f"[Prior Question Context]: {previous_question_context}"
@@ -1885,7 +1917,9 @@ class AIThread(QThread):  # type: ignore[misc]
             "  • 'elaboration' → expand on the previous answer with more "
             "depth.\n"
             "  • 'example request' → provide a concrete, practical "
-            "example.\n"
+            "example. If the user asks for a sample script, sample code, "
+            "SQL query, code example, or snippet, return a short generic "
+            "example in a fenced code block when specifics are missing.\n"
             "  • 'clarification' → rephrase or simplify the previous "
             "answer.\n"
             "  • 'simplification' → re-explain in simpler, more "

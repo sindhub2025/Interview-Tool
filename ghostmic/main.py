@@ -27,7 +27,9 @@ if not getattr(sys, "frozen", False) and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from ghostmic.utils.logger import configure_logging, get_log_file_path, get_logger
+from ghostmic.services.session_context_compactor import SessionContextCompactor
 from ghostmic.services.resume_service import ResumeService
+from ghostmic.services.session_context_store import SessionContextStore
 from ghostmic.services.thread_coordinator import ThreadCoordinator
 from ghostmic.services.runtime_state import RuntimeStateCache
 
@@ -93,7 +95,11 @@ def _default_config() -> dict:
             "groq_model": "llama-3.1-70b-versatile",
             "system_prompt": (
                 "You are a real-time interview/meeting assistant helping the user "
-                "respond to questions. Keep responses concise and natural."
+                "respond to questions. Keep responses concise and natural. "
+                "If the user asks for a sample script, sample code, code example, "
+                "snippet, or SQL query, provide a short generic example in a "
+                "fenced code block when the request does not include enough "
+                "specifics, and keep it easy to adapt."
             ),
             "temperature": 0.7,
             "trigger_mode": "auto",
@@ -103,6 +109,15 @@ def _default_config() -> dict:
             "sql_profile_enabled": False,
             "resume_correction_threshold_high": 0.87,
             "resume_correction_threshold_medium": 0.74,
+            "context_compaction_enabled": True,
+            "context_compaction_min_interval_seconds": 30,
+            "context_compaction_max_interval_seconds": 45,
+            "context_compaction_full_refresh_every": 5,
+            "context_compaction_source_max_events": 80,
+            "context_compaction_source_max_chars": 7000,
+            "context_compaction_timeout": 20.0,
+            "context_compaction_temperature": 0.1,
+            "context_compaction_max_tokens": 320,
         },
         "audio": {"input_device": None, "loopback_device": None, "sample_rate": 16000},
         "transcription": {
@@ -304,6 +319,12 @@ class GhostMicApp:
             os.path.expanduser("~"), ".ghostmic", ".runtime_state.json"
         )
         self._runtime_state = RuntimeStateCache(runtime_state_path)
+        self._session_context_store = SessionContextStore()
+        self._logger.info("Session context file created: %s", self._session_context_store.path)
+        self._session_context_compactor = SessionContextCompactor(
+            self._session_context_store,
+            self._config.get("ai", {}),
+        )
         self._resume_service = ResumeService()
         self._resume_profile = self._resume_service.get_profile()
 
@@ -329,6 +350,7 @@ class GhostMicApp:
         self._start_audio_threads()
         self._setup_hotkeys()
         self._test_api_startup_async()  # Test API connectivity in background
+        self._session_context_compactor.start()
 
         if not self._args.minimized and self._window:
             self._window.show()
@@ -914,6 +936,8 @@ class GhostMicApp:
             if len(self._transcript_history) > 1000:
                 self._transcript_history = self._transcript_history[-1000:]
 
+        self._session_context_store.append_transcript(segment)
+
         if self._window:
             self._window.transcript_panel.add_segment(segment)
             self._window.controls.set_status("Listening…", "#3fb950")
@@ -945,6 +969,8 @@ class GhostMicApp:
 
         from ghostmic.core.transcription_engine import TranscriptSegment
 
+        self._session_context_store.append_typed_prompt(prompt, refine)
+
         with self._transcript_lock:
             # Treat manual prompt as current question/topic from the speaker side
             # so it can run through existing topic-shift and generation pipeline.
@@ -964,6 +990,7 @@ class GhostMicApp:
 
     def _on_ai_response_ready(self, full_text: str) -> None:
         self._logger.info("_on_ai_response_ready called with %d chars", len(full_text))
+        self._session_context_store.append_ai_response(full_text)
         with self._transcript_lock:
             self._last_ai_response_text = full_text
             self._ai_context_history.clear()
@@ -1006,6 +1033,7 @@ class GhostMicApp:
     def _on_screen_analysis_ready(self, full_text: str) -> None:
         if not self._window:
             return
+        self._session_context_store.append_screen_summary(full_text)
         self._window.ai_panel.finish_response(full_text)
         self._window.controls.set_screen_analysis_busy(False)
         self._window.controls.set_status("✓ Screen analysis ready", "#3fb950")
@@ -1122,6 +1150,7 @@ class GhostMicApp:
         if self._window:
             self._window.update_config(new_config)
         self._refresh_ai_runtime_context()
+        self._session_context_compactor.update_ai_config(new_config.get("ai", {}))
         if self._hotkey_manager:
             self._hotkey_manager.reload(new_config.get("hotkeys", {}))
 
@@ -1200,6 +1229,9 @@ class GhostMicApp:
         from ghostmic.core.ai_engine import AIThread, MAX_CONTEXT_SEGMENTS
         from ghostmic.core.transcription_engine import TranscriptSegment
 
+        runtime_context_tail = self._session_context_store.get_latest_organized_context(
+            max_chars=1200,
+        )
         with self._transcript_lock:
             transcript_source = self._ai_context_history or self._transcript_history
             if not transcript_source:
@@ -1212,6 +1244,32 @@ class GhostMicApp:
                 self._logger.debug(
                     "AI request: using transcript history fallback because AI context history is empty."
                 )
+
+            if len(transcript_snapshot) < MAX_CONTEXT_SEGMENTS:
+                source_payload = self._session_context_store.build_compaction_source(
+                    max_events=20,
+                    max_chars=1200,
+                )
+                raw_event_tail = str(source_payload.get("text", "")).strip()
+                if raw_event_tail:
+                    sections = []
+                    if runtime_context_tail:
+                        sections.append(
+                            "Organized Snapshot:\n"
+                            f"{runtime_context_tail}"
+                        )
+                    sections.append(
+                        "Recent Raw Events:\n"
+                        f"{raw_event_tail}"
+                    )
+                    runtime_context_tail = "\n\n".join(sections).strip()
+
+            if runtime_context_tail:
+                self._logger.debug(
+                    "AI request: runtime context attached (%d chars).",
+                    len(runtime_context_tail),
+                )
+
             latest_speaker_text = ""
             for seg in reversed(transcript_snapshot):
                 if getattr(seg, "source", "") == "speaker":
@@ -1324,7 +1382,11 @@ class GhostMicApp:
                 self._window.ai_panel.show_error("AI engine is unavailable. Check dependencies/API settings.")
             return
 
-        accepted = self._ai_thread.request_response(transcript_snapshot, is_new_topic=is_new_topic)
+        accepted = self._ai_thread.request_response(
+            transcript_snapshot,
+            is_new_topic=is_new_topic,
+            runtime_context_tail=runtime_context_tail,
+        )
         if accepted:
             self._logger.info("AI request accepted and queued for generation.")
             if self._window:
@@ -1387,6 +1449,7 @@ class GhostMicApp:
     def _on_quit(self) -> None:
         self._logger.info("GhostMic: shutting down …")
         self._stop_audio_capture()
+        self._session_context_compactor.stop(timeout=1.5)
 
         # Graceful shutdown of all registered threads in reverse order
         orphans = self._thread_coordinator.shutdown(timeout_ms=5000)
@@ -1400,6 +1463,8 @@ class GhostMicApp:
         with self._transcript_lock:
             if self._transcript_history:
                 self._save_transcript()
+
+        self._session_context_store.cleanup(delete_file=True)
 
         # Save window position and UI state
         if self._window:

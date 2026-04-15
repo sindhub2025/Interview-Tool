@@ -1,6 +1,6 @@
 """Unit tests for AI context construction."""
 
-from ghostmic.core.ai_engine import AIThread
+from ghostmic.core.ai_engine import AIThread, DEFAULT_SYSTEM_PROMPT
 from ghostmic.core.transcription_engine import TranscriptSegment
 
 
@@ -43,6 +43,23 @@ def test_build_context_includes_session_context_line():
     )
 
     assert "[Session Context]: ETL Tester with 8 years of Experience" in context
+
+
+def test_build_context_includes_runtime_session_context_tail():
+    transcript = [_seg("How do you optimize SQL joins?", "speaker")]
+    runtime_tail = (
+        "[11:20:00] Screen Summary: Query plan shows expensive hash match\n"
+        "[11:20:07] AI Response: Check index selectivity"
+    )
+
+    context = AIThread._build_context(
+        transcript,
+        runtime_context_tail=runtime_tail,
+    )
+
+    assert "[Runtime Session Context]:" in context
+    assert "- [11:20:00] Screen Summary: Query plan shows expensive hash match" in context
+    assert "- [11:20:07] AI Response: Check index selectivity" in context
 
 
 def test_build_context_normalizes_sort_table_in_etl_context():
@@ -257,6 +274,28 @@ def test_build_system_prompt_includes_sql_policy_when_enabled():
     assert "SQL profile usage policy" in prompt
     assert "canonical function name" in prompt
     assert "same normalization approach for other context-backed terms" in prompt
+
+
+def test_default_system_prompt_mentions_sample_code_and_sql_queries():
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+
+    assert "sample script" in prompt
+    assert "sample code" in prompt
+    assert "sql query" in prompt
+    assert "generic example" in prompt
+    assert "fenced code block" in prompt
+
+
+def test_build_system_prompt_includes_generic_example_policy():
+    prompt = AIThread._build_system_prompt("Base prompt", "")
+
+    lowered = prompt.lower()
+
+    assert "sample script" in lowered
+    assert "sample code" in lowered
+    assert "sql query" in lowered
+    assert "generic example" in lowered
+    assert "fenced code block" in lowered
 
 
 def test_build_context_applies_resume_grounded_high_confidence_correction():
