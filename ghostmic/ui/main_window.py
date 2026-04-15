@@ -97,7 +97,7 @@ class TitleBar(QWidget):
         self._pin_btn.setFixedSize(22, 22)
         self._pin_btn.setCheckable(True)
         self._pin_btn.setChecked(True)
-        self._pin_btn.setToolTip("Pin on top")
+        self._pin_btn.setToolTip("Keep window always on top (toggle)")
         self._pin_btn.clicked.connect(lambda c: self.pin_toggled.emit(c))
         self._pin_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; }"
@@ -106,17 +106,20 @@ class TitleBar(QWidget):
         layout.addWidget(self._pin_btn)
 
         # Dock toggle button
-        self._dock_btn = QPushButton("Dock")
-        self._dock_btn.setFixedSize(44, 22)
-        self._dock_btn.setToolTip("Dock/Undock window")
+        self._dock_btn = QPushButton("⤓ Dock")
+        self._dock_btn.setFixedSize(88, 26)
+        self._dock_btn.setToolTip(
+            "Dock to a tiny stealth dot at screen top - click dot to restore"
+        )
         self._dock_btn.setStyleSheet(
             "QPushButton {"
             "  background-color: rgba(88, 166, 255, 0.16);"
             "  border: 1px solid rgba(88, 166, 255, 0.6);"
             "  border-radius: 6px;"
             "  color: #dce7ff;"
-            "  font-size: 9pt;"
+            "  font-size: 10pt;"
             "  font-weight: 600;"
+            "  padding: 0px 12px;"
             "}"
             "QPushButton:hover { background-color: rgba(88, 166, 255, 0.28); }"
         )
@@ -130,6 +133,7 @@ class TitleBar(QWidget):
             "QPushButton { background: transparent; border: none; color: #8b949e; }"
             "QPushButton:hover { color: white; }"
         )
+        min_btn.setToolTip("Minimize to taskbar")
         min_btn.clicked.connect(self.minimise_requested)
         layout.addWidget(min_btn)
 
@@ -140,6 +144,7 @@ class TitleBar(QWidget):
             "QPushButton { background: transparent; border: none; color: #8b949e; }"
             "QPushButton:hover { color: #f85149; }"
         )
+        close_btn.setToolTip("Quit GhostMic")
         close_btn.clicked.connect(self.close_requested)
         layout.addWidget(close_btn)
 
@@ -167,7 +172,58 @@ class TitleBar(QWidget):
 
     def set_docked(self, docked: bool) -> None:
         self._docked = docked
-        self._dock_btn.setText("Undock" if docked else "Dock")
+        self._dock_btn.setText("⤒ Undock" if docked else "⤓ Dock")
+
+
+class DockIndicator(QPushButton):
+    """Small dock pill that can be dragged to reposition the dock without
+    changing the mouse pointer.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setToolTip("")
+        self._drag_origin: Optional[QPoint] = None
+        self._window_start_pos: Optional[QPoint] = None
+        self._dragging = False
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Only prepare drag state if dragging is enabled
+            if getattr(self.window(), "_dock_draggable", True):
+                self._drag_origin = event.globalPosition().toPoint()
+                self._window_start_pos = self.window().pos()
+                self._dragging = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        # Only move the window when the user actually drags a few pixels
+        if self._drag_origin and getattr(self.window(), "_dock_draggable", True):
+            pos = event.globalPosition().toPoint()
+            delta = pos - self._drag_origin
+            if not self._dragging and (abs(delta.x()) > 3 or abs(delta.y()) > 3):
+                self._dragging = True
+
+            if self._dragging and self._window_start_pos is not None:
+                new_pos = self._window_start_pos + delta
+                # Move the whole window to follow the pill drag
+                self.window().move(new_pos)
+                return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._dragging:
+            # End drag and consume the release so it doesn't trigger a click
+            self._dragging = False
+            self._drag_origin = None
+            self._window_start_pos = None
+            event.accept()
+            return
+        self._drag_origin = None
+        self._window_start_pos = None
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -267,6 +323,31 @@ class MainWindow(QMainWindow):
         # Apply dark global styles
         self.setStyleSheet(MAIN_STYLE)
 
+        # Docked state indicator pill (shown only when docked)
+        self._dock_indicator = DockIndicator("👻")
+        self._dock_indicator.setObjectName("dock_restore_btn")
+        self._dock_indicator.setFixedSize(120, 20)
+        self._dock_indicator.setStyleSheet(
+            "QPushButton#dock_restore_btn {"
+            "  background-color: rgba(88, 166, 255, 0.85);"
+            "  color: #0d1117;"
+            "  border: 1px solid rgba(13, 17, 23, 0.45);"
+            "  border-radius: 10px;"
+            "  font-size: 9pt;"
+            "  font-weight: 600;"
+            "  padding: 0px 8px;"
+            "}"
+            "QPushButton#dock_restore_btn:hover {"
+            "  background-color: rgba(88, 166, 255, 0.96);"
+            "}"
+        )
+        self._dock_indicator.clicked.connect(self.exit_dock_mode)
+        self._dock_indicator.hide()
+        root_layout.addWidget(
+            self._dock_indicator,
+            alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+        )
+
         # Title bar
         self._title_bar = TitleBar()
         self._title_bar.close_requested.connect(self._on_close)
@@ -327,12 +408,21 @@ class MainWindow(QMainWindow):
         self._splitter.setSizes([int(total_h * 0.20), int(total_h * 0.80)])
 
     def _set_root_style(self, docked: bool) -> None:
-        radius = 0 if docked else 12
+        if docked:
+            self._root.setStyleSheet(
+                "#root_widget {"
+                "  background-color: transparent;"
+                "  border: none;"
+                "  border-radius: 10px;"
+                "}"
+            )
+            return
+
         self._root.setStyleSheet(
             "#root_widget {"
             "  background-color: rgba(26, 26, 46, 242);"  # #1a1a2e @ 95%
             "  border: 1px solid #333366;"
-            f"  border-radius: {radius}px;"
+            "  border-radius: 12px;"
             "}"
         )
 
@@ -448,6 +538,8 @@ class MainWindow(QMainWindow):
         font_size = ui.get("font_size", 11)
         font = QFont("Segoe UI", font_size)
         QApplication.setFont(font)
+        # Allow optional toggling of dock dragging behavior
+        self._dock_draggable = bool(ui.get("dock_draggable", True))
         self._dictation_idle_ms = int(
             self._config.get("dictation", {}).get("commit_idle_ms", 1200)
         )
@@ -743,13 +835,15 @@ class MainWindow(QMainWindow):
         if screen is None:
             return
 
-        # Make dock a small 5x5 square centered horizontally at the very top
+        # Make dock a visible pill centered at the top of the active screen.
         available = screen.availableGeometry()
-        size = 5
-        x = available.x() + (available.width() - size) // 2
+        dock_width = 120
+        dock_height = 20
+        x = available.x() + (available.width() - dock_width) // 2
         y = available.y()
 
-        self.setGeometry(x, y, size, size)
+        # Do not set a window tooltip while docked; keep the dock pill passive.
+        self.setGeometry(x, y, dock_width, dock_height)
         self.show()
         self.raise_()
         self.activateWindow()
@@ -757,7 +851,8 @@ class MainWindow(QMainWindow):
 
     def _set_docked_ui(self, docked: bool) -> None:
         self._set_root_style(docked)
-        # Hide the full title bar when docked so the window can be very small
+        self._dock_indicator.setVisible(docked)
+        # Hide full controls when docked so only the restore pill remains.
         self._title_bar.setVisible(not docked)
         self._title_separator.setVisible(not docked)
         self._controls.setVisible(not docked)

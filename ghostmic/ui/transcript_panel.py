@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ghostmic.domain import TranscriptSegment
-from ghostmic.ui.styles import ACCENT_BLUE, FONT, TEXT_SECONDARY
+from ghostmic.ui.styles import FONT, FONT_SIZE_SMALL, TEXT_SECONDARY
 
 
 class SegmentBubble(QFrame):
@@ -41,12 +41,12 @@ class SegmentBubble(QFrame):
         align = Qt.AlignmentFlag.AlignLeft if is_speaker else Qt.AlignmentFlag.AlignRight
 
         self.setStyleSheet(
-            f"background-color: {bg}; border-radius: 8px; padding: 4px 8px;"
+            f"background-color: {bg}; border-radius: 8px; padding: 8px 12px;"
         )
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(2)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+        layout.setContentsMargins(10, 6, 10, 6)
 
         # Text
         text_label = QLabel(self._segment.text)
@@ -59,7 +59,9 @@ class SegmentBubble(QFrame):
         ts = time.strftime("%H:%M:%S", time.localtime(self._segment.timestamp))
         ts_label = QLabel(ts)
         ts_label.setAlignment(align)
-        ts_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9pt;")
+        ts_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: {FONT_SIZE_SMALL}pt;"
+        )
         layout.addWidget(ts_label)
 
 
@@ -83,8 +85,8 @@ class TranscriptPanel(QScrollArea):
 
         self._content = QWidget()
         self._layout = QVBoxLayout(self._content)
-        self._layout.setSpacing(6)
-        self._layout.setContentsMargins(6, 6, 6, 6)
+        self._layout.setSpacing(10)
+        self._layout.setContentsMargins(8, 8, 8, 8)
         self._layout.addStretch()
         self.setWidget(self._content)
 

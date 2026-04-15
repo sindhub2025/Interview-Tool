@@ -44,8 +44,8 @@ class AIResponseCard(QFrame):
             "border-radius: 8px; padding: 4px;"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
 
         # Top row: title + buttons
         header = QHBoxLayout()
@@ -57,8 +57,11 @@ class AIResponseCard(QFrame):
         header.addStretch()
 
         self._copy_btn = QPushButton("Copy")
-        self._copy_btn.setFixedHeight(24)
-        self._copy_btn.setFixedWidth(54)
+        self._copy_btn.setFixedSize(66, 26)
+        self._copy_btn.setStyleSheet(
+            "font-size: 10pt; font-weight: 600; padding: 0px 12px;"
+        )
+        self._copy_btn.setToolTip("Copy AI response")
         self._copy_btn.clicked.connect(self._copy)
         header.addWidget(self._copy_btn)
         layout.addLayout(header)
@@ -149,7 +152,7 @@ class AIResponsePanel(QWidget):
         header = QFrame()
         header.setObjectName("ai_panel_header")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 4, 8, 4)
+        header_layout.setContentsMargins(10, 6, 10, 6)
         header_layout.setSpacing(6)
 
         title = QLabel("AI Responses")
@@ -158,8 +161,11 @@ class AIResponsePanel(QWidget):
         header_layout.addStretch()
 
         self._toggle_btn = QPushButton("Hide")
-        self._toggle_btn.setFixedHeight(22)
-        self._toggle_btn.setFixedWidth(54)
+        self._toggle_btn.setFixedSize(72, 26)
+        self._toggle_btn.setStyleSheet(
+            "font-size: 10pt; font-weight: 600; padding: 0px 12px;"
+        )
+        self._toggle_btn.setToolTip("Collapse / expand AI response area")
         self._toggle_btn.clicked.connect(self.toggle_visibility)
         header_layout.addWidget(self._toggle_btn)
 
@@ -193,11 +199,13 @@ class AIResponsePanel(QWidget):
 
         self._ask_btn = QPushButton("Ask")
         self._ask_btn.setFixedHeight(26)
+        self._ask_btn.setToolTip("Ask AI a new question")
         self._ask_btn.clicked.connect(self._on_ask_clicked)
         input_row.addWidget(self._ask_btn)
 
         self._refine_btn = QPushButton("Refine")
         self._refine_btn.setFixedHeight(26)
+        self._refine_btn.setToolTip("Refine the last AI response with your note")
         self._refine_btn.clicked.connect(self._on_refine_clicked)
         input_row.addWidget(self._refine_btn)
 

@@ -14,6 +14,7 @@ TEXT_PRIMARY = "#e6edf3"
 TEXT_SECONDARY = "#8b949e"
 FONT = "Segoe UI"
 FONT_SIZE = 11
+FONT_SIZE_SMALL = 10  # Used for timestamps and secondary labels
 
 MAIN_STYLE = f"""
 /* ─── Global ──────────────────────────────────────────────────────── */
@@ -220,8 +221,9 @@ QToolTip {{
     background-color: {BG_CARD};
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER};
-    border-radius: 4px;
-    padding: 4px;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: {FONT_SIZE_SMALL}pt;
 }}
 
 /* ─── Status bar ──────────────────────────────────────────────────── */

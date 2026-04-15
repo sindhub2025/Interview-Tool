@@ -81,13 +81,13 @@ class ControlsBar(QWidget):
         super().__init__(parent)
         self._recording = False
         self._api_connected = False
-        self._api_backend = ""
+        self._api_backend = "Groq"
         self._build_ui()
 
     def _build_ui(self) -> None:
-        self.setFixedHeight(50)
+        self.setFixedHeight(56)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
 
         # Record button
@@ -95,7 +95,7 @@ class ControlsBar(QWidget):
         self._record_btn.setObjectName("record_btn")
         self._record_btn.setFixedSize(36, 36)
         self._record_btn.setCheckable(True)
-        self._record_btn.setToolTip("Start/Stop recording (Ctrl+Shift+G)")
+        self._record_btn.setToolTip("Start / Stop audio capture  [Ctrl+Shift+G]")
         self._record_btn.clicked.connect(self._on_record_clicked)
         layout.addWidget(self._record_btn)
 
@@ -126,14 +126,14 @@ class ControlsBar(QWidget):
         settings_btn = QPushButton("⚙")
         settings_btn.setObjectName("settings_btn")
         settings_btn.setFixedSize(32, 32)
-        settings_btn.setToolTip("Settings")
+        settings_btn.setToolTip("Open Settings (audio, AI, hotkeys, appearance)")
         settings_btn.clicked.connect(self._on_settings_clicked)
         layout.addWidget(settings_btn)
 
         # Screen analysis button
-        self._screenshot_btn = QPushButton("📷")
+        self._screenshot_btn = QPushButton("Capture")
         self._screenshot_btn.setObjectName("screenshot_btn")
-        self._screenshot_btn.setFixedSize(32, 32)
+        self._screenshot_btn.setFixedSize(90, 32)
         self._update_screenshot_tooltip()
         self._screenshot_btn.clicked.connect(self._on_screenshot_clicked)
         layout.addWidget(self._screenshot_btn)
@@ -174,14 +174,14 @@ class ControlsBar(QWidget):
     def set_api_status(self, connected: bool, backend: str = "Groq") -> None:
         """Update the API connection status indicator."""
         self._api_connected = connected
-        self._api_backend = backend or "Groq"
+        self._api_backend = (backend.strip() if isinstance(backend, str) else backend) or "Groq"
         self._api_status.set_status(connected, backend)
         self._update_screenshot_tooltip()
 
     def set_screen_analysis_busy(self, busy: bool) -> None:
         """Disable the screenshot action while a request is in flight."""
         self._screenshot_btn.setEnabled(not busy)
-        self._screenshot_btn.setText("⌛" if busy else "📷")
+        self._screenshot_btn.setText("Analyzing" if busy else "Capture")
 
     def current_mode(self) -> str:
         return self._mode_combo.currentText()
@@ -201,9 +201,6 @@ class ControlsBar(QWidget):
         self.screenshot_requested.emit()
 
     def _update_screenshot_tooltip(self) -> None:
-        backend_label = self._api_backend.strip()
-        if backend_label:
-            tooltip = f"Take silent full-screen screenshot and analyze with {backend_label}"
-        else:
-            tooltip = "Take silent full-screen screenshot and analyze"
+        backend_label = self._api_backend
+        tooltip = f"Capture screen & analyze with {backend_label}  [no shortcut]"
         self._screenshot_btn.setToolTip(tooltip)
