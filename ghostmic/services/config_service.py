@@ -48,6 +48,7 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     # Audio
     "audio.sample_rate":       (int,   16000,    lambda v: v in (8000, 16000, 44100, 48000)),
     "audio.channels":          (int,   1,        lambda v: v in (1, 2)),
+    "audio.capture_mic":       (bool,  False,    None),
     # Transcription
     "transcription.language":  (str,   "en",     None),
     "transcription.model_size": (str,  "base.en", None),

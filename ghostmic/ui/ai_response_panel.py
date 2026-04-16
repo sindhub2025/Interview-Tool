@@ -218,22 +218,37 @@ class AIResponsePanel(QWidget):
         from ghostmic.utils.logger import get_logger
         logger = get_logger(__name__)
         logger.info("AIResponsePanel.start_response() called")
-        self.clear_responses()
         self._remove_thinking()
+        card = self._active_card
+        if card is None and self._cards:
+            card = self._cards[-1]
+
+        if card is not None and card.parent() is self._responses_container:
+            self._active_card = card
+            self._cards = [card]
+            card.set_text("")
+            self._responses_layout.setStretchFactor(card, 1)
+            self._scroll_to_bottom()
+            logger.info(
+                "AIResponsePanel.start_response() - reused existing card, layout count=%d",
+                self._responses_layout.count(),
+            )
+            return
+
         card = AIResponseCard(title=title, parent=self._responses_container)
         self._active_card = card
         self._cards = [card]
         self._responses_layout.addWidget(card, 1)
-        
+
         logger.info(
             "AIResponsePanel.start_response() - card inserted, layout count=%d",
             self._responses_layout.count(),
         )
-        
+
         # Verify card is visible
-        logger.info("AIResponsePanel.start_response() - card visible=%s, card height=%d", 
+        logger.info("AIResponsePanel.start_response() - card visible=%s, card height=%d",
                    card.isVisible(), card.height())
-        
+
         self._scroll_to_bottom()
         logger.info("AIResponsePanel.start_response() - card added to layout")
 
@@ -257,10 +272,17 @@ class AIResponsePanel(QWidget):
         
         self._remove_thinking()
         
-        # If no active card yet, create one before setting text
+        # If no active card yet, reuse the most recent card instead of
+        # destroying and recreating the panel contents.
         if self._active_card is None:
-            logger.warning("AIResponsePanel.finish_response() - no active card, creating one")
-            self.start_response()
+            if self._cards:
+                self._active_card = self._cards[-1]
+            else:
+                logger.warning("AIResponsePanel.finish_response() - no active card, creating one")
+                card = AIResponseCard(title="AI Suggestion", parent=self._responses_container)
+                self._active_card = card
+                self._cards = [card]
+                self._responses_layout.addWidget(card, 1)
         
         # Now populate the card with the response
         if self._active_card and full_text is not None:

@@ -328,6 +328,39 @@ def list_input_devices() -> list[dict]:
         return []
 
 
+def prime_input_device(
+    device_index: Optional[int] = None,
+    sample_rate: int = SAMPLE_RATE,
+    warmup_reads: int = 20,
+) -> tuple[bool, str]:
+    """Open the microphone briefly to initialize driver/permission state.
+
+    Returns:
+        (success, detail)
+    """
+    try:
+        import sounddevice as sd  # type: ignore[import]
+    except ImportError:
+        return False, "sounddevice not installed"
+
+    reads = max(1, int(warmup_reads))
+    try:
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=CHANNELS,
+            dtype="float32",
+            device=device_index,
+            blocksize=CHUNK_FRAMES,
+        ) as stream:
+            for _ in range(reads):
+                stream.read(CHUNK_FRAMES)
+        logger.info("Mic prime succeeded on device %s.", device_index)
+        return True, "ok"
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Mic prime failed on device %s: %s", device_index, exc)
+        return False, str(exc)
+
+
 def list_loopback_devices() -> list[dict]:
     """Return all WASAPI loopback devices."""
     try:

@@ -124,7 +124,12 @@ def _default_config() -> dict:
             "context_compaction_temperature": 0.1,
             "context_compaction_max_tokens": 320,
         },
-        "audio": {"input_device": None, "loopback_device": None, "sample_rate": 16000},
+        "audio": {
+            "input_device": None,
+            "loopback_device": None,
+            "sample_rate": 16000,
+            "capture_mic": False,
+        },
         "transcription": {
             "model_size": "small.en",
             "compute_type": "int8",
@@ -318,6 +323,7 @@ class GhostMicApp:
         self._resume_upload_worker = None
         self._ui_dispatcher = None
         self._audio_backends_prewarmed = False
+        self._mic_prime_in_progress = False
         self._auto_speaker_silence_generation = 0
         self._auto_speaker_last_signature = ""
         self._auto_speaker_last_trigger_ts = 0.0
@@ -402,8 +408,10 @@ class GhostMicApp:
         self._window.dock_state_changed.connect(self._on_window_dock_state_changed)
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
+        self._window.controls.mic_toggled.connect(self._on_mic_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)
         self._window.controls.screenshot_requested.connect(self._on_screen_analysis_requested)
+        self._window.controls.set_mic_enabled(self._is_mic_capture_enabled())
         self._window.dictation_committed.connect(self._on_dictation_committed)
         self._window.ai_panel.text_prompt_submitted.connect(self._on_ai_text_prompt_submitted)
         self._window.transcript_panel.speaker_text_edited.connect(self._on_speaker_transcript_edited)
@@ -624,6 +632,80 @@ class GhostMicApp:
         except Exception as exc:  # pylint: disable=broad-except
             self._logger.debug("Audio backend prewarm skipped: %s", exc)
 
+    def _is_mic_capture_enabled(self) -> bool:
+        audio_cfg = self._config.get("audio", {})
+        return bool(audio_cfg.get("capture_mic", False))
+
+    def _prime_mic_capture_async(self) -> None:
+        """Warm microphone backend/device so toggle-on feels immediate."""
+        if getattr(self, "_mic_prime_in_progress", False):
+            return
+
+        self._mic_prime_in_progress = True
+
+        def _worker() -> None:
+            detail = ""
+            ok = False
+            try:
+                from ghostmic.core.audio_capture import prime_input_device
+
+                audio_cfg = self._config.get("audio", {})
+                ok, detail = prime_input_device(
+                    device_index=audio_cfg.get("input_device"),
+                    sample_rate=int(audio_cfg.get("sample_rate", 16_000)),
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                detail = str(exc)
+                ok = False
+            finally:
+                self._mic_prime_in_progress = False
+
+            if ok:
+                self._logger.info("Microphone primed for fast start.")
+            else:
+                self._logger.warning("Microphone prime failed: %s", detail)
+
+        threading.Thread(
+            target=_worker,
+            name="mic-prime",
+            daemon=True,
+        ).start()
+
+    def _enable_mic_capture_live(self) -> bool:
+        """Enable microphone capture without restarting speaker/VAD threads."""
+        if self._mic_thread and hasattr(self._mic_thread, "isRunning"):
+            try:
+                if self._mic_thread.isRunning():
+                    return True
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+        if not self._vad_thread:
+            return False
+
+        try:
+            from ghostmic.core.audio_capture import MicCaptureThread
+
+            audio_cfg = self._config.get("audio", {})
+            self._mic_thread = MicCaptureThread(
+                self._buffer,
+                device_index=audio_cfg.get("input_device"),
+            )
+            self._mic_thread.audio_chunk_ready.connect(self._vad_thread.push_chunk)
+            self._thread_coordinator.register("mic", self._mic_thread)
+            self._mic_thread.start()
+            self._logger.info("Microphone capture enabled live during recording.")
+            return True
+        except ImportError as exc:
+            self._logger.warning("Microphone capture unavailable: %s", exc)
+            return False
+
+    def _disable_mic_capture_live(self) -> None:
+        """Disable microphone capture without touching speaker/VAD threads."""
+        self._thread_coordinator.stop_one("mic", timeout_ms=2000)
+        self._mic_thread = None
+        self._logger.info("Microphone capture disabled live during recording.")
+
     def _create_audio_threads(self) -> bool:
         """Create fresh audio capture and VAD threads for a new recording.
 
@@ -659,14 +741,19 @@ class GhostMicApp:
             )
             self._thread_coordinator.register("sys_audio", self._sys_audio_thread)
 
-            self._mic_thread = MicCaptureThread(
-                self._buffer,
-                device_index=audio_cfg.get("input_device"),
-            )
-            self._mic_thread.audio_chunk_ready.connect(
-                self._vad_thread.push_chunk
-            )
-            self._thread_coordinator.register("mic", self._mic_thread)
+            self._mic_thread = None
+            if self._is_mic_capture_enabled():
+                self._mic_thread = MicCaptureThread(
+                    self._buffer,
+                    device_index=audio_cfg.get("input_device"),
+                )
+                self._mic_thread.audio_chunk_ready.connect(
+                    self._vad_thread.push_chunk
+                )
+                self._thread_coordinator.register("mic", self._mic_thread)
+                self._logger.info("Microphone capture enabled for this recording session.")
+            else:
+                self._logger.info("Microphone capture disabled; speaker-only recording active.")
 
             self._logger.info("Recreated audio/VAD threads for new recording session.")
             return True
@@ -1294,6 +1381,7 @@ class GhostMicApp:
         _save_config(new_config, self._config_path)
         if self._window:
             self._window.update_config(new_config)
+            self._window.controls.set_mic_enabled(self._is_mic_capture_enabled())
         self._refresh_ai_runtime_context()
         self._session_context_compactor.update_ai_config(new_config.get("ai", {}))
         if self._hotkey_manager:
@@ -1315,6 +1403,52 @@ class GhostMicApp:
                         )
                     if self._tray:
                         self._tray.set_recording(False)
+
+    def _on_mic_toggled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        audio_cfg = self._config.setdefault("audio", {})
+        if bool(audio_cfg.get("capture_mic", False)) == enabled:
+            return
+
+        audio_cfg["capture_mic"] = enabled
+        _save_config(self._config, self._config_path)
+
+        if self._window:
+            self._window.controls.set_status(
+                "Microphone capture enabled" if enabled else "Speaker-only mode enabled",
+                "#58a6ff",
+            )
+
+        if not self._recording_active:
+            if enabled:
+                self._prime_mic_capture_async()
+            return
+
+        if enabled and self._enable_mic_capture_live():
+            if self._window:
+                self._window.controls.set_status("Microphone capture enabled", "#3fb950")
+            return
+
+        if not enabled:
+            self._disable_mic_capture_live()
+            if self._window:
+                self._window.controls.set_status("Speaker-only mode enabled", "#58a6ff")
+            return
+
+        self._logger.info(
+            "Live mic enable failed; falling back to full capture restart."
+        )
+        self._stop_audio_capture()
+        if not self._start_audio_capture():
+            self._recording_active = False
+            if self._window:
+                self._window.controls.set_recording(False)
+                self._window.controls.set_status(
+                    "Could not restart capture after mic toggle.",
+                    "#f85149",
+                )
+            if self._tray:
+                self._tray.set_recording(False)
 
     def _on_mode_changed(self, mode: str) -> None:
         self._logger.info("Mode changed to %s", mode)
@@ -1911,7 +2045,6 @@ class GhostMicApp:
         if accepted:
             self._logger.info("AI request accepted and queued for generation.")
             if self._window:
-                self._window.ai_panel.start_response()
                 self._window.controls.set_status("Generating response…", "#58a6ff")
             return
 
