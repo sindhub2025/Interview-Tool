@@ -298,6 +298,22 @@ def test_build_system_prompt_includes_generic_example_policy():
     assert "fenced code block" in lowered
 
 
+def test_build_system_prompt_includes_selection_preference_policy():
+    prompt = AIThread._build_system_prompt("Base prompt", "")
+
+    lowered = prompt.lower()
+
+    assert "selection / preference" in lowered
+    assert "compare both options with concise pros and cons for each" in lowered
+    assert "likely interview expectations" in lowered
+
+
+def test_classify_follow_up_type_detects_preference_over_other_prompt():
+    question = "May I know why do you prefer one thing over other"
+
+    assert AIThread._classify_follow_up_type(question) == "selection / preference"
+
+
 def test_build_context_applies_resume_grounded_high_confidence_correction():
     transcript = [_seg("I worked at Micro hard as a senior data engineer.", "speaker")]
     resume_profile = {

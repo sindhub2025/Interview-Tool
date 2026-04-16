@@ -349,6 +349,7 @@ class GhostMicApp:
         app = QApplication(sys.argv)
         app.setApplicationName("GhostMic")
         app.setQuitOnLastWindowClosed(False)
+        app.setOverrideCursor(Qt.CursorShape.ArrowCursor)
 
         from ghostmic.ui.styles import MAIN_STYLE
         app.setStyleSheet(MAIN_STYLE)
@@ -1974,6 +1975,9 @@ class GhostMicApp:
 
     def _on_quit(self) -> None:
         self._logger.info("GhostMic: shutting down …")
+        from PyQt6.QtWidgets import QApplication
+
+        QApplication.restoreOverrideCursor()
         if self._question_normalization_worker and self._question_normalization_worker.isRunning():
             self._question_normalization_worker.requestInterruption()
             self._question_normalization_worker.wait(1500)

@@ -29,7 +29,6 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor,
-    QCursor,
     QFont,
     QMouseEvent,
     QPainter,
@@ -446,14 +445,6 @@ class MainWindow(QMainWindow):
             widget.setMouseTracking(True)
             widget.installEventFilter(self)
 
-    def _is_resize_cursor(self, cursor: Qt.CursorShape) -> bool:
-        return cursor in {
-            Qt.CursorShape.SizeVerCursor,
-            Qt.CursorShape.SizeHorCursor,
-            Qt.CursorShape.SizeFDiagCursor,
-            Qt.CursorShape.SizeBDiagCursor,
-        }
-
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj in self._resize_filter_targets and isinstance(event, QMouseEvent):
             event_type = event.type()
@@ -489,11 +480,6 @@ class MainWindow(QMainWindow):
                     delta = event.globalPosition().toPoint() - self._resize_origin
                     self._do_resize(delta)
                     return True
-
-                if edge:
-                    obj.setCursor(self._cursor_for_edge(edge))
-                elif self._is_resize_cursor(obj.cursor().shape()):
-                    obj.unsetCursor()
 
             if event_type == QEvent.Type.MouseButtonRelease and self._resize_edge:
                 self._resize_edge = None
@@ -659,19 +645,6 @@ class MainWindow(QMainWindow):
             return "bottom"
         return None
 
-    def _cursor_for_edge(self, edge: str) -> Qt.CursorShape:
-        mapping = {
-            "top": Qt.CursorShape.SizeVerCursor,
-            "bottom": Qt.CursorShape.SizeVerCursor,
-            "left": Qt.CursorShape.SizeHorCursor,
-            "right": Qt.CursorShape.SizeHorCursor,
-            "top-left": Qt.CursorShape.SizeFDiagCursor,
-            "bottom-right": Qt.CursorShape.SizeFDiagCursor,
-            "top-right": Qt.CursorShape.SizeBDiagCursor,
-            "bottom-left": Qt.CursorShape.SizeBDiagCursor,
-        }
-        return mapping.get(edge, Qt.CursorShape.ArrowCursor)
-
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._docked and event.button() == Qt.MouseButton.LeftButton:
             self.exit_dock_mode()
@@ -687,12 +660,6 @@ class MainWindow(QMainWindow):
         if self._resize_edge and self._resize_origin and self._resize_geometry:
             delta = event.globalPosition().toPoint() - self._resize_origin
             self._do_resize(delta)
-        else:
-            edge = self._get_resize_edge(event.position().toPoint())
-            if edge:
-                self.setCursor(self._cursor_for_edge(edge))
-            else:
-                self.setCursor(Qt.CursorShape.ArrowCursor)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:

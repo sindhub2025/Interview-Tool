@@ -304,6 +304,8 @@ SELECTION_FOLLOW_UP_PATTERNS: Tuple[str, ...] = (
     r"\bwhat(?:'s| is) (?:your|the) (?:preference|recommendation|pick|choice)\b",
     r"\bif you had to (?:choose|pick)\b",
     r"\bwhat(?:'s| is) (?:the|your) (?:go[- ]to|default|preferred|favorite)\b",
+    r"\bwhy (?:do|would|did) (?:you|we|i) prefer\b",
+    r"\bprefer\b.*\bover\b",
 )
 
 FOLLOW_UP_CONTEXT_PREFIX = "Previous AI answer context:"
@@ -1930,8 +1932,10 @@ class AIThread(QThread):  # type: ignore[misc]
             "described scenario.\n"
             "  • 'comparison' → clearly contrast the items, highlighting "
             "key differences.\n"
-            "  • 'selection / preference' → give a recommendation with "
-            "justification.\n"
+            "  • 'selection / preference' → compare both options with "
+            "concise pros and cons for each, then give a clear "
+            "recommendation with a brief rationale tied to likely "
+            "interview expectations.\n"
             "  • 'pros and cons' → list advantages and disadvantages "
             "concisely.\n"
             "  • 'summarization' → provide a brief recap of the key "
