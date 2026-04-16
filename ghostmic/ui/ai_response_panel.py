@@ -61,7 +61,6 @@ class AIResponseCard(QFrame):
         self._copy_btn.setStyleSheet(
             "font-size: 10pt; font-weight: 600; padding: 0px 12px;"
         )
-        self._copy_btn.setToolTip("Copy AI response")
         self._copy_btn.clicked.connect(self._copy)
         header.addWidget(self._copy_btn)
         layout.addLayout(header)
@@ -165,7 +164,6 @@ class AIResponsePanel(QWidget):
         self._toggle_btn.setStyleSheet(
             "font-size: 10pt; font-weight: 600; padding: 0px 12px;"
         )
-        self._toggle_btn.setToolTip("Collapse / expand AI response area")
         self._toggle_btn.clicked.connect(self.toggle_visibility)
         header_layout.addWidget(self._toggle_btn)
 
@@ -199,13 +197,11 @@ class AIResponsePanel(QWidget):
 
         self._ask_btn = QPushButton("Ask")
         self._ask_btn.setFixedHeight(26)
-        self._ask_btn.setToolTip("Ask AI a new question")
         self._ask_btn.clicked.connect(self._on_ask_clicked)
         input_row.addWidget(self._ask_btn)
 
         self._refine_btn = QPushButton("Refine")
         self._refine_btn.setFixedHeight(26)
-        self._refine_btn.setToolTip("Refine the last AI response with your note")
         self._refine_btn.clicked.connect(self._on_refine_clicked)
         input_row.addWidget(self._refine_btn)
 

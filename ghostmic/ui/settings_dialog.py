@@ -190,7 +190,6 @@ class SettingsDialog(QDialog):
         self._beam_size_spin = QSpinBox()
         self._beam_size_spin.setRange(1, 10)
         self._beam_size_spin.setValue(5)
-        self._beam_size_spin.setToolTip("Lower values are faster; higher values can improve accuracy.")
         form.addRow("Beam size:", self._beam_size_spin)
 
         self._remote_fallback_check = QCheckBox(
@@ -224,7 +223,6 @@ class SettingsDialog(QDialog):
         self._openai_key_toggle = QPushButton("👁")
         self._openai_key_toggle.setFixedSize(28, 28)
         self._openai_key_toggle.setCheckable(True)
-        self._openai_key_toggle.setToolTip("Show/hide API key")
         self._openai_key_toggle.setStyleSheet("QPushButton { background: transparent; border: none; }")
         self._openai_key_toggle.toggled.connect(
             lambda checked: self._openai_api_key_edit.setEchoMode(
@@ -250,7 +248,6 @@ class SettingsDialog(QDialog):
         self._groq_key_toggle = QPushButton("👁")
         self._groq_key_toggle.setFixedSize(28, 28)
         self._groq_key_toggle.setCheckable(True)
-        self._groq_key_toggle.setToolTip("Show/hide API key")
         self._groq_key_toggle.setStyleSheet("QPushButton { background: transparent; border: none; }")
         self._groq_key_toggle.toggled.connect(
             lambda checked: self._groq_api_key_edit.setEchoMode(

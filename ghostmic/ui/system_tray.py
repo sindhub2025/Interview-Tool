@@ -62,7 +62,6 @@ class SystemTrayIcon(QSystemTrayIcon):
         self._recording = False
         self._build_menu()
         self.activated.connect(self._on_activated)
-        self.setToolTip("GhostMic — AI Meeting Assistant")
         self.show()
 
     # ------------------------------------------------------------------
@@ -110,10 +109,8 @@ class SystemTrayIcon(QSystemTrayIcon):
         self._recording = recording
         if recording:
             self._toggle_action.setText("⏹  Stop Recording")
-            self.setToolTip("GhostMic — Recording…")
         else:
             self._toggle_action.setText("⏺  Start Recording")
-            self.setToolTip("GhostMic — AI Meeting Assistant")
 
     def set_window_visible(self, visible: bool) -> None:
         self._show_action.setText(

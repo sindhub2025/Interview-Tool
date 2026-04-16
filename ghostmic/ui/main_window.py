@@ -97,7 +97,6 @@ class TitleBar(QWidget):
         self._pin_btn.setFixedSize(22, 22)
         self._pin_btn.setCheckable(True)
         self._pin_btn.setChecked(True)
-        self._pin_btn.setToolTip("Keep window always on top (toggle)")
         self._pin_btn.clicked.connect(lambda c: self.pin_toggled.emit(c))
         self._pin_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; }"
@@ -108,9 +107,6 @@ class TitleBar(QWidget):
         # Dock toggle button
         self._dock_btn = QPushButton("⤓ Dock")
         self._dock_btn.setFixedSize(88, 26)
-        self._dock_btn.setToolTip(
-            "Dock to a tiny stealth dot at screen top - click dot to restore"
-        )
         self._dock_btn.setStyleSheet(
             "QPushButton {"
             "  background-color: rgba(88, 166, 255, 0.16);"
@@ -133,7 +129,6 @@ class TitleBar(QWidget):
             "QPushButton { background: transparent; border: none; color: #8b949e; }"
             "QPushButton:hover { color: white; }"
         )
-        min_btn.setToolTip("Minimize to taskbar")
         min_btn.clicked.connect(self.minimise_requested)
         layout.addWidget(min_btn)
 
@@ -144,7 +139,6 @@ class TitleBar(QWidget):
             "QPushButton { background: transparent; border: none; color: #8b949e; }"
             "QPushButton:hover { color: #f85149; }"
         )
-        close_btn.setToolTip("Quit GhostMic")
         close_btn.clicked.connect(self.close_requested)
         layout.addWidget(close_btn)
 
@@ -183,7 +177,6 @@ class DockIndicator(QPushButton):
     def __init__(self, text: str = "", parent=None) -> None:
         super().__init__(text, parent)
         self.setCursor(Qt.CursorShape.ArrowCursor)
-        self.setToolTip("")
         self._drag_origin: Optional[QPoint] = None
         self._window_start_pos: Optional[QPoint] = None
         self._dragging = False
