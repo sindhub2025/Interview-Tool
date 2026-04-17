@@ -539,6 +539,7 @@ class MainWindow(QMainWindow):
                 ui.get("window_width", 420),
                 ui.get("window_height", 650),
             )
+            QTimer.singleShot(0, self._apply_splitter_proportions)
         self._dictation_idle_ms = int(config.get("dictation", {}).get("commit_idle_ms", 1200))
 
     @property
@@ -719,6 +720,8 @@ class MainWindow(QMainWindow):
         if self._dock_needs_apply:
             self._dock_needs_apply = False
             QTimer.singleShot(0, self._apply_docked_state)
+        elif not self._docked and not self._compact_mode:
+            QTimer.singleShot(0, self._apply_splitter_proportions)
         QTimer.singleShot(100, self._apply_stealth)
 
     # ------------------------------------------------------------------

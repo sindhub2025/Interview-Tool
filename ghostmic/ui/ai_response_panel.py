@@ -50,13 +50,13 @@ def _code_block_style(language: str) -> tuple[str, str, str]:
 def _render_code_block(language: str, code: str) -> str:
     label, accent, background = _code_block_style(language)
     return (
-        "<div style='margin:12px 0 14px 0;'>"
-        f"<div style='margin:0 0 4px 2px; color:{accent}; font-size:9pt; "
-        f"font-weight:700; letter-spacing:0.5px;'>{escape(label)}</div>"
-        f"<pre style='margin:0; padding:10px 12px; border:1px solid {accent}; "
+        "<div style='margin:12px 0 16px 0;'>"
+        f"<div style='margin:0 0 6px 0; color:{accent}; font-size:10pt; "
+        f"font-weight:700; letter-spacing:0.1px;'>{escape(label)}</div>"
+        f"<pre style='margin:0; padding:12px 14px; line-height:1.5; border:1px solid {accent}; "
         f"border-radius:8px; background-color:{background}; color:{TEXT_PRIMARY}; "
         'font-family:"Consolas","Cascadia Mono","Courier New",monospace; '
-        "font-size:10pt; white-space:pre-wrap;'>"
+        "font-size:11pt; white-space:pre-wrap;'>"
         f"{escape(code)}</pre>"
         "</div>"
     )

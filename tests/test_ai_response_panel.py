@@ -60,3 +60,7 @@ def test_render_response_html_highlights_sql_and_python_code_blocks() -> None:
     assert "#10241b" in lowered
     assert "#101826" in lowered
     assert "select id, name" in lowered
+    assert html.count("font-size:11pt") >= 3
+    assert html.count("font-size:10pt") >= 2
+    assert html.count("line-height:1.5") >= 2
+    assert "padding:12px 14px" in html
