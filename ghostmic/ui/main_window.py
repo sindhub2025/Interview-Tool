@@ -18,9 +18,12 @@ import sys
 from typing import Optional
 
 from PyQt6.QtCore import (
+    QEasingCurve,
     QEvent,
     QObject,
     QPoint,
+    QParallelAnimationGroup,
+    QPropertyAnimation,
     QRect,
     QSize,
     Qt,
@@ -44,6 +47,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSizePolicy,
+    QPlainTextEdit,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -235,6 +239,14 @@ class MainWindow(QMainWindow):
         self._config = config
         self._config_path = config_path
         self._compact_mode = False
+        self._qa_revealed = False
+        self._qa_animation: QParallelAnimationGroup | None = None
+        self._expanded_window_size = QSize(420, 650)
+        self._collapsed_window_height = 90
+        self._latest_question_text = ""
+        self._move_origin: Optional[QPoint] = None
+        self._move_window_origin: Optional[QPoint] = None
+        self._move_started = False
         self._docked = bool(self._config.get("ui", {}).get("docked", False))
         self._dock_needs_apply = self._docked
         self._dock_transition_in_progress = False
@@ -277,8 +289,9 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("GhostMic")
 
-        w = ui.get("window_width", 420)
-        h = ui.get("window_height", 650)
+        w = max(420, int(ui.get("window_width", 420) or 420))
+        h = max(460, int(ui.get("window_height", 650) or 650))
+        self._expanded_window_size = QSize(w, h)
         self.resize(w, h)
 
         # Position: bottom-right corner with 20px margin
@@ -359,26 +372,88 @@ class MainWindow(QMainWindow):
         self._controls = ControlsBar()
         self._controls.record_toggled.connect(self._on_record_toggled)
         self._controls.mode_changed.connect(self._on_mode_changed)
-        root_layout.addWidget(self._controls)
+        root_layout.addWidget(self._controls, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        # Content splitter (transcript above, AI below)
+        # Hidden transcript store remains wired for app logic; the visible Q&A
+        # view mirrors its latest speaker question.
+        self.transcript_panel = TranscriptPanel(self._root)
+        self.transcript_panel.latest_question_changed.connect(self._set_question_text)
+        self.transcript_panel.hide()
+
+        self._qa_container = QWidget()
+        self._qa_container.setObjectName("qa_container")
+        self._qa_container.setStyleSheet(
+            "QWidget#qa_container { background-color: transparent; border: none; }"
+        )
+        qa_layout = QVBoxLayout(self._qa_container)
+        qa_layout.setContentsMargins(10, 0, 10, 10)
+        qa_layout.setSpacing(0)
+
+        # Content splitter (question above, AI answer below)
         self._splitter = QSplitter(Qt.Orientation.Vertical)
         self._splitter.setHandleWidth(4)
-        self._splitter.setStyleSheet("QSplitter::handle { background: #333366; }")
+        self._splitter.setStyleSheet(
+            "QSplitter::handle { background: rgba(139, 148, 158, 0.22); }"
+        )
         self._splitter.setChildrenCollapsible(False)
-        root_layout.addWidget(self._splitter, stretch=1)
+        qa_layout.addWidget(self._splitter, stretch=1)
 
-        self.transcript_panel = TranscriptPanel()
-        self.transcript_panel.setSizePolicy(
+        self._question_card = QFrame()
+        self._question_card.setObjectName("question_card")
+        self._question_card.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._splitter.addWidget(self.transcript_panel)
+        self._question_card.setStyleSheet(
+            "QFrame#question_card {"
+            " background-color: rgba(33, 38, 45, 0.92);"
+            " border: 1px solid rgba(139, 148, 158, 0.32);"
+            " border-radius: 8px;"
+            "}"
+        )
+        question_layout = QVBoxLayout(self._question_card)
+        question_layout.setContentsMargins(12, 10, 12, 10)
+        question_layout.setSpacing(6)
+
+        question_title = QLabel("Question")
+        question_title.setStyleSheet(
+            "color: #7ee787; font-size: 10pt; font-weight: 700;"
+        )
+        question_layout.addWidget(question_title)
+
+        self._question_text = QPlainTextEdit()
+        self._question_text.setObjectName("question_text")
+        self._question_text.setFrameShape(QFrame.Shape.NoFrame)
+        self._question_text.setReadOnly(True)
+        self._question_text.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._question_text.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._question_text.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.WidgetWidth
+        )
+        self._question_text.setStyleSheet(
+            "QPlainTextEdit#question_text {"
+            " background: transparent;"
+            " color: #e6edf3;"
+            " font-size: 11pt;"
+            " padding: 0px;"
+            "}"
+        )
+        question_layout.addWidget(self._question_text, 1)
+        self._question_card.hide()
+        self._splitter.addWidget(self._question_card)
 
         self.ai_panel = AIResponsePanel()
         self.ai_panel.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        self.ai_panel.activity_started.connect(self._reveal_question_answer_area)
         self._splitter.addWidget(self.ai_panel)
+        root_layout.addWidget(self._qa_container, stretch=1)
+        self._qa_container.setMaximumHeight(0)
+        self._qa_container.hide()
 
         self._install_resize_event_filters()
 
@@ -394,10 +469,11 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._dictation_input)
 
         # 20/80 split so the AI response area gets the larger share.
-        total_h = self._config.get("ui", {}).get("window_height", 650) - 80
+        total_h = self._expanded_window_size.height() - 80
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 4)
         self._splitter.setSizes([int(total_h * 0.20), int(total_h * 0.80)])
+        self._apply_startup_collapsed_layout()
 
     def _set_root_style(self, docked: bool) -> None:
         if docked:
@@ -412,24 +488,127 @@ class MainWindow(QMainWindow):
 
         self._root.setStyleSheet(
             "#root_widget {"
-            "  background-color: rgba(26, 26, 46, 242);"  # #1a1a2e @ 95%
-            "  border: 1px solid #333366;"
-            "  border-radius: 12px;"
+            "  background-color: rgba(17, 19, 24, 242);"
+            "  border: 1px solid #30363d;"
+            "  border-radius: 8px;"
             "}"
         )
 
     def _apply_splitter_proportions(self) -> None:
-        """Keep the transcript/AI split close to the intended 20/80 ratio."""
-        if self._docked or self._compact_mode or not self._splitter.isVisible():
+        """Keep the question/AI split close to the intended 20/80 ratio."""
+        if (
+            self._docked
+            or self._compact_mode
+            or not self._qa_revealed
+            or not self._splitter.isVisible()
+        ):
             return
 
         available_height = self._splitter.height()
         if available_height <= 0:
             return
 
-        transcript_height = max(80, int(available_height * 0.20))
-        ai_height = max(120, available_height - transcript_height)
-        self._splitter.setSizes([transcript_height, ai_height])
+        if not self._question_card.isVisible():
+            self._splitter.setSizes([0, available_height])
+            return
+
+        question_height = max(130, int(available_height * 0.32))
+        ai_height = max(160, available_height - question_height)
+        self._splitter.setSizes([question_height, ai_height])
+
+    def _apply_startup_collapsed_layout(self) -> None:
+        """Start as a toolbar-only rectangle."""
+        if self._docked:
+            return
+
+        self._qa_revealed = False
+        self._qa_container.setMaximumHeight(0)
+        self._qa_container.hide()
+        self._question_card.setVisible(False)
+        self._title_bar.show()
+        self._title_separator.show()
+        self._dictation_input.hide()
+        collapsed_width = max(420, self._controls.sizeHint().width() + 4)
+        self.resize(collapsed_width, self._collapsed_window_height)
+
+    def _set_question_text(self, text: str) -> None:
+        self._latest_question_text = str(text or "").strip()
+        self._question_text.setPlainText(self._latest_question_text)
+        self._question_card.setVisible(
+            self._qa_revealed and bool(self._latest_question_text)
+        )
+        if self._qa_revealed:
+            QTimer.singleShot(0, self._apply_splitter_proportions)
+
+    def _target_expanded_geometry(self) -> QRect:
+        current = self.geometry()
+        target_w = max(current.width(), self._expanded_window_size.width())
+        target_h = max(460, self._expanded_window_size.height())
+        target = QRect(current.x(), current.y(), target_w, target_h)
+
+        screen = QApplication.screenAt(current.center()) or QApplication.primaryScreen()
+        if screen is None:
+            return target
+
+        available = screen.availableGeometry()
+        if target.right() > available.right():
+            target.moveLeft(max(available.left(), available.right() - target_w))
+        if target.bottom() > available.bottom():
+            target.moveTop(max(available.top(), available.bottom() - target_h))
+        return target
+
+    def _reveal_question_answer_area(self) -> None:
+        if self._docked:
+            return
+
+        self._question_card.setVisible(bool(self._latest_question_text))
+        self._qa_container.show()
+        self._splitter.show()
+
+        if self._qa_revealed:
+            self._qa_container.setMaximumHeight(QWIDGETSIZE_MAX)
+            QTimer.singleShot(0, self._apply_splitter_proportions)
+            return
+
+        self._qa_revealed = True
+        start_geometry = self.geometry()
+        target_geometry = self._target_expanded_geometry()
+        target_content_height = max(
+            260,
+            target_geometry.height() - self._controls.height() - 10,
+        )
+
+        if self._qa_animation is not None:
+            self._qa_animation.stop()
+
+        self._qa_container.setMaximumHeight(0)
+
+        group = QParallelAnimationGroup(self)
+        geometry_animation = QPropertyAnimation(self, b"geometry", group)
+        geometry_animation.setDuration(240)
+        geometry_animation.setStartValue(start_geometry)
+        geometry_animation.setEndValue(target_geometry)
+        geometry_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        content_animation = QPropertyAnimation(self._qa_container, b"maximumHeight", group)
+        content_animation.setDuration(240)
+        content_animation.setStartValue(0)
+        content_animation.setEndValue(target_content_height)
+        content_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        group.addAnimation(geometry_animation)
+        group.addAnimation(content_animation)
+        group.finished.connect(
+            lambda: self._finish_qa_reveal(target_geometry)
+        )
+        self._qa_animation = group
+        group.start()
+
+    def _finish_qa_reveal(self, target_geometry: QRect) -> None:
+        self.setGeometry(target_geometry)
+        self._qa_container.setMaximumHeight(QWIDGETSIZE_MAX)
+        self._qa_animation = None
+        QTimer.singleShot(0, self._apply_splitter_proportions)
 
     def _install_resize_event_filters(self) -> None:
         """Capture edge-drag resize gestures even when child widgets are under cursor."""
@@ -437,7 +616,9 @@ class MainWindow(QMainWindow):
             self._root,
             self._title_bar,
             self._controls,
+            self._qa_container,
             self._splitter,
+            self._question_card,
             self.transcript_panel,
             self.ai_panel,
         ]
@@ -470,6 +651,17 @@ class MainWindow(QMainWindow):
                 self._resize_geometry = self.geometry()
                 return True
 
+            if (
+                event_type == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._can_drag_from(obj)
+                and edge is None
+            ):
+                self._move_origin = event.globalPosition().toPoint()
+                self._move_window_origin = self.pos()
+                self._move_started = False
+                return False
+
             if event_type == QEvent.Type.MouseMove:
                 if (
                     self._resize_edge
@@ -480,14 +672,41 @@ class MainWindow(QMainWindow):
                     delta = event.globalPosition().toPoint() - self._resize_origin
                     self._do_resize(delta)
                     return True
+                if (
+                    self._move_origin
+                    and self._move_window_origin
+                    and self._can_drag_from(obj)
+                    and (event.buttons() & Qt.MouseButton.LeftButton)
+                ):
+                    delta = event.globalPosition().toPoint() - self._move_origin
+                    if not self._move_started and (
+                        abs(delta.x()) > 3 or abs(delta.y()) > 3
+                    ):
+                        self._move_started = True
+                    if self._move_started:
+                        self.move(self._move_window_origin + delta)
+                        return True
 
             if event_type == QEvent.Type.MouseButtonRelease and self._resize_edge:
                 self._resize_edge = None
                 self._resize_origin = None
                 self._resize_geometry = None
                 return True
+            if event_type == QEvent.Type.MouseButtonRelease and self._move_origin:
+                consumed = self._move_started
+                self._move_origin = None
+                self._move_window_origin = None
+                self._move_started = False
+                if consumed:
+                    return True
 
         return super().eventFilter(obj, event)
+
+    def _can_drag_from(self, obj: QObject) -> bool:
+        """Allow dragging from the compact shell without stealing button clicks."""
+        if self._docked:
+            return False
+        return obj in (self._root, self._controls, self._qa_container, self._question_card)
 
     # ------------------------------------------------------------------
     # Show + stealth
@@ -532,14 +751,20 @@ class MainWindow(QMainWindow):
         self._config = config
         ui = config.get("ui", {})
         self.setWindowOpacity(ui.get("opacity", 0.95))
+        self._expanded_window_size = QSize(
+            max(420, int(ui.get("window_width", 420) or 420)),
+            max(460, int(ui.get("window_height", 650) or 650)),
+        )
         if self._docked:
             self._apply_docked_state()
-        else:
+        elif self._qa_revealed:
             self.resize(
-                ui.get("window_width", 420),
-                ui.get("window_height", 650),
+                self._expanded_window_size.width(),
+                self._expanded_window_size.height(),
             )
             QTimer.singleShot(0, self._apply_splitter_proportions)
+        else:
+            self._apply_startup_collapsed_layout()
         self._dictation_idle_ms = int(config.get("dictation", {}).get("commit_idle_ms", 1200))
 
     @property
@@ -573,6 +798,7 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+        self._dictation_input.show()
         self._dictation_input.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self._dictation_input.selectAll()
         return self._dictation_input.hasFocus()
@@ -600,15 +826,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def toggle_compact_mode(self) -> None:
-        if self._docked:
+        if self._docked or not self._qa_revealed:
             return
         self._compact_mode = not self._compact_mode
         if self._compact_mode:
             self.ai_panel.setMaximumHeight(80)
-            self.transcript_panel.setMaximumHeight(60)
+            self._question_card.setMaximumHeight(60)
             self.resize(self.width(), 200)
         else:
-            self.transcript_panel.setMaximumHeight(QWIDGETSIZE_MAX)
+            self._question_card.setMaximumHeight(QWIDGETSIZE_MAX)
             self.ai_panel.setMaximumHeight(QWIDGETSIZE_MAX)
             QTimer.singleShot(0, self._apply_splitter_proportions)
 
@@ -676,7 +902,8 @@ class MainWindow(QMainWindow):
             return
         dx, dy = delta.x(), delta.y()
         x, y, w, h = g.x(), g.y(), g.width(), g.height()
-        min_w, min_h = 240, 170
+        min_w = 360
+        min_h = 170 if self._qa_revealed else self._collapsed_window_height
 
         if "right" in edge:
             w = max(min_w, w + dx)
@@ -783,6 +1010,8 @@ class MainWindow(QMainWindow):
                 int(h) if isinstance(h, int) else self.height(),
             )
         self.setGeometry(geo)
+        if not self._qa_revealed:
+            self._apply_startup_collapsed_layout()
         self.show()
         self.raise_()
         self.activateWindow()
@@ -819,8 +1048,9 @@ class MainWindow(QMainWindow):
         self._title_bar.setVisible(not docked)
         self._title_separator.setVisible(not docked)
         self._controls.setVisible(not docked)
-        self._splitter.setVisible(not docked)
-        self._dictation_input.setVisible(not docked)
+        self._qa_container.setVisible(not docked and self._qa_revealed)
+        self._splitter.setVisible(not docked and self._qa_revealed)
+        self._dictation_input.setVisible(False)
 
     def _persist_pre_dock_geometry(self, geo: QRect) -> None:
         ui = self._config.setdefault("ui", {})

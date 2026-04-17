@@ -378,7 +378,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             if pyqtSignal is not None:
                 self.transcribing.emit(source)  # type: ignore[attr-defined]
 
-            segment = self._transcribe(audio, source)
+            segment = self._transcribe(audio, source, segment_timestamp=enqueued_at)
             if segment:
                 if self._on_result:
                     self._on_result(segment)
@@ -388,12 +388,20 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         logger.info("TranscriptionThread: stopped.")
 
     def _transcribe(
-        self, audio: np.ndarray, source: str
+        self,
+        audio: np.ndarray,
+        source: str,
+        segment_timestamp: Optional[float] = None,
     ) -> Optional[TranscriptSegment]:
         """Run whisper inference on *audio* and return a TranscriptSegment."""
         try:
+            transcript_ts = float(segment_timestamp) if segment_timestamp else time.time()
             if self._model is None:
-                return self._transcribe_remote(audio, source)
+                return self._transcribe_remote(
+                    audio,
+                    source,
+                    segment_timestamp=transcript_ts,
+                )
 
             processed = self._prepare_local_audio(audio)
             if processed is None:
@@ -460,6 +468,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             return TranscriptSegment(
                 text=full_text,
                 source=source,
+                timestamp=transcript_ts,
                 confidence=confidence,
             )
 
@@ -555,7 +564,10 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         return True, "ready"
 
     def _transcribe_remote(
-        self, audio: np.ndarray, source: str
+        self,
+        audio: np.ndarray,
+        source: str,
+        segment_timestamp: Optional[float] = None,
     ) -> Optional[TranscriptSegment]:
         if not self._remote_transcription_enabled:
             return None
@@ -614,6 +626,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                     return TranscriptSegment(
                         text=text,
                         source=source,
+                        timestamp=float(segment_timestamp) if segment_timestamp else time.time(),
                         confidence=0.75,
                     )
                 except Exception as exc:  # pylint: disable=broad-except

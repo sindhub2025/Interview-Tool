@@ -1127,6 +1127,10 @@ class GhostMicApp:
                     float(getattr(merged_target, "confidence", 1.0)),
                     float(getattr(segment, "confidence", 1.0)),
                 )
+                merged_target.timestamp = max(
+                    float(getattr(merged_target, "timestamp", 0.0) or 0.0),
+                    float(getattr(segment, "timestamp", 0.0) or 0.0),
+                )
 
                 if self._ai_context_history:
                     last_context = self._ai_context_history[-1]
@@ -1135,6 +1139,10 @@ class GhostMicApp:
                         last_context.confidence = max(
                             float(getattr(last_context, "confidence", 1.0)),
                             float(getattr(segment, "confidence", 1.0)),
+                        )
+                        last_context.timestamp = max(
+                            float(getattr(last_context, "timestamp", 0.0) or 0.0),
+                            float(getattr(segment, "timestamp", 0.0) or 0.0),
                         )
 
                 self._logger.info(

@@ -8,7 +8,7 @@ from html import escape
 import re
 from typing import List
 
-from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -162,9 +162,9 @@ def render_response_html(text: str) -> str:
 
 
 class AIResponseCard(QFrame):
-    """A single AI response card with Copy and Regenerate actions."""
+    """A single AI answer card with a Copy action."""
 
-    def __init__(self, text: str = "", title: str = "AI Suggestion", parent=None) -> None:
+    def __init__(self, text: str = "", title: str = "Answer", parent=None) -> None:
         super().__init__(parent)
         self._text = text
         self._title = title
@@ -175,12 +175,12 @@ class AIResponseCard(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self.setStyleSheet(
-            f"background-color: {BG_CARD}; border: 1px solid #333366; "
-            "border-radius: 8px; padding: 4px;"
+            f"background-color: {BG_CARD}; border: 1px solid {BORDER}; "
+            "border-radius: 8px;"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
         # Top row: title + buttons
         header = QHBoxLayout()
@@ -206,7 +206,7 @@ class AIResponseCard(QFrame):
         self._text_edit.setOpenExternalLinks(False)
         self._text_edit.setStyleSheet(
             f"background-color: {BG_MID}; border: none; "
-            "border-radius: 4px; padding: 4px;"
+            "border-radius: 6px; padding: 6px;"
         )
         self._text_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -248,8 +248,9 @@ class AIResponseCard(QFrame):
 
 
 class AIResponsePanel(QWidget):
-    """Panel that shows only the latest AI response with streaming support."""
+    """Panel that shows only the latest AI answer with streaming support."""
 
+    activity_started = pyqtSignal()
     text_prompt_submitted = pyqtSignal(str, bool)
 
     def __init__(self, parent=None) -> None:
@@ -297,7 +298,7 @@ class AIResponsePanel(QWidget):
         header_layout.setContentsMargins(10, 6, 10, 6)
         header_layout.setSpacing(6)
 
-        title = QLabel("AI Responses")
+        title = QLabel("Answer")
         title.setStyleSheet(f"color: {ACCENT_BLUE}; font-weight: bold;")
         header_layout.addWidget(title)
         header_layout.addStretch()
@@ -310,6 +311,7 @@ class AIResponsePanel(QWidget):
         self._toggle_btn.clicked.connect(self.toggle_visibility)
         header_layout.addWidget(self._toggle_btn)
 
+        header.setVisible(False)
         outer_layout.addWidget(header)
 
         self._content = QWidget()
@@ -320,7 +322,7 @@ class AIResponsePanel(QWidget):
 
         content_layout = QVBoxLayout(self._content)
         content_layout.setSpacing(8)
-        content_layout.setContentsMargins(6, 6, 6, 6)
+        content_layout.setContentsMargins(0, 0, 0, 0)
 
         self._responses_container = QWidget()
         self._responses_container.setSizePolicy(
@@ -337,18 +339,18 @@ class AIResponsePanel(QWidget):
 
         self._prompt_input = QLineEdit()
         self._prompt_input.setPlaceholderText(
-            "Ask AI a question or type a refinement for the current response"
+            "Ask a follow-up or refine the answer"
         )
         self._prompt_input.returnPressed.connect(self._on_ask_clicked)
         input_row.addWidget(self._prompt_input, 1)
 
         self._ask_btn = QPushButton("Ask")
-        self._ask_btn.setFixedHeight(26)
+        self._ask_btn.setFixedSize(62, 30)
         self._ask_btn.clicked.connect(self._on_ask_clicked)
         input_row.addWidget(self._ask_btn)
 
         self._refine_btn = QPushButton("Refine")
-        self._refine_btn.setFixedHeight(26)
+        self._refine_btn.setFixedSize(74, 30)
         self._refine_btn.clicked.connect(self._on_refine_clicked)
         input_row.addWidget(self._refine_btn)
 
@@ -360,11 +362,12 @@ class AIResponsePanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def start_response(self, title: str = "AI Suggestion") -> None:
+    def start_response(self, title: str = "Answer") -> None:
         """Create a new blank response card ready for streaming."""
         from ghostmic.utils.logger import get_logger
         logger = get_logger(__name__)
         logger.info("AIResponsePanel.start_response() called")
+        self.activity_started.emit()
         self._remove_thinking()
         card = self._active_card
         if card is None and self._cards:
@@ -401,6 +404,7 @@ class AIResponsePanel(QWidget):
 
     def append_chunk(self, chunk: str) -> None:
         """Append a streaming chunk to the active response card."""
+        self.activity_started.emit()
         if self._active_card is None:
             self.start_response()
         if self._active_card:
@@ -412,6 +416,7 @@ class AIResponsePanel(QWidget):
         logger = get_logger(__name__)
         logger.info("AIResponsePanel.finish_response() called with text: %s...", 
                    (full_text[:50] if full_text else "None"))
+        self.activity_started.emit()
         logger.info("AIResponsePanel.finish_response() - panel visible=%s, width=%d, height=%d", 
                    self.isVisible(), self.width(), self.height())
         logger.info("AIResponsePanel.finish_response() - active_card=%s, cards count=%d", 
@@ -426,7 +431,7 @@ class AIResponsePanel(QWidget):
                 self._active_card = self._cards[-1]
             else:
                 logger.warning("AIResponsePanel.finish_response() - no active card, creating one")
-                card = AIResponseCard(title="AI Suggestion", parent=self._responses_container)
+                card = AIResponseCard(title="Answer", parent=self._responses_container)
                 self._active_card = card
                 self._cards = [card]
                 self._responses_layout.addWidget(card, 1)
@@ -448,8 +453,9 @@ class AIResponsePanel(QWidget):
         
         self._active_card = None
 
-    def show_thinking(self, message: str = "🤔 Generating response…") -> None:
+    def show_thinking(self, message: str = "Generating response...") -> None:
         """Show a loading indicator while the AI is processing."""
+        self.activity_started.emit()
         if self._thinking_label is None:
             lbl = QLabel(message)
             lbl.setStyleSheet(
@@ -462,8 +468,9 @@ class AIResponsePanel(QWidget):
         else:
             self._thinking_label.setText(message)
 
-    def show_error(self, message: str, title: str = "AI Suggestion") -> None:
+    def show_error(self, message: str, title: str = "Answer") -> None:
         """Display an error message in the panel."""
+        self.activity_started.emit()
         self._remove_thinking()
         self.clear_responses()
         card = AIResponseCard(f"⚠ {message}", title=title, parent=self._responses_container)

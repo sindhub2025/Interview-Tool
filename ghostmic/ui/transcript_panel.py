@@ -199,6 +199,7 @@ class TranscriptPanel(QScrollArea):
     Right-click for context menu (Copy, Copy All, Clear).
     """
 
+    latest_question_changed = pyqtSignal(str)
     speaker_normalize_requested = pyqtSignal(object, str)
     speaker_send_requested = pyqtSignal(object, str)
     speaker_text_edited = pyqtSignal(object, str)
@@ -247,6 +248,8 @@ class TranscriptPanel(QScrollArea):
 
     def set_segment_text(self, segment: TranscriptSegment, text: str) -> None:
         bubble = self._bubbles_by_segment_id.get(id(segment))
+        if getattr(segment, "source", "") == "speaker":
+            self.latest_question_changed.emit(str(text).strip())
         if bubble is None:
             return
         bubble.set_segment_text(text)
@@ -285,6 +288,7 @@ class TranscriptPanel(QScrollArea):
         self._remove_placeholder()
         self._segments.clear()
         self._bubbles_by_segment_id.clear()
+        self.latest_question_changed.emit("")
         while self._layout.count() > 1:  # keep the stretch
             item = self._layout.takeAt(0)
             if item and item.widget():

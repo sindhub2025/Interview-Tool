@@ -86,12 +86,13 @@ QPushButton#record_btn {{
     background-color: {ACCENT_RED};
     border-color: {ACCENT_RED};
     font-weight: bold;
-    border-radius: 20px;
-    min-width: 40px;
-    min-height: 40px;
+    border-radius: 6px;
+    min-width: 84px;
+    min-height: 36px;
+    padding: 0px 14px;
 }}
 QPushButton#record_btn:checked {{
-    background-color: #6e0000;
+    background-color: #5f1118;
     border-color: {ACCENT_RED};
 }}
 QPushButton#record_btn:hover {{
@@ -102,8 +103,9 @@ QPushButton#settings_btn {{
     background-color: {BG_MID};
     border: 1px solid {BORDER};
     border-radius: 6px;
-    font-size: 14pt;
-    padding: 2px;
+    font-size: 10pt;
+    font-weight: 600;
+    padding: 0px 14px;
 }}
 QPushButton#settings_btn:hover {{
     border-color: {ACCENT_BLUE};

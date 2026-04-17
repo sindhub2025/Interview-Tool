@@ -64,3 +64,26 @@ def test_should_drop_low_diversity_low_confidence_text():
     thread = _thread()
     artifact = "uh uh uh uh uh uh uh uh"
     assert thread._should_drop_local_artifact(artifact, 0.2, "speaker") is True
+
+
+class _FakeWhisperSegment:
+    def __init__(self, text: str, avg_logprob: float = -0.2) -> None:
+        self.text = text
+        self.avg_logprob = avg_logprob
+
+
+class _FakeWhisperModel:
+    def transcribe(self, audio_float, **kwargs):  # noqa: ARG002
+        return [_FakeWhisperSegment("Can you explain your ETL test strategy?")], {}
+
+
+def test_transcribe_uses_segment_enqueue_timestamp():
+    thread = _thread()
+    thread.set_model(_FakeWhisperModel())
+    audio = (np.sin(np.linspace(0, 60.0, 16_000)) * 4200).astype(np.int16)
+    queued_at = 1234.5
+
+    result = thread._transcribe(audio, "speaker", segment_timestamp=queued_at)
+
+    assert result is not None
+    assert result.timestamp == queued_at

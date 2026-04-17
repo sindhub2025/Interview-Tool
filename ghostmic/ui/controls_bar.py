@@ -1,5 +1,5 @@
 """
-Controls bar: record toggle, mode dropdown, settings gear, status label.
+Controls bar: compact record, mic, settings, and capture actions.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QWidget,
 )
 
@@ -87,15 +88,23 @@ class ControlsBar(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        self.setFixedHeight(56)
+        self.setObjectName("controls_bar")
+        self.setFixedHeight(58)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setStyleSheet(
+            "QWidget#controls_bar {"
+            " background-color: transparent;"
+            " border: none;"
+            "}"
+        )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
         # Record button
-        self._record_btn = QPushButton("⏺")
+        self._record_btn = QPushButton("Record")
         self._record_btn.setObjectName("record_btn")
-        self._record_btn.setFixedSize(36, 36)
+        self._record_btn.setFixedSize(86, 38)
         self._record_btn.setCheckable(True)
         self._record_btn.clicked.connect(self._on_record_clicked)
         layout.addWidget(self._record_btn)
@@ -103,46 +112,43 @@ class ControlsBar(QWidget):
         # Optional microphone capture toggle (speaker-only by default)
         self._mic_btn = QPushButton("Mic Off")
         self._mic_btn.setObjectName("mic_btn")
-        self._mic_btn.setFixedSize(72, 32)
+        self._mic_btn.setFixedSize(78, 38)
         self._mic_btn.setCheckable(True)
         self._mic_btn.clicked.connect(self._on_mic_clicked)
         layout.addWidget(self._mic_btn)
         self._apply_mic_button_state()
 
-        # API Status indicator
-        self._api_status = APIStatusIndicator()
-        layout.addWidget(self._api_status)
+        layout.addStretch(1)
 
-        # Mode dropdown
-        self._mode_combo = QComboBox()
+        # API status, mode, and status text are kept as hidden state sinks so
+        # controller calls remain UI-only and do not need to change.
+        self._api_status = APIStatusIndicator(self)
+        self._api_status.setVisible(False)
+
+        self._mode_combo = QComboBox(self)
         self._mode_combo.addItems(self.MODES)
         self._mode_combo.setFixedWidth(130)
         self._mode_combo.currentTextChanged.connect(self.mode_changed)
-        layout.addWidget(self._mode_combo)
+        self._mode_combo.setVisible(False)
 
-        layout.addStretch()
-
-        # Status label
-        self._status_label = QLabel("Ready")
+        self._status_label = QLabel("Ready", self)
         self._status_label.setObjectName("status_label")
         self._status_label.setStyleSheet(
             f"color: {TEXT_SECONDARY}; font-size: 9pt;"
         )
-        layout.addWidget(self._status_label)
-
-        layout.addStretch()
+        self._status_label.setVisible(False)
 
         # Settings button
-        settings_btn = QPushButton("⚙")
-        settings_btn.setObjectName("settings_btn")
-        settings_btn.setFixedSize(32, 32)
-        settings_btn.clicked.connect(self._on_settings_clicked)
-        layout.addWidget(settings_btn)
+        self._settings_btn = QPushButton("Settings")
+        self._settings_btn.setObjectName("settings_btn")
+        self._settings_btn.setFixedSize(86, 38)
+        self._settings_btn.clicked.connect(self._on_settings_clicked)
+        layout.addWidget(self._settings_btn)
 
         # Screen analysis button
         self._screenshot_btn = QPushButton("Capture")
         self._screenshot_btn.setObjectName("screenshot_btn")
-        self._screenshot_btn.setFixedSize(90, 32)
+        self._screenshot_btn.setFixedSize(88, 38)
         self._screenshot_btn.clicked.connect(self._on_screenshot_clicked)
         layout.addWidget(self._screenshot_btn)
 
@@ -165,14 +171,15 @@ class ControlsBar(QWidget):
         self._recording = recording
         self._record_btn.setChecked(recording)
         if recording:
-            self._record_btn.setText("⏹")
+            self._record_btn.setText("Stop")
             self._record_btn.setStyleSheet(
-                f"background-color: #6e0000; border-radius: 18px; "
-                f"color: white; font-size: 16pt; border: 2px solid {ACCENT_RED};"
+                f"background-color: #5f1118; border-radius: 6px; "
+                f"color: white; font-size: 10pt; font-weight: 700; "
+                f"border: 1px solid {ACCENT_RED};"
             )
             self.set_status("Recording…", ACCENT_RED)
         else:
-            self._record_btn.setText("⏺")
+            self._record_btn.setText("Record")
             self._record_btn.setStyleSheet("")
             self.set_status("Ready", TEXT_SECONDARY)
 
@@ -215,7 +222,7 @@ class ControlsBar(QWidget):
                 " border: 1px solid rgba(63, 185, 80, 0.65);"
                 " border-radius: 6px;"
                 " color: #d2ffd9;"
-                " font-size: 9pt;"
+                " font-size: 10pt;"
                 " font-weight: 600;"
                 "}"
                 "QPushButton:hover { background-color: rgba(63, 185, 80, 0.30); }"
@@ -230,7 +237,7 @@ class ControlsBar(QWidget):
             " border: 1px solid rgba(139, 148, 158, 0.45);"
             " border-radius: 6px;"
             " color: #c9d1d9;"
-            " font-size: 9pt;"
+            " font-size: 10pt;"
             " font-weight: 600;"
             "}"
             "QPushButton:hover { background-color: rgba(139, 148, 158, 0.24); }"
