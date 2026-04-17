@@ -512,9 +512,26 @@ class MainWindow(QMainWindow):
             self._splitter.setSizes([0, available_height])
             return
 
-        question_height = max(130, int(available_height * 0.32))
+        question_height = self._target_question_height(available_height)
         ai_height = max(160, available_height - question_height)
         self._splitter.setSizes([question_height, ai_height])
+
+    def _target_question_height(self, available_height: int) -> int:
+        """Return a content-aware question-pane height that preserves answer space."""
+        doc_height = int(self._question_text.document().size().height() or 0)
+        natural_height = doc_height + 62  # title row + frame padding
+
+        # Keep the AI panel dominant when speaker question is visible.
+        ai_min_height = min(
+            max(180, int(available_height * 0.70)),
+            max(100, available_height - 40),
+        )
+        question_max = max(40, available_height - ai_min_height)
+        question_min = min(120, max(60, int(available_height * 0.12)))
+        if question_min > question_max:
+            question_min = max(40, question_max)
+
+        return max(question_min, min(question_max, natural_height))
 
     def _apply_startup_collapsed_layout(self) -> None:
         """Start as a toolbar-only rectangle."""

@@ -7,6 +7,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMainWindow
 
 from ghostmic.ui.main_window import MainWindow
@@ -69,3 +70,29 @@ def test_splitter_proportions_are_reapplied_on_config_update() -> None:
     transcript_height, ai_height = window._splitter.sizes()
 
     assert ai_height > transcript_height * 2
+
+
+def test_speaker_question_layout_preserves_majority_height_for_ai_panel() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window._set_question_text(
+        "Can you explain your ETL validation strategy in production and how you "
+        "handle late-arriving source records?"
+    )
+    window._reveal_question_answer_area()
+    QTest.qWait(500)
+    for _ in range(10):
+        app.processEvents()
+
+    question_height, ai_height = window._splitter.sizes()
+    total = max(1, question_height + ai_height)
+
+    assert ai_height > question_height
+    assert ai_height / total >= 0.70
+    assert question_height <= 220
