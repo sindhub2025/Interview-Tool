@@ -4,10 +4,12 @@ AI response panel: displays streaming AI-generated suggestions.
 
 from __future__ import annotations
 
+from html import escape
+import re
 from typing import List
 
 from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, pyqtSignal
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -16,14 +18,147 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSizePolicy,
-    QTextEdit,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
-from ghostmic.ui.styles import ACCENT_BLUE, BG_CARD, BG_DEEP, BG_MID, BORDER, TEXT_SECONDARY
+from ghostmic.ui.styles import (
+    ACCENT_BLUE,
+    ACCENT_GREEN,
+    BG_CARD,
+    BG_DEEP,
+    BG_MID,
+    BORDER,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 
 QWIDGETSIZE_MAX = 16_777_215
+
+
+def _code_block_style(language: str) -> tuple[str, str, str]:
+    normalized = language.strip().lower()
+    if normalized in {"sql", "postgres", "postgresql", "mysql", "sqlite", "tsql"}:
+        return "SQL", ACCENT_GREEN, "#10241b"
+    if normalized in {"python", "py"}:
+        return "Python", ACCENT_BLUE, "#101826"
+    label = language.strip().upper() if language.strip() else "Code"
+    return label, TEXT_SECONDARY, "#11161d"
+
+
+def _render_code_block(language: str, code: str) -> str:
+    label, accent, background = _code_block_style(language)
+    return (
+        "<div style='margin:12px 0 14px 0;'>"
+        f"<div style='margin:0 0 4px 2px; color:{accent}; font-size:9pt; "
+        f"font-weight:700; letter-spacing:0.5px;'>{escape(label)}</div>"
+        f"<pre style='margin:0; padding:10px 12px; border:1px solid {accent}; "
+        f"border-radius:8px; background-color:{background}; color:{TEXT_PRIMARY}; "
+        'font-family:"Consolas","Cascadia Mono","Courier New",monospace; '
+        "font-size:10pt; white-space:pre-wrap;'>"
+        f"{escape(code)}</pre>"
+        "</div>"
+    )
+
+
+def render_response_html(text: str) -> str:
+    """Render plain AI response text into styled HTML for the response panel."""
+    if not text:
+        return ""
+
+    bullet_re = re.compile(r"^(?:[-*•]|\d+[.)])\s+(.*)$")
+    html_blocks: list[str] = []
+    paragraph_lines: list[str] = []
+    bullet_items: list[str] = []
+    code_lines: list[str] = []
+    code_language = ""
+    in_code_block = False
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_lines
+        if not paragraph_lines:
+            return
+        paragraph = " ".join(part.strip() for part in paragraph_lines).strip()
+        paragraph_lines = []
+        if paragraph:
+            html_blocks.append(
+                "<p style='margin:0 0 10px 0; line-height:1.45; "
+                f"color:{TEXT_PRIMARY};'>{escape(paragraph)}</p>"
+            )
+
+    def flush_bullets() -> None:
+        nonlocal bullet_items
+        if not bullet_items:
+            return
+        items_html = "".join(
+            "<li style='margin:0 0 6px 0; padding:0;'>"
+            f"{escape(item)}</li>"
+            for item in bullet_items
+        )
+        bullet_items = []
+        html_blocks.append(
+            "<ul style='margin:0 0 12px 20px; padding:0 0 0 16px;'>"
+            f"{items_html}</ul>"
+        )
+
+    def flush_code_block() -> None:
+        nonlocal code_lines, code_language
+        code = "\n".join(code_lines)
+        code_lines = []
+        if code:
+            html_blocks.append(_render_code_block(code_language, code))
+        code_language = ""
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            if in_code_block:
+                flush_code_block()
+                in_code_block = False
+            else:
+                flush_paragraph()
+                flush_bullets()
+                code_language = stripped[3:].strip()
+                in_code_block = True
+            continue
+
+        if in_code_block:
+            code_lines.append(raw_line)
+            continue
+
+        if not stripped:
+            flush_paragraph()
+            flush_bullets()
+            continue
+
+        bullet_match = bullet_re.match(stripped)
+        if bullet_match:
+            flush_paragraph()
+            bullet_items.append(bullet_match.group(1).strip())
+            continue
+
+        flush_bullets()
+        paragraph_lines.append(stripped)
+
+    if in_code_block:
+        flush_code_block()
+
+    flush_paragraph()
+    flush_bullets()
+
+    if not html_blocks:
+        return ""
+
+    return (
+        "<html><body style='margin:0; padding:0; background:transparent; "
+        f"color:{TEXT_PRIMARY}; font-family:\"Segoe UI\"; font-size:11pt;'>"
+        "<div style='padding:2px 4px 4px 4px;'>"
+        + "".join(html_blocks)
+        + "</div></body></html>"
+    )
 
 
 class AIResponseCard(QFrame):
@@ -66,9 +201,9 @@ class AIResponseCard(QFrame):
         layout.addLayout(header)
 
         # Response text
-        self._text_edit = QTextEdit()
+        self._text_edit = QTextBrowser()
         self._text_edit.setReadOnly(True)
-        self._text_edit.setPlainText(self._text)
+        self._text_edit.setOpenExternalLinks(False)
         self._text_edit.setStyleSheet(
             f"background-color: {BG_MID}; border: none; "
             "border-radius: 4px; padding: 4px;"
@@ -77,25 +212,33 @@ class AIResponseCard(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._text_edit.setMinimumHeight(0)
+        self._text_edit.setHtml(render_response_html(self._text))
         layout.addWidget(self._text_edit)
+
+    def _render_text(self) -> None:
+        self._text_edit.setHtml(render_response_html(self._text))
+        cursor = self._text_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._text_edit.setTextCursor(cursor)
+        self._text_edit.ensureCursorVisible()
 
     def append_text(self, chunk: str) -> None:
         """Append a streaming chunk to the response."""
-        cursor = self._text_edit.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(chunk)
-        self._text_edit.setTextCursor(cursor)
-        self._text_edit.ensureCursorVisible()
-        self._text = self._text_edit.toPlainText()
+        self._text += chunk
+        self._render_text()
 
     def set_text(self, text: str) -> None:
         from ghostmic.utils.logger import get_logger
+
         logger = get_logger(__name__)
         self._text = text
-        self._text_edit.setPlainText(text)
+        self._render_text()
         self._text_edit.updateGeometry()
-        logger.info("AIResponseCard.set_text() called - set %d chars to QTextEdit, new height=%d", 
-                   len(text), self._text_edit.height())
+        logger.info(
+            "AIResponseCard.set_text() called - set %d chars to QTextBrowser, new height=%d",
+            len(text),
+            self._text_edit.height(),
+        )
 
     def get_text(self) -> str:
         return self._text
@@ -180,6 +323,10 @@ class AIResponsePanel(QWidget):
         content_layout.setContentsMargins(6, 6, 6, 6)
 
         self._responses_container = QWidget()
+        self._responses_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self._responses_container.setMinimumHeight(0)
         self._responses_layout = QVBoxLayout(self._responses_container)
         self._responses_layout.setSpacing(8)
         self._responses_layout.setContentsMargins(0, 0, 0, 0)
@@ -292,9 +439,10 @@ class AIResponsePanel(QWidget):
             logger.info("AIResponsePanel.finish_response() - text set, card visible=%s, card height=%d", 
                        self._active_card.isVisible(), self._active_card.height())
             
-            # Force layout recalculation
-            self._responses_layout.update()
-            self._content.adjustSize()
+            self._responses_layout.invalidate()
+            self._responses_layout.activate()
+            self._content.updateGeometry()
+            self._content.update()
         else:
             logger.warning("AIResponsePanel.finish_response() - no active card or text is None")
         
@@ -355,7 +503,9 @@ class AIResponsePanel(QWidget):
         if self._collapsed:
             self._content.show()
             self.setMaximumHeight(QWIDGETSIZE_MAX)
-            self._content.adjustSize()
+            self._responses_layout.invalidate()
+            self._responses_layout.activate()
+            self._content.updateGeometry()
             self._toggle_btn.setText("Hide")
             self._collapsed = False
             self._scroll_to_bottom()
@@ -395,6 +545,8 @@ class AIResponsePanel(QWidget):
         from PyQt6.QtCore import QTimer
 
         def scroll() -> None:
-            self._content.adjustSize()
+            self._responses_layout.invalidate()
+            self._responses_layout.activate()
+            self._content.updateGeometry()
 
         QTimer.singleShot(10, scroll)

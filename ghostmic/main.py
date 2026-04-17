@@ -27,6 +27,7 @@ if not getattr(sys, "frozen", False) and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from ghostmic.utils.logger import configure_logging, get_log_file_path, get_logger
+from ghostmic.core.ai_engine import DEFAULT_SYSTEM_PROMPT
 from ghostmic.services.session_context_compactor import SessionContextCompactor
 from ghostmic.services.resume_service import ResumeService
 from ghostmic.services.session_context_store import SessionContextStore
@@ -93,14 +94,7 @@ def _default_config() -> dict:
             "openai_model": "gpt-5-mini",
             "groq_api_key": "",
             "groq_model": "llama-3.1-70b-versatile",
-            "system_prompt": (
-                "You are a real-time interview/meeting assistant helping the user "
-                "respond to questions. Keep responses concise and natural. "
-                "If the user asks for a sample script, sample code, code example, "
-                "snippet, or SQL query, provide a short generic example in a "
-                "fenced code block when the request does not include enough "
-                "specifics, and keep it easy to adapt."
-            ),
+            "system_prompt": DEFAULT_SYSTEM_PROMPT,
             "temperature": 0.7,
             "trigger_mode": "auto",
             "auto_speaker_analysis_enabled": True,

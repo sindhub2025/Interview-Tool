@@ -282,8 +282,16 @@ def test_default_system_prompt_mentions_sample_code_and_sql_queries():
     assert "sample script" in prompt
     assert "sample code" in prompt
     assert "sql query" in prompt
+    assert "python script" in prompt
     assert "generic example" in prompt
     assert "fenced code block" in prompt
+    assert "2-3 sentences" in prompt
+    assert "exactly 5 bullet points" in prompt
+    assert "tagged `sql`" in prompt
+    assert "tagged `python`" in prompt
+    assert "experienced candidate" in prompt
+    assert "absolute basics" in prompt
+    assert "straight to the point" in prompt
 
 
 def test_build_system_prompt_includes_generic_example_policy():
@@ -296,6 +304,24 @@ def test_build_system_prompt_includes_generic_example_policy():
     assert "sql query" in lowered
     assert "generic example" in lowered
     assert "fenced code block" in lowered
+
+
+def test_build_system_prompt_includes_human_style_guidance():
+    prompt = AIThread._build_system_prompt("Base prompt", "")
+
+    lowered = prompt.lower()
+
+    assert "helpful person" in lowered
+    assert "answer the question directly first" in lowered
+    assert "sql or python questions" in lowered
+    assert "2-3 sentences" in lowered
+    assert "exactly 5 bullet points" in lowered
+    assert "tagged sql" in lowered
+    assert "tagged python" in lowered
+    assert "experienced candidate" in lowered
+    assert "absolute basics" in lowered
+    assert "straight to the point" in lowered
+    assert "practical tradeoffs" in lowered
 
 
 def test_build_system_prompt_includes_selection_preference_policy():
