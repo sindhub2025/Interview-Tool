@@ -9,6 +9,8 @@ applies stealth, and enters the event loop.
 from __future__ import annotations
 
 import argparse
+import atexit
+import faulthandler
 import json
 import os
 import platform
@@ -54,6 +56,100 @@ DEFAULT_CONFIG_PATH = (
     if getattr(sys, "frozen", False)
     else BUNDLED_CONFIG_PATH
 )
+
+DIAGNOSTIC_DIR = os.path.join(os.path.expanduser("~"), ".ghostmic")
+STARTUP_TRACE_FILE = os.path.join(DIAGNOSTIC_DIR, "startup_trace.log")
+FAULT_TRACE_FILE = os.path.join(DIAGNOSTIC_DIR, "python_faulthandler.log")
+
+_startup_trace_lock = threading.Lock()
+_fault_trace_stream = None
+
+
+def _write_startup_trace(event: str, **fields: object) -> None:
+    """Append a lightweight startup breadcrumb for crash diagnostics."""
+    try:
+        os.makedirs(DIAGNOSTIC_DIR, exist_ok=True)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        line = f"{timestamp} | {event}"
+        if fields:
+            kv_pairs = []
+            for key, value in fields.items():
+                text = str(value).replace("\n", "\\n")
+                kv_pairs.append(f"{key}={text}")
+            line = f"{line} | {' '.join(kv_pairs)}"
+        with _startup_trace_lock:
+            with open(STARTUP_TRACE_FILE, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception:
+        # Startup diagnostics must never block app startup.
+        return
+
+
+def _enable_faulthandler_trace(logger) -> None:
+    """Enable Python faulthandler output into a persistent file."""
+    global _fault_trace_stream  # noqa: PLW0603
+
+    if _fault_trace_stream is not None:
+        return
+
+    try:
+        os.makedirs(DIAGNOSTIC_DIR, exist_ok=True)
+        _fault_trace_stream = open(FAULT_TRACE_FILE, "a", encoding="utf-8")
+        _fault_trace_stream.write(
+            f"\n=== startup pid={os.getpid()} at "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} ===\n"
+        )
+        _fault_trace_stream.flush()
+        faulthandler.enable(file=_fault_trace_stream, all_threads=True)
+        logger.info("Faulthandler enabled: %s", FAULT_TRACE_FILE)
+        _write_startup_trace("faulthandler.enabled", path=FAULT_TRACE_FILE)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Could not enable faulthandler: %s", exc)
+        _write_startup_trace("faulthandler.enable_failed", error=exc)
+
+
+def _close_faulthandler_trace() -> None:
+    """Best-effort cleanup for the faulthandler output stream."""
+    global _fault_trace_stream  # noqa: PLW0603
+
+    if _fault_trace_stream is None:
+        return
+
+    try:
+        faulthandler.disable()
+    except Exception:
+        pass
+
+    try:
+        _fault_trace_stream.flush()
+        _fault_trace_stream.close()
+    except Exception:
+        pass
+
+    _fault_trace_stream = None
+
+
+def _install_uncaught_excepthook(logger) -> None:
+    """Log uncaught exceptions with a clear breadcrumb."""
+    previous_hook = sys.excepthook
+
+    def _hook(exc_type, exc_value, exc_traceback) -> None:  # type: ignore[no-untyped-def]
+        _write_startup_trace(
+            "uncaught_exception",
+            exc_type=getattr(exc_type, "__name__", str(exc_type)),
+            message=exc_value,
+        )
+        logger.critical(
+            "Uncaught exception reached sys.excepthook",
+            exc_info=(exc_type, exc_value, exc_traceback),
+        )
+        if previous_hook is not None:
+            previous_hook(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = _hook
+
+
+atexit.register(_close_faulthandler_trace)
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +410,7 @@ class GhostMicApp:
         self._startup_api_worker = None
         self._screen_analysis_worker = None
         self._question_normalization_worker = None
+        self._follow_up_suggestion_worker = None
         self._resume_upload_worker = None
         self._ui_dispatcher = None
         self._audio_backends_prewarmed = False
@@ -342,36 +439,94 @@ class GhostMicApp:
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtCore import Qt
 
-        # High-DPI
-        QApplication.setHighDpiScaleFactorRoundingPolicy(
-            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        startup_step = "begin"
+        self._logger.info(
+            "Startup sequence begin: minimized=%s config_path=%s",
+            self._args.minimized,
+            self._config_path,
         )
-        app = QApplication(sys.argv)
-        app.setApplicationName("GhostMic")
-        app.setQuitOnLastWindowClosed(False)
-        app.setOverrideCursor(Qt.CursorShape.ArrowCursor)
+        _write_startup_trace(
+            "run.begin",
+            minimized=self._args.minimized,
+            config=self._config_path,
+        )
 
-        from ghostmic.ui.styles import MAIN_STYLE
-        app.setStyleSheet(MAIN_STYLE)
+        try:
+            # High-DPI
+            startup_step = "set_high_dpi_policy"
+            QApplication.setHighDpiScaleFactorRoundingPolicy(
+                Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+            )
+            _write_startup_trace("run.high_dpi_policy.ok")
 
-        self._setup_main_window()
-        self._setup_system_tray(app)
-        self._start_model_loader()
-        self._start_audio_threads()
-        self._setup_hotkeys()
-        self._test_api_startup_async()  # Test API connectivity in background
-        self._session_context_compactor.start()
+            startup_step = "create_qapplication"
+            app = QApplication(sys.argv)
+            app.setApplicationName("GhostMic")
+            app.setQuitOnLastWindowClosed(False)
+            app.setOverrideCursor(Qt.CursorShape.ArrowCursor)
+            _write_startup_trace("run.qapplication.ok")
 
-        if not self._args.minimized and self._window:
-            self._window.show()
+            startup_step = "apply_stylesheet"
+            from ghostmic.ui.styles import MAIN_STYLE
 
-        if self._tray and self._window:
-            self._tray.set_window_visible(self._window.isVisible())
-            self._tray.set_docked(self._window.is_docked)
+            app.setStyleSheet(MAIN_STYLE)
+            _write_startup_trace("run.stylesheet.ok")
 
-        app.aboutToQuit.connect(self._on_quit)
+            startup_step = "setup_main_window"
+            self._setup_main_window()
+            _write_startup_trace("run.setup_main_window.ok")
 
-        return app.exec()
+            startup_step = "setup_system_tray"
+            self._setup_system_tray(app)
+            _write_startup_trace("run.setup_system_tray.ok")
+
+            startup_step = "start_model_loader"
+            self._start_model_loader()
+            _write_startup_trace("run.start_model_loader.ok")
+
+            startup_step = "start_audio_threads"
+            self._start_audio_threads()
+            _write_startup_trace("run.start_audio_threads.ok")
+
+            startup_step = "setup_hotkeys"
+            self._setup_hotkeys()
+            _write_startup_trace("run.setup_hotkeys.ok")
+
+            startup_step = "test_api_startup_async"
+            self._test_api_startup_async()  # Test API connectivity in background
+            _write_startup_trace("run.test_api_startup_async.ok")
+
+            startup_step = "start_session_context_compactor"
+            self._session_context_compactor.start()
+            _write_startup_trace("run.session_context_compactor.ok")
+
+            startup_step = "show_window"
+            if not self._args.minimized and self._window:
+                self._window.show()
+            _write_startup_trace(
+                "run.show_window.ok",
+                shown=bool(not self._args.minimized and self._window),
+            )
+
+            startup_step = "sync_tray_state"
+            if self._tray and self._window:
+                self._tray.set_window_visible(self._window.isVisible())
+                self._tray.set_docked(self._window.is_docked)
+            _write_startup_trace("run.sync_tray_state.ok")
+
+            app.aboutToQuit.connect(self._on_quit)
+
+            startup_step = "event_loop_exec"
+            _write_startup_trace("run.event_loop.begin")
+            exit_code = app.exec()
+            self._logger.info("Qt event loop exited with code %s", exit_code)
+            _write_startup_trace("run.event_loop.end", exit_code=exit_code)
+            return exit_code
+
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.exception("Startup failed at step: %s", startup_step)
+            _write_startup_trace("run.failed", step=startup_step, error=exc)
+            raise
 
     # ------------------------------------------------------------------
     # Main window
@@ -408,6 +563,9 @@ class GhostMicApp:
         self._window.controls.set_mic_enabled(self._is_mic_capture_enabled())
         self._window.dictation_committed.connect(self._on_dictation_committed)
         self._window.ai_panel.text_prompt_submitted.connect(self._on_ai_text_prompt_submitted)
+        self._window.suggested_follow_up_selected.connect(
+            self._on_suggested_follow_up_selected
+        )
         self._window.transcript_panel.speaker_text_edited.connect(self._on_speaker_transcript_edited)
         self._window.transcript_panel.speaker_normalize_requested.connect(
             self._on_speaker_question_normalize_requested
@@ -455,6 +613,121 @@ class GhostMicApp:
         if self._question_normalization_worker:
             self._question_normalization_worker.deleteLater()
             self._question_normalization_worker = None
+
+    def _cleanup_follow_up_suggestion_worker(self) -> None:
+        if self._follow_up_suggestion_worker:
+            self._follow_up_suggestion_worker.deleteLater()
+            self._follow_up_suggestion_worker = None
+
+    @staticmethod
+    def _build_local_follow_up_suggestions(question: str) -> List[str]:
+        stem = " ".join(str(question or "").split()).strip().rstrip(".?!")
+        if not stem:
+            return [
+                "Can you walk me through a real project where you handled this end-to-end?",
+                "What trade-offs did you evaluate before choosing your approach?",
+                "How did you monitor outcomes and respond when issues appeared in production?",
+            ]
+
+        return [
+            "Can you walk me through a real production example where this was critical?",
+            f"What constraints or trade-offs did you consider when solving: {stem}?",
+            "How would you measure success and troubleshoot this if it failed after release?",
+        ]
+
+    def _start_follow_up_suggestion_refresh(self, question: str) -> None:
+        if not getattr(self, "_window", None):
+            return
+        if getattr(self, "_follow_up_suggestion_worker", None) is not None:
+            return
+
+        try:
+            from ghostmic.services.question_normalization_service import (
+                QuestionNormalizationWorker,
+            )
+
+            worker = QuestionNormalizationWorker(
+                self._build_ai_runtime_config(),
+                question,
+                parent=None,
+            )
+            if hasattr(worker, "normalized_with_followups_ready"):
+                worker.normalized_with_followups_ready.connect(
+                    lambda normalized, follow_ups, base=question: self._on_follow_up_suggestion_refresh_ready(
+                        base,
+                        normalized,
+                        list(follow_ups or []),
+                    )
+                )
+            else:
+                worker.normalized_ready.connect(
+                    lambda normalized, base=question: self._on_follow_up_suggestion_refresh_ready(
+                        base,
+                        normalized,
+                        [],
+                    )
+                )
+            worker.normalization_error.connect(
+                lambda message, base=question: self._on_follow_up_suggestion_refresh_error(
+                    base,
+                    message,
+                )
+            )
+            worker.finished.connect(self._cleanup_follow_up_suggestion_worker)
+            self._follow_up_suggestion_worker = worker
+            worker.start()
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.warning(
+                "Could not start follow-up suggestion refresh: %s",
+                exc,
+            )
+
+    def _on_follow_up_suggestion_refresh_ready(
+        self,
+        base_question: str,
+        normalized_text: str,
+        follow_up_questions: List[str],
+    ) -> None:
+        from ghostmic.utils.text_processing import clean_text
+
+        if not self._window:
+            return
+
+        normalized = clean_text(str(normalized_text or ""))
+        display_question = normalized or clean_text(str(base_question or ""))
+        if display_question:
+            self._window.set_current_question_text(display_question)
+
+        cleaned_follow_ups: List[str] = []
+        seen: set[str] = set()
+        for question in list(follow_up_questions or []):
+            candidate = clean_text(str(question or ""))
+            if not candidate:
+                continue
+            if not candidate.endswith("?"):
+                candidate = f"{candidate.rstrip('.!')}?"
+            canonical = candidate.rstrip(".?!").lower()
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            cleaned_follow_ups.append(candidate)
+            if len(cleaned_follow_ups) >= 3:
+                break
+
+        if cleaned_follow_ups:
+            self._window.set_question_follow_up_suggestions(cleaned_follow_ups)
+            self._window.show_follow_up_sent_confirmation(base_question)
+
+    def _on_follow_up_suggestion_refresh_error(
+        self,
+        base_question: str,
+        message: str,
+    ) -> None:
+        self._logger.warning(
+            "Follow-up suggestion refresh failed for %r: %s",
+            base_question,
+            message,
+        )
 
     # ------------------------------------------------------------------
     # System tray
@@ -585,6 +858,7 @@ class GhostMicApp:
         QThread objects cannot be restarted once finished.
         """
         try:
+            self._logger.info("Audio startup: initialising shared audio components.")
             self._preload_torch_runtime()
             from ghostmic.core.audio_buffer import AudioBuffer
             from ghostmic.core.vad import VADThread
@@ -608,6 +882,9 @@ class GhostMicApp:
                 name="audio-backend-prewarm",
                 daemon=True,
             ).start()
+            self._logger.info(
+                "Audio startup: launched preload workers (vad-preload, audio-backend-prewarm)."
+            )
         except ImportError as exc:
             self._logger.warning("Audio libraries not available: %s", exc)
 
@@ -1222,6 +1499,22 @@ class GhostMicApp:
 
         self._generate_ai_response(force_follow_up=refine)
 
+    def _on_suggested_follow_up_selected(self, prompt: str) -> None:
+        selected = str(prompt or "").strip()
+        if not selected:
+            return
+
+        window = getattr(self, "_window", None)
+        if window:
+            window.set_current_question_text(selected)
+            window.set_question_follow_up_suggestions(
+                self._build_local_follow_up_suggestions(selected)
+            )
+            window.show_follow_up_sent_confirmation(selected)
+            self._start_follow_up_suggestion_refresh(selected)
+
+        self._on_ai_text_prompt_submitted(selected, refine=True)
+
     def _on_ai_response_ready(self, full_text: str) -> None:
         self._logger.info("_on_ai_response_ready called with %d chars", len(full_text))
         self._session_context_store.append_ai_response(full_text)
@@ -1514,6 +1807,8 @@ class GhostMicApp:
             return
         with self._transcript_lock:
             segment.text = cleaned
+        if self._window and getattr(segment, "source", "") == "speaker":
+            self._window.set_question_follow_up_suggestions([])
 
     def _is_auto_speaker_analysis_enabled(self) -> bool:
         ai_cfg = self._config.get("ai", {})
@@ -1670,6 +1965,9 @@ class GhostMicApp:
 
         self._on_speaker_transcript_edited(segment, cleaned)
 
+        if self._window:
+            self._window.set_question_follow_up_suggestions([])
+
         if self._question_normalization_worker is not None:
             if auto_send_after:
                 self._schedule_auto_speaker_analysis(segment, delay_ms=700)
@@ -1690,13 +1988,23 @@ class GhostMicApp:
                 cleaned,
                 parent=None,
             )
-            worker.normalized_ready.connect(
-                lambda normalized, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalized(
-                    seg,
-                    normalized,
-                    auto_send=auto_send,
+            if hasattr(worker, "normalized_with_followups_ready"):
+                worker.normalized_with_followups_ready.connect(
+                    lambda normalized, follow_ups, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalized(
+                        seg,
+                        normalized,
+                        follow_up_questions=list(follow_ups or []),
+                        auto_send=auto_send,
+                    )
                 )
-            )
+            else:
+                worker.normalized_ready.connect(
+                    lambda normalized, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalized(
+                        seg,
+                        normalized,
+                        auto_send=auto_send,
+                    )
+                )
             worker.normalization_error.connect(
                 lambda message, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalization_error(
                     seg,
@@ -1739,6 +2047,7 @@ class GhostMicApp:
         self,
         segment,
         normalized_text: str,
+        follow_up_questions: Optional[List[str]] = None,
         *,
         auto_send: bool = False,
     ) -> None:
@@ -1764,6 +2073,22 @@ class GhostMicApp:
             source="speaker",
         )
 
+        cleaned_follow_ups: List[str] = []
+        seen: set[str] = set()
+        for question in list(follow_up_questions or []):
+            candidate = clean_text(str(question or ""))
+            if not candidate:
+                continue
+            if not candidate.endswith("?"):
+                candidate = f"{candidate.rstrip('.!')}?"
+            canonical = candidate.rstrip(".?!").lower()
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            cleaned_follow_ups.append(candidate)
+            if len(cleaned_follow_ups) >= 3:
+                break
+
         if self._window:
             self._window.transcript_panel.set_segment_text(segment, normalized)
             self._window.transcript_panel.set_segment_normalization_busy(
@@ -1771,6 +2096,7 @@ class GhostMicApp:
                 False,
                 "Question analyzed" if auto_send else "Question normalized",
             )
+            self._window.set_question_follow_up_suggestions(cleaned_follow_ups)
             if auto_send:
                 self._window.controls.set_status(
                     "Question detected. Generating response…", "#58a6ff"
@@ -1800,6 +2126,7 @@ class GhostMicApp:
 
         self._logger.warning("Question normalization failed: %s", message)
         if self._window:
+            self._window.set_question_follow_up_suggestions([])
             self._window.transcript_panel.set_segment_normalization_busy(
                 segment,
                 False,
@@ -2095,6 +2422,7 @@ class GhostMicApp:
         )
         if reply == QMessageBox.StandardButton.Yes:
             self._window.transcript_panel.clear_transcript()
+            self._window.set_question_follow_up_suggestions([])
             with self._transcript_lock:
                 self._transcript_history.clear()
                 self._ai_context_history.clear()
@@ -2116,6 +2444,9 @@ class GhostMicApp:
         if self._question_normalization_worker and self._question_normalization_worker.isRunning():
             self._question_normalization_worker.requestInterruption()
             self._question_normalization_worker.wait(1500)
+        if self._follow_up_suggestion_worker and self._follow_up_suggestion_worker.isRunning():
+            self._follow_up_suggestion_worker.requestInterruption()
+            self._follow_up_suggestion_worker.wait(1500)
         self._stop_audio_capture()
         self._session_context_compactor.stop(timeout=1.5)
 
@@ -2197,6 +2528,39 @@ def main() -> None:
 
     configure_logging(debug=args.debug)
     logger = get_logger("ghostmic.main")
+    _install_uncaught_excepthook(logger)
+    _enable_faulthandler_trace(logger)
+    _write_startup_trace(
+        "main.start",
+        pid=os.getpid(),
+        executable=sys.executable,
+        frozen=getattr(sys, "frozen", False),
+        argv=" ".join(sys.argv),
+        config=args.config,
+    )
+
+    logger.info(
+        "Diagnostics paths: app_log=%s startup_trace=%s faulthandler=%s",
+        get_log_file_path(),
+        STARTUP_TRACE_FILE,
+        FAULT_TRACE_FILE,
+    )
+
+    try:
+        from PyQt6 import QtCore
+
+        logger.info(
+            "Qt runtime versions: PyQt=%s Qt=%s",
+            getattr(QtCore, "PYQT_VERSION_STR", "unknown"),
+            getattr(QtCore, "QT_VERSION_STR", "unknown"),
+        )
+        _write_startup_trace(
+            "main.qt_versions",
+            pyqt=getattr(QtCore, "PYQT_VERSION_STR", "unknown"),
+            qt=getattr(QtCore, "QT_VERSION_STR", "unknown"),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.debug("Could not read Qt runtime versions: %s", exc)
 
     if sys.platform == "win32":
         supports_capture_exclusion = _check_windows_version()
@@ -2204,24 +2568,49 @@ def main() -> None:
             "Windows version check: WDA_EXCLUDEFROMCAPTURE supported = %s",
             supports_capture_exclusion,
         )
+        _write_startup_trace(
+            "main.windows_version_check",
+            supports_capture_exclusion=supports_capture_exclusion,
+        )
     else:
         logger.info("Running on %s — stealth features are Windows-only.", sys.platform)
+        _write_startup_trace("main.non_windows", platform=sys.platform)
 
+    if getattr(sys, "frozen", False):
+        logger.info(
+            "Frozen runtime context: executable=%s _MEIPASS=%s",
+            sys.executable,
+            getattr(sys, "_MEIPASS", ""),
+        )
+        _write_startup_trace(
+            "main.frozen_context",
+            executable=sys.executable,
+            meipass=getattr(sys, "_MEIPASS", ""),
+        )
+
+    _write_startup_trace("main.create_app.begin")
     app = GhostMicApp(args)
+    _write_startup_trace("main.create_app.ok")
 
     # ── Preload torch BEFORE QApplication is created ──────────────
     # On Windows, PyQt6's QApplication alters the DLL search order.
     # If torch is imported *after* QApplication, c10.dll fails to load
     # (WinError 1114).  Importing torch first avoids the conflict
     # because its DLLs are already mapped into the process.
+    _write_startup_trace("main.torch_preload.begin")
     try:
         import torch  # type: ignore[import]
         _ = torch
         logger.info("Torch preloaded successfully: %s", torch.__version__)
+        _write_startup_trace("main.torch_preload.ok", version=torch.__version__)
     except Exception as exc:  # pylint: disable=broad-except
         logger.debug("Torch preload skipped: %s", exc)
+        _write_startup_trace("main.torch_preload.failed", error=exc)
 
+    _write_startup_trace("main.app_run.begin")
     exit_code = app.run()
+    _write_startup_trace("main.app_run.end", exit_code=exit_code)
+    logger.info("Application exiting with code %s", exit_code)
     sys.exit(exit_code)
 
 

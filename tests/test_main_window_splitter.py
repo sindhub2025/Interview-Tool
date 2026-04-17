@@ -96,3 +96,47 @@ def test_speaker_question_layout_preserves_majority_height_for_ai_panel() -> Non
     assert ai_height > question_height
     assert ai_height / total >= 0.70
     assert question_height <= 220
+
+
+def test_follow_up_suggestions_are_limited_and_clickable() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window._set_question_text(
+        "How do you validate data quality when ETL source schema changes in production?"
+    )
+    window._reveal_question_answer_area()
+    window.set_question_follow_up_suggestions(
+        [
+            "Can you share a real production incident where this happened",
+            "How would you prevent the same issue from recurring?",
+            "What monitoring and alerts would you add?",
+            "What monitoring and alerts would you add?",
+            "How do you align this with release timelines?",
+        ]
+    )
+    for _ in range(10):
+        app.processEvents()
+
+    emitted: list[str] = []
+    window.suggested_follow_up_selected.connect(emitted.append)
+
+    visible_buttons = [btn for btn in window._follow_up_buttons if btn.isVisible()]
+    assert len(visible_buttons) == 3
+
+    second_text = visible_buttons[1].text()
+    assert second_text.endswith("?")
+
+    visible_buttons[1].click()
+    for _ in range(5):
+        app.processEvents()
+
+    assert emitted == [second_text]
+    assert window._follow_up_status_label is not None
+    assert window._follow_up_status_label.isVisible() is True
+    assert "Sent to AI" in window._follow_up_status_label.text()

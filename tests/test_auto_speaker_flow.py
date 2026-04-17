@@ -121,3 +121,61 @@ def test_auto_speaker_duplicate_signature_is_ignored_within_cooldown():
     app._on_auto_speaker_silence_elapsed(segment, generation=1)
 
     assert len(calls) == 1
+
+
+def test_suggested_follow_up_selection_forces_refine_prompt_submission():
+    app = GhostMicApp.__new__(GhostMicApp)
+    app._window = None
+    captured = []
+
+    def _capture(prompt: str, refine: bool) -> None:
+        captured.append((prompt, refine))
+
+    app._on_ai_text_prompt_submitted = _capture
+
+    app._on_suggested_follow_up_selected(
+        "Can you walk me through a production incident and how you resolved it?"
+    )
+
+    assert captured == [
+        (
+            "Can you walk me through a production incident and how you resolved it?",
+            True,
+        )
+    ]
+
+
+def test_suggested_follow_up_selection_shows_next_three_follow_ups():
+    class _WindowStub:
+        def __init__(self) -> None:
+            self.current_question = ""
+            self.follow_ups = []
+            self.sent_confirmation = ""
+
+        def set_current_question_text(self, text: str) -> None:
+            self.current_question = text
+
+        def set_question_follow_up_suggestions(self, questions):
+            self.follow_ups = list(questions)
+
+        def show_follow_up_sent_confirmation(self, question: str) -> None:
+            self.sent_confirmation = question
+
+    app = GhostMicApp.__new__(GhostMicApp)
+    app._window = _WindowStub()
+
+    refresh_calls = []
+    app._start_follow_up_suggestion_refresh = lambda question: refresh_calls.append(question)
+
+    sent_prompts = []
+    app._on_ai_text_prompt_submitted = lambda prompt, refine: sent_prompts.append((prompt, refine))
+
+    selected = "How do you handle schema drift in production ETL pipelines?"
+    app._on_suggested_follow_up_selected(selected)
+
+    assert app._window.current_question == selected
+    assert app._window.sent_confirmation == selected
+    assert len(app._window.follow_ups) == 3
+    assert all(question.endswith("?") for question in app._window.follow_ups)
+    assert refresh_calls == [selected]
+    assert sent_prompts == [(selected, True)]

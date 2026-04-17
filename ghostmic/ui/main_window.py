@@ -64,6 +64,39 @@ logger = get_logger(__name__)
 RESIZE_MARGIN = 12  # pixels from edge that trigger resize
 QWIDGETSIZE_MAX = 16_777_215  # Qt maximum widget dimension
 
+FOLLOW_UP_BUTTON_STYLE = (
+    "QPushButton {"
+    " text-align: left;"
+    " color: #e6f3ff;"
+    " font-size: 10pt;"
+    " font-weight: 700;"
+    " background-color: rgba(56, 139, 253, 0.20);"
+    " border: 1px solid rgba(88, 166, 255, 0.75);"
+    " border-radius: 8px;"
+    " padding: 6px 10px;"
+    "}"
+    "QPushButton:hover {"
+    " background-color: rgba(56, 139, 253, 0.33);"
+    " border-color: rgba(121, 192, 255, 0.95);"
+    "}"
+    "QPushButton:pressed {"
+    " background-color: rgba(31, 111, 235, 0.45);"
+    "}"
+)
+
+FOLLOW_UP_BUTTON_SENT_STYLE = (
+    "QPushButton {"
+    " text-align: left;"
+    " color: #c7ffd3;"
+    " font-size: 10pt;"
+    " font-weight: 700;"
+    " background-color: rgba(63, 185, 80, 0.26);"
+    " border: 1px solid rgba(63, 185, 80, 0.90);"
+    " border-radius: 8px;"
+    " padding: 6px 10px;"
+    "}"
+)
+
 
 class TitleBar(QWidget):
     """Custom title bar with drag handle, pin, minimise and close buttons."""
@@ -233,6 +266,7 @@ class MainWindow(QMainWindow):
 
     dictation_committed = pyqtSignal(str)
     dock_state_changed = pyqtSignal(bool)
+    suggested_follow_up_selected = pyqtSignal(str)
 
     def __init__(self, config: dict, config_path: Optional[str] = None, parent=None) -> None:
         super().__init__(parent)
@@ -244,6 +278,11 @@ class MainWindow(QMainWindow):
         self._expanded_window_size = QSize(420, 650)
         self._collapsed_window_height = 90
         self._latest_question_text = ""
+        self._question_follow_up_suggestions: list[str] = []
+        self._follow_up_buttons: list[QPushButton] = []
+        self._follow_up_header: QLabel | None = None
+        self._follow_up_container: QWidget | None = None
+        self._follow_up_status_label: QLabel | None = None
         self._move_origin: Optional[QPoint] = None
         self._move_window_origin: Optional[QPoint] = None
         self._move_started = False
@@ -442,6 +481,45 @@ class MainWindow(QMainWindow):
             "}"
         )
         question_layout.addWidget(self._question_text, 1)
+
+        follow_up_header = QLabel("Likely Follow-Up Questions")
+        follow_up_header.setStyleSheet(
+            "color: #79c0ff; font-size: 9.5pt; font-weight: 800;"
+        )
+        follow_up_header.hide()
+        self._follow_up_header = follow_up_header
+        question_layout.addWidget(follow_up_header)
+
+        follow_up_container = QWidget()
+        follow_up_layout = QVBoxLayout(follow_up_container)
+        follow_up_layout.setContentsMargins(0, 0, 0, 0)
+        follow_up_layout.setSpacing(6)
+
+        for index in range(3):
+            button = QPushButton("")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFlat(False)
+            button.setMinimumHeight(34)
+            button.setStyleSheet(FOLLOW_UP_BUTTON_STYLE)
+            button.clicked.connect(
+                lambda _checked=False, idx=index: self._on_follow_up_clicked(idx)
+            )
+            button.hide()
+            self._follow_up_buttons.append(button)
+            follow_up_layout.addWidget(button)
+
+        follow_up_container.hide()
+        self._follow_up_container = follow_up_container
+        question_layout.addWidget(follow_up_container)
+
+        follow_up_status = QLabel("")
+        follow_up_status.setStyleSheet(
+            "color: #3fb950; font-size: 9pt; font-weight: 700;"
+        )
+        follow_up_status.hide()
+        self._follow_up_status_label = follow_up_status
+        question_layout.addWidget(follow_up_status)
+
         self._question_card.hide()
         self._splitter.addWidget(self._question_card)
 
@@ -519,7 +597,12 @@ class MainWindow(QMainWindow):
     def _target_question_height(self, available_height: int) -> int:
         """Return a content-aware question-pane height that preserves answer space."""
         doc_height = int(self._question_text.document().size().height() or 0)
-        natural_height = doc_height + 62  # title row + frame padding
+        follow_up_height = 0
+        if self._question_follow_up_suggestions:
+            follow_up_height = 34 + (len(self._question_follow_up_suggestions) * 36)
+        if self._follow_up_status_label is not None and self._follow_up_status_label.text().strip():
+            follow_up_height += 22
+        natural_height = doc_height + 62 + follow_up_height  # title row + frame padding
 
         # Keep the AI panel dominant when speaker question is visible.
         ai_min_height = min(
@@ -549,13 +632,133 @@ class MainWindow(QMainWindow):
         self.resize(collapsed_width, self._collapsed_window_height)
 
     def _set_question_text(self, text: str) -> None:
+        previous_text = self._latest_question_text
         self._latest_question_text = str(text or "").strip()
+        if self._latest_question_text != previous_text:
+            self.clear_follow_up_status()
         self._question_text.setPlainText(self._latest_question_text)
+        if not self._latest_question_text:
+            self._question_follow_up_suggestions = []
+            for button in self._follow_up_buttons:
+                button.hide()
+        self._update_follow_up_visibility()
         self._question_card.setVisible(
             self._qa_revealed and bool(self._latest_question_text)
         )
         if self._qa_revealed:
             QTimer.singleShot(0, self._apply_splitter_proportions)
+
+    def set_current_question_text(self, text: str) -> None:
+        self._set_question_text(text)
+
+    def clear_follow_up_status(self) -> None:
+        if self._follow_up_status_label is not None:
+            self._follow_up_status_label.clear()
+            self._follow_up_status_label.hide()
+        for button in self._follow_up_buttons:
+            if button.isVisible():
+                button.setEnabled(True)
+                button.setStyleSheet(FOLLOW_UP_BUTTON_STYLE)
+
+    def show_follow_up_sent_confirmation(self, question: str) -> None:
+        cleaned = " ".join(str(question or "").split()).strip()
+        if not cleaned:
+            return
+
+        if self._follow_up_status_label is not None:
+            self._follow_up_status_label.setText(f"Sent to AI: {cleaned}")
+            self._follow_up_status_label.show()
+
+        target = self._canonical_question(cleaned)
+        for button in self._follow_up_buttons:
+            if not button.isVisible():
+                continue
+            if self._canonical_question(button.text()) == target:
+                button.setStyleSheet(FOLLOW_UP_BUTTON_SENT_STYLE)
+                button.setEnabled(False)
+            else:
+                button.setEnabled(True)
+                button.setStyleSheet(FOLLOW_UP_BUTTON_STYLE)
+
+        self._update_follow_up_visibility()
+        if self._qa_revealed:
+            QTimer.singleShot(0, self._apply_splitter_proportions)
+
+    @staticmethod
+    def _canonical_question(text: str) -> str:
+        return " ".join(str(text or "").split()).strip().rstrip(".?!").lower()
+
+    def set_question_follow_up_suggestions(
+        self,
+        questions: list[str],
+        *,
+        preserve_status: bool = False,
+    ) -> None:
+        if not preserve_status:
+            self.clear_follow_up_status()
+
+        cleaned_questions: list[str] = []
+        seen: set[str] = set()
+
+        for question in questions:
+            cleaned = " ".join(str(question or "").split()).strip()
+            if not cleaned:
+                continue
+            if not cleaned.endswith("?"):
+                cleaned = f"{cleaned.rstrip('.!')}?"
+
+            canonical = cleaned.rstrip(".?!").lower()
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            cleaned_questions.append(cleaned)
+            if len(cleaned_questions) >= 3:
+                break
+
+        self._question_follow_up_suggestions = cleaned_questions
+
+        for index, button in enumerate(self._follow_up_buttons):
+            if index < len(cleaned_questions):
+                button.setText(cleaned_questions[index])
+                button.setEnabled(True)
+                button.setStyleSheet(FOLLOW_UP_BUTTON_STYLE)
+                button.show()
+            else:
+                button.hide()
+
+        self._update_follow_up_visibility()
+        if self._qa_revealed:
+            QTimer.singleShot(0, self._apply_splitter_proportions)
+
+    def _update_follow_up_visibility(self) -> None:
+        status_text = ""
+        if self._follow_up_status_label is not None:
+            status_text = self._follow_up_status_label.text().strip()
+
+        visible = (
+            self._qa_revealed
+            and bool(self._latest_question_text)
+            and (
+                bool(self._question_follow_up_suggestions)
+                or bool(status_text)
+            )
+        )
+        if self._follow_up_header is not None:
+            self._follow_up_header.setVisible(visible)
+        if self._follow_up_container is not None:
+            self._follow_up_container.setVisible(
+                visible and bool(self._question_follow_up_suggestions)
+            )
+        if self._follow_up_status_label is not None:
+            self._follow_up_status_label.setVisible(visible and bool(status_text))
+
+    def _on_follow_up_clicked(self, index: int) -> None:
+        if index < 0 or index >= len(self._question_follow_up_suggestions):
+            return
+        selected = self._question_follow_up_suggestions[index].strip()
+        if selected:
+            self.show_follow_up_sent_confirmation(selected)
+            self.suggested_follow_up_selected.emit(selected)
 
     def _target_expanded_geometry(self) -> QRect:
         current = self.geometry()
@@ -583,11 +786,13 @@ class MainWindow(QMainWindow):
         self._splitter.show()
 
         if self._qa_revealed:
+            self._update_follow_up_visibility()
             self._qa_container.setMaximumHeight(QWIDGETSIZE_MAX)
             QTimer.singleShot(0, self._apply_splitter_proportions)
             return
 
         self._qa_revealed = True
+        self._update_follow_up_visibility()
         start_geometry = self.geometry()
         target_geometry = self._target_expanded_geometry()
         target_content_height = max(
