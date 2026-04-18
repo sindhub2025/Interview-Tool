@@ -49,7 +49,6 @@ a = Analysis(
     excludes=[
         "test",
         "tests",
-        "unittest",
         "doctest",
         "setuptools",
         "pip",

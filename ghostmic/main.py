@@ -28,7 +28,12 @@ _ROOT = os.path.dirname(_HERE)
 if not getattr(sys, "frozen", False) and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from ghostmic.utils.logger import configure_logging, get_log_file_path, get_logger
+from ghostmic.utils.logger import (
+    configure_logging,
+    get_log_dir,
+    get_log_file_path,
+    get_logger,
+)
 from ghostmic.core.ai_engine import DEFAULT_SYSTEM_PROMPT
 from ghostmic.services.session_context_compactor import SessionContextCompactor
 from ghostmic.services.resume_service import ResumeService
@@ -57,7 +62,7 @@ DEFAULT_CONFIG_PATH = (
     else BUNDLED_CONFIG_PATH
 )
 
-DIAGNOSTIC_DIR = os.path.join(os.path.expanduser("~"), ".ghostmic")
+DIAGNOSTIC_DIR = get_log_dir()
 STARTUP_TRACE_FILE = os.path.join(DIAGNOSTIC_DIR, "startup_trace.log")
 FAULT_TRACE_FILE = os.path.join(DIAGNOSTIC_DIR, "python_faulthandler.log")
 
@@ -292,17 +297,21 @@ def _load_config(path: str) -> dict:
         return merged
 
     if not os.path.exists(path):
-        # Try to read the bundled default config.json
-        default_path = BUNDLED_CONFIG_PATH
         cfg: dict
-        if os.path.exists(default_path):
-            with open(default_path, encoding="utf-8") as fh:
-                cfg = json.load(fh)
-        else:
+        frozen = bool(getattr(sys, "frozen", False))
+        if frozen:
+            # Never seed packaged builds from bundled developer config.
             cfg = _default_config()
+        else:
+            default_path = BUNDLED_CONFIG_PATH
+            if os.path.exists(default_path):
+                with open(default_path, encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+            else:
+                cfg = _default_config()
 
-        # Write it to the requested path if it differs
-        if path != default_path:
+        should_persist = not (not frozen and path == BUNDLED_CONFIG_PATH)
+        if should_persist:
             try:
                 os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
                 with open(path, "w", encoding="utf-8") as fh:
@@ -859,7 +868,7 @@ class GhostMicApp:
         """
         try:
             self._logger.info("Audio startup: initialising shared audio components.")
-            self._preload_torch_runtime()
+            _write_startup_trace("audio.start.begin")
             from ghostmic.core.audio_buffer import AudioBuffer
             from ghostmic.core.vad import VADThread
 
@@ -867,13 +876,22 @@ class GhostMicApp:
             self._buffer = AudioBuffer(
                 sample_rate=audio_cfg.get("sample_rate", 16_000)
             )
+            _write_startup_trace(
+                "audio.buffer.initialized",
+                sample_rate=audio_cfg.get("sample_rate", 16_000),
+            )
 
-            # Preload Silero in the background so first Record click is responsive.
-            threading.Thread(
-                target=VADThread.preload_model,
-                name="vad-preload",
-                daemon=True,
-            ).start()
+            preload_vad = os.environ.get("GHOSTMIC_PRELOAD_VAD", "").strip() == "1"
+            if preload_vad:
+                # Optional warm-up for local VAD (off by default for startup stability).
+                threading.Thread(
+                    target=VADThread.preload_model,
+                    name="vad-preload",
+                    daemon=True,
+                ).start()
+                _write_startup_trace("audio.vad_preload.started")
+            else:
+                _write_startup_trace("audio.vad_preload.skipped")
 
             # Warm audio imports + device probing off the UI thread so
             # first Record click avoids lazy backend initialization cost.
@@ -883,10 +901,18 @@ class GhostMicApp:
                 daemon=True,
             ).start()
             self._logger.info(
-                "Audio startup: launched preload workers (vad-preload, audio-backend-prewarm)."
+                "Audio startup: launched preload workers (%s).",
+                "vad-preload, audio-backend-prewarm"
+                if preload_vad
+                else "audio-backend-prewarm",
             )
+            _write_startup_trace("audio.start.ok", preload_vad=preload_vad)
         except ImportError as exc:
             self._logger.warning("Audio libraries not available: %s", exc)
+            _write_startup_trace("audio.start.import_error", error=exc)
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.exception("Audio startup failed unexpectedly.")
+            _write_startup_trace("audio.start.failed", error=exc)
 
     def _prewarm_audio_backends(self) -> None:
         """Warm common audio backend imports and basic device enumeration."""
@@ -2592,20 +2618,10 @@ def main() -> None:
     app = GhostMicApp(args)
     _write_startup_trace("main.create_app.ok")
 
-    # ── Preload torch BEFORE QApplication is created ──────────────
-    # On Windows, PyQt6's QApplication alters the DLL search order.
-    # If torch is imported *after* QApplication, c10.dll fails to load
-    # (WinError 1114).  Importing torch first avoids the conflict
-    # because its DLLs are already mapped into the process.
-    _write_startup_trace("main.torch_preload.begin")
-    try:
-        import torch  # type: ignore[import]
-        _ = torch
-        logger.info("Torch preloaded successfully: %s", torch.__version__)
-        _write_startup_trace("main.torch_preload.ok", version=torch.__version__)
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.debug("Torch preload skipped: %s", exc)
-        _write_startup_trace("main.torch_preload.failed", error=exc)
+    # Torch preload is intentionally deferred to optional/background paths.
+    # Some packaged environments hard-fail during eager torch import.
+    _write_startup_trace("main.torch_preload.skipped", reason="deferred")
+    logger.info("Torch eager preload skipped at startup for stability.")
 
     _write_startup_trace("main.app_run.begin")
     exit_code = app.run()
