@@ -82,6 +82,28 @@ def test_auto_speaker_silence_elapsed_invokes_normalization_with_auto_send():
     assert app._auto_speaker_last_signature
 
 
+def test_auto_speaker_silence_elapsed_supports_user_source_segments():
+    app = _app_for_auto("auto")
+    segment = TranscriptSegment(
+        text="Can you explain how you approach API test automation in CI pipelines?",
+        source="user",
+        timestamp=11.0,
+    )
+
+    calls = []
+
+    def _capture(seg, text: str, *, auto_send_after: bool = False):
+        calls.append((seg, text, auto_send_after))
+
+    app._on_speaker_question_normalize_requested = _capture
+
+    app._on_auto_speaker_silence_elapsed(segment, generation=1)
+
+    assert len(calls) == 1
+    assert calls[0][0] is segment
+    assert calls[0][2] is True
+
+
 def test_auto_speaker_silence_elapsed_skips_stale_generation_tokens():
     app = _app_for_auto("auto")
     segment = TranscriptSegment(

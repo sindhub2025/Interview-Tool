@@ -115,6 +115,8 @@ def _make_app(capture_mic: bool) -> GhostMicApp:
     app._recording_active = False
     app._mic_prime_in_progress = False
     app._mic_device_fallback_attempted = False
+    app._mic_recovery_pending = False
+    app._mic_recovery_generation = 0
     return app
 
 
@@ -215,13 +217,49 @@ def test_mic_runtime_failure_retries_default_input_device(monkeypatch):
 
     app._enable_mic_capture_live = _enable_with_current_device
 
-    app._on_mic_capture_failed("device busy")
+    app._on_mic_capture_failed("permission denied")
 
     assert app._mic_device_fallback_attempted is True
     assert app._config["audio"]["capture_mic"] is True
     assert app._config["audio"]["input_device"] is None
     assert called == ["disable", ("enable", None)]
     assert app._window.controls.mic_enabled_calls == []
+
+
+def test_transient_mic_runtime_failure_schedules_delayed_retry(monkeypatch):
+    app = _make_app(capture_mic=True)
+    app._recording_active = True
+    called = []
+
+    monkeypatch.setattr("ghostmic.main._save_config", lambda cfg, path: None)
+    app._schedule_mic_live_restart = (
+        lambda detail, *, delay_ms=700: called.append((detail, delay_ms)) or True
+    )
+    app._disable_mic_capture_live = lambda: called.append("disable")
+
+    app._on_mic_capture_failed("device busy")
+
+    assert called == [("device busy", 700)]
+    assert app._config["audio"]["capture_mic"] is True
+    assert app._window.controls.mic_enabled_calls == []
+
+
+def test_mic_default_device_failure_retries_once_before_switching_off(monkeypatch):
+    app = _make_app(capture_mic=True)
+    app._recording_active = True
+    app._config["audio"]["input_device"] = None
+    called = []
+
+    monkeypatch.setattr("ghostmic.main._save_config", lambda cfg, path: None)
+    app._disable_mic_capture_live = lambda: called.append("disable")
+    app._enable_mic_capture_live = lambda: called.append("enable") or False
+
+    app._on_mic_capture_failed("permission denied")
+
+    assert called == ["disable", "enable", "disable"]
+    assert app._config["audio"]["capture_mic"] is False
+    assert app._mic_device_fallback_attempted is False
+    assert app._window.controls.mic_enabled_calls == [False]
 
 
 def test_mic_runtime_failure_after_fallback_switches_to_speaker_only(monkeypatch):

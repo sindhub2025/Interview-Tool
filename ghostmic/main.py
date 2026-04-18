@@ -17,7 +17,7 @@ import platform
 import sys
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 # ── Ensure the project root is on sys.path ────────────────────────────
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -409,6 +409,8 @@ class GhostMicApp:
         self._ai_context_history: List = []
         self._last_ai_response_text: str = ""
         self._last_question_text: str = ""  # tracks most recent speaker question for topic-shift detection
+        self._active_screen_summary_text: str = ""
+        self._active_screen_anchor_question: str = ""
         self._transcript_lock = threading.Lock()
         self._model_ready = False
         self._model_error_message: Optional[str] = None
@@ -425,6 +427,8 @@ class GhostMicApp:
         self._audio_backends_prewarmed = False
         self._mic_prime_in_progress = False
         self._mic_device_fallback_attempted = False
+        self._mic_recovery_pending = False
+        self._mic_recovery_generation = 0
         self._auto_speaker_silence_generation = 0
         self._auto_speaker_last_signature = ""
         self._auto_speaker_last_trigger_ts = 0.0
@@ -1006,7 +1010,97 @@ class GhostMicApp:
         self._mic_thread = None
         self._logger.info("Microphone capture disabled live during recording.")
 
-    def _on_mic_capture_failed(self, detail: str) -> None:
+    def _cancel_pending_mic_recovery(self) -> None:
+        """Invalidate pending delayed mic recovery callbacks."""
+        self._mic_recovery_pending = False
+        self._mic_recovery_generation = int(
+            getattr(self, "_mic_recovery_generation", 0)
+        ) + 1
+
+    @staticmethod
+    def _is_transient_mic_failure(detail: str) -> bool:
+        text = str(detail or "").strip().lower()
+        if not text:
+            return False
+
+        transient_markers = (
+            "overflow",
+            "input overflow",
+            "device busy",
+            "resource busy",
+            "temporarily unavailable",
+            "timed out",
+            "timeout",
+            "unanticipated host error",
+            "stream closed",
+        )
+        return any(marker in text for marker in transient_markers)
+
+    def _schedule_mic_live_restart(self, detail: str, *, delay_ms: int = 700) -> bool:
+        if getattr(self, "_mic_recovery_pending", False):
+            return True
+
+        try:
+            from PyQt6.QtCore import QTimer
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.debug("Mic recovery timer unavailable: %s", exc)
+            return False
+
+        generation = int(getattr(self, "_mic_recovery_generation", 0)) + 1
+        self._mic_recovery_generation = generation
+        self._mic_recovery_pending = True
+
+        if self._window:
+            self._window.controls.set_status(
+                "Microphone hiccup detected. Retrying...",
+                "#f0883e",
+            )
+
+        self._logger.info(
+            "Scheduling microphone restart in %dms after transient failure (%s).",
+            delay_ms,
+            detail,
+        )
+
+        QTimer.singleShot(
+            max(120, int(delay_ms)),
+            lambda token=generation, error_detail=str(detail): self._run_mic_live_restart(
+                token,
+                error_detail,
+            ),
+        )
+        return True
+
+    def _run_mic_live_restart(self, generation: int, detail: str) -> None:
+        if generation != int(getattr(self, "_mic_recovery_generation", 0)):
+            return
+
+        self._mic_recovery_pending = False
+        if not self._recording_active or not self._is_mic_capture_enabled():
+            return
+
+        self._disable_mic_capture_live()
+        if self._enable_mic_capture_live():
+            if self._window:
+                self._window.controls.set_status(
+                    "Microphone recovered after transient error",
+                    "#3fb950",
+                )
+            return
+
+        # The delayed restart already retried the default device once.
+        audio_cfg = self._config.setdefault("audio", {})
+        if audio_cfg.get("input_device") is None:
+            self._mic_device_fallback_attempted = True
+
+        self._on_mic_capture_failed(detail, allow_transient_retry=False)
+
+    def _on_mic_capture_failed(
+        self,
+        detail: str,
+        *,
+        allow_transient_retry: bool = True,
+    ) -> None:
         """Recover from runtime mic failures and keep UI/config in sync."""
         if not self._is_mic_capture_enabled():
             return
@@ -1018,14 +1112,18 @@ class GhostMicApp:
         detail_text = str(detail or "unknown microphone error")
         self._logger.warning("Microphone capture failed: %s", detail_text)
 
+        if (
+            allow_transient_retry
+            and self._recording_active
+            and self._is_transient_mic_failure(detail_text)
+            and self._schedule_mic_live_restart(detail_text, delay_ms=700)
+        ):
+            return
+
         audio_cfg = self._config.setdefault("audio", {})
         configured_input = audio_cfg.get("input_device")
 
-        if configured_input is not None and not self._mic_device_fallback_attempted:
-            self._mic_device_fallback_attempted = True
-            audio_cfg["input_device"] = None
-            _save_config(self._config, self._config_path)
-
+        def _retry_default_input_device() -> bool:
             if self._window:
                 self._window.controls.set_status(
                     "Microphone failed. Retrying default input device...",
@@ -1039,8 +1137,23 @@ class GhostMicApp:
                         "Microphone recovered on default input device",
                         "#3fb950",
                     )
+                return True
+            return False
+
+        if configured_input is not None and not self._mic_device_fallback_attempted:
+            self._mic_device_fallback_attempted = True
+            audio_cfg["input_device"] = None
+            _save_config(self._config, self._config_path)
+
+            if _retry_default_input_device():
                 return
 
+        if configured_input is None and not self._mic_device_fallback_attempted:
+            self._mic_device_fallback_attempted = True
+            if _retry_default_input_device():
+                return
+
+        self._cancel_pending_mic_recovery()
         self._disable_mic_capture_live()
         audio_cfg["capture_mic"] = False
         _save_config(self._config, self._config_path)
@@ -1074,6 +1187,7 @@ class GhostMicApp:
                 )
 
             audio_cfg = self._config.get("audio", {})
+            self._cancel_pending_mic_recovery()
             self._mic_device_fallback_attempted = False
 
             self._vad_thread = VADThread(self._buffer)
@@ -1329,6 +1443,7 @@ class GhostMicApp:
                 self._tray.set_recording(True)
         else:
             self._recording_active = False
+            self._cancel_pending_mic_recovery()
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
@@ -1372,10 +1487,12 @@ class GhostMicApp:
         self._append_transcript_segment(segment, require_recording=True)
 
     def _should_merge_speaker_segments(self, previous, incoming) -> bool:
-        """Return True when *incoming* should continue the previous speaker line."""
-        if getattr(previous, "source", "") != "speaker":
+        """Return True when *incoming* should continue the previous question line."""
+        previous_source = str(getattr(previous, "source", "")).strip().lower()
+        incoming_source = str(getattr(incoming, "source", "")).strip().lower()
+        if previous_source != incoming_source:
             return False
-        if getattr(incoming, "source", "") != "speaker":
+        if not self._is_question_segment_source(previous_source):
             return False
 
         prev_text = str(getattr(previous, "text", "")).strip()
@@ -1490,7 +1607,11 @@ class GhostMicApp:
 
                 if self._ai_context_history:
                     last_context = self._ai_context_history[-1]
-                    if getattr(last_context, "source", "") == "speaker":
+                    if getattr(last_context, "source", "") == getattr(
+                        merged_target,
+                        "source",
+                        "",
+                    ):
                         last_context.text = merged_text
                         last_context.confidence = max(
                             float(getattr(last_context, "confidence", 1.0)),
@@ -1526,7 +1647,7 @@ class GhostMicApp:
                     merged_target.text,
                 )
                 self._window.controls.set_status("Listening…", "#3fb950")
-            if getattr(merged_target, "source", "") == "speaker":
+            if require_recording and self._segment_is_question_source(merged_target):
                 self._schedule_auto_speaker_analysis(merged_target)
             return True
 
@@ -1536,7 +1657,7 @@ class GhostMicApp:
             self._window.transcript_panel.add_segment(segment)
             self._window.controls.set_status("Listening…", "#3fb950")
 
-        if getattr(segment, "source", "") == "speaker":
+        if require_recording and self._segment_is_question_source(segment):
             self._schedule_auto_speaker_analysis(segment)
 
         return True
@@ -1639,10 +1760,62 @@ class GhostMicApp:
     def _on_screen_analysis_ready(self, full_text: str) -> None:
         if not self._window:
             return
+        summary_text = str(full_text or "").strip()
+        if len(summary_text) > 2000:
+            summary_text = summary_text[:2000] + "..."
+        self._active_screen_summary_text = summary_text
+        self._active_screen_anchor_question = ""
         self._session_context_store.append_screen_summary(full_text)
         self._window.ai_panel.finish_response(full_text)
         self._window.controls.set_screen_analysis_busy(False)
         self._window.controls.set_status("✓ Screen analysis ready", "#3fb950")
+
+    def _resolve_active_screen_summary_context(
+        self,
+        latest_speaker_text: str,
+        *,
+        force_follow_up: bool = False,
+        topic_shift_classifier: Optional[Callable[[str, str], bool]] = None,
+    ) -> str:
+        """Return sticky screen-summary context while questions stay on-topic."""
+        summary_text = str(getattr(self, "_active_screen_summary_text", "")).strip()
+        if not summary_text:
+            return ""
+
+        latest_question = str(latest_speaker_text or "").strip()
+        anchor_question = str(getattr(self, "_active_screen_anchor_question", "")).strip()
+
+        if not anchor_question:
+            if latest_question:
+                self._active_screen_anchor_question = latest_question
+            return summary_text
+
+        if not latest_question:
+            return summary_text
+
+        moved_away = False
+        if topic_shift_classifier and not force_follow_up:
+            try:
+                moved_away = bool(topic_shift_classifier(anchor_question, latest_question))
+            except Exception as exc:  # pylint: disable=broad-except
+                self._logger.debug(
+                    "AI request: screen-context topic classification failed: %s",
+                    exc,
+                )
+
+        if moved_away:
+            self._active_screen_summary_text = ""
+            self._active_screen_anchor_question = ""
+            self._logger.info(
+                "AI request: cleared active screen context after topic shift. "
+                "anchor=%r new=%r",
+                anchor_question[:60],
+                latest_question[:60],
+            )
+            return ""
+
+        self._active_screen_anchor_question = latest_question
+        return summary_text
 
     def _on_screen_analysis_error(self, message: str) -> None:
         if self._window:
@@ -1784,6 +1957,7 @@ class GhostMicApp:
         if bool(audio_cfg.get("capture_mic", False)) == enabled:
             return
 
+        self._cancel_pending_mic_recovery()
         self._mic_device_fallback_attempted = False
         audio_cfg["capture_mic"] = enabled
         _save_config(self._config, self._config_path)
@@ -1887,8 +2061,28 @@ class GhostMicApp:
             return
         with self._transcript_lock:
             segment.text = cleaned
-        if self._window and getattr(segment, "source", "") == "speaker":
+        if self._window and self._segment_is_question_source(segment):
             self._window.set_question_follow_up_suggestions([])
+
+    @staticmethod
+    def _is_question_segment_source(source: str) -> bool:
+        return str(source or "").strip().lower() in {"speaker", "user"}
+
+    def _segment_is_question_source(self, segment) -> bool:
+        return self._is_question_segment_source(getattr(segment, "source", ""))
+
+    def _prime_ai_context_with_question(self, segment, question: str) -> None:
+        from ghostmic.core.transcription_engine import TranscriptSegment
+
+        with self._transcript_lock:
+            self._ai_context_history = [
+                TranscriptSegment(
+                    text=question,
+                    source="speaker",
+                    confidence=float(getattr(segment, "confidence", 1.0)),
+                    timestamp=float(getattr(segment, "timestamp", time.time()) or time.time()),
+                )
+            ]
 
     def _is_auto_speaker_analysis_enabled(self) -> bool:
         ai_cfg = self._config.get("ai", {})
@@ -1947,7 +2141,7 @@ class GhostMicApp:
     def _schedule_auto_speaker_analysis(self, segment, *, delay_ms: Optional[int] = None) -> None:
         if not self._is_auto_speaker_analysis_enabled():
             return
-        if getattr(segment, "source", "") != "speaker":
+        if not self._segment_is_question_source(segment):
             return
 
         text = str(getattr(segment, "text", ""))
@@ -1980,7 +2174,7 @@ class GhostMicApp:
             return
         if not self._is_auto_speaker_analysis_enabled():
             return
-        if getattr(segment, "source", "") != "speaker":
+        if not self._segment_is_question_source(segment):
             return
 
         from ghostmic.utils.text_processing import clean_text
@@ -2032,15 +2226,13 @@ class GhostMicApp:
     ) -> None:
         from ghostmic.utils.text_processing import clean_text
 
-        if getattr(segment, "source", "") != "speaker":
+        if not self._segment_is_question_source(segment):
             return
 
         cleaned = clean_text(str(text or ""))
         if not cleaned:
             if self._window:
-                self._window.controls.set_status(
-                    "Speaker question is empty", "#f0883e"
-                )
+                self._window.controls.set_status("Question is empty", "#f0883e")
             return
 
         self._on_speaker_transcript_edited(segment, cleaned)
@@ -2101,7 +2293,7 @@ class GhostMicApp:
                     "Analyzing question…" if auto_send_after else "Normalizing question…",
                 )
                 self._window.controls.set_status(
-                    "Analyzing speaker question…" if auto_send_after else "Normalizing speaker question…",
+                    "Analyzing question…" if auto_send_after else "Normalizing question…",
                     "#58a6ff",
                 )
             worker.start()
@@ -2133,6 +2325,7 @@ class GhostMicApp:
     ) -> None:
         from ghostmic.utils.text_processing import clean_text
 
+        segment_source = str(getattr(segment, "source", "")).strip().lower() or "speaker"
         normalized = clean_text(str(normalized_text or ""))
         if not normalized:
             normalized = str(getattr(segment, "text", "")).strip()
@@ -2150,7 +2343,7 @@ class GhostMicApp:
         self._session_context_store.append_event(
             "normalized_question",
             normalized,
-            source="speaker",
+            source=segment_source,
         )
 
         cleaned_follow_ups: List[str] = []
@@ -2188,10 +2381,12 @@ class GhostMicApp:
                 )
 
         if auto_send:
+            if segment_source != "speaker":
+                self._prime_ai_context_with_question(segment, normalized)
             self._session_context_store.append_event(
                 "auto_ai_request",
                 normalized,
-                source="speaker",
+                source=segment_source,
             )
             self._generate_ai_response(force_follow_up=False)
 
@@ -2204,6 +2399,7 @@ class GhostMicApp:
     ) -> None:
         from ghostmic.utils.text_processing import clean_text
 
+        segment_source = str(getattr(segment, "source", "")).strip().lower() or "speaker"
         self._logger.warning("Question normalization failed: %s", message)
         if self._window:
             self._window.set_question_follow_up_suggestions([])
@@ -2225,9 +2421,11 @@ class GhostMicApp:
             self._session_context_store.append_event(
                 "auto_ai_request",
                 fallback_question,
-                source="speaker",
+                source=segment_source,
                 metadata={"normalization_error": str(message or "")[:120]},
             )
+            if segment_source != "speaker":
+                self._prime_ai_context_with_question(segment, fallback_question)
             if self._window:
                 self._window.controls.set_status(
                     "Normalization failed. Generating from transcript…", "#f0883e"
@@ -2242,18 +2440,16 @@ class GhostMicApp:
             )
 
     def _on_speaker_send_requested(self, segment, text: str) -> None:
-        from ghostmic.core.transcription_engine import TranscriptSegment
         from ghostmic.utils.text_processing import clean_text
 
-        if getattr(segment, "source", "") != "speaker":
+        if not self._segment_is_question_source(segment):
             return
 
+        segment_source = str(getattr(segment, "source", "")).strip().lower() or "speaker"
         question = clean_text(str(text or ""))
         if not question:
             if self._window:
-                self._window.controls.set_status(
-                    "Speaker question is empty", "#f0883e"
-                )
+                self._window.controls.set_status("Question is empty", "#f0883e")
             return
 
         self._auto_speaker_silence_generation += 1
@@ -2261,18 +2457,12 @@ class GhostMicApp:
 
         with self._transcript_lock:
             segment.text = question
-            self._ai_context_history = [
-                TranscriptSegment(
-                    text=question,
-                    source="speaker",
-                    confidence=float(getattr(segment, "confidence", 1.0)),
-                )
-            ]
+        self._prime_ai_context_with_question(segment, question)
 
         self._session_context_store.append_event(
             "manual_ai_request",
             question,
-            source="speaker",
+            source=segment_source,
         )
 
         if self._window:
@@ -2357,6 +2547,19 @@ class GhostMicApp:
                 is_new_topic = AIThread.classify_topic_shift(
                     prev_question_text,
                     latest_speaker_text,
+                )
+
+            active_screen_context = self._resolve_active_screen_summary_context(
+                latest_speaker_text,
+                force_follow_up=force_follow_up,
+                topic_shift_classifier=AIThread.classify_topic_shift,
+            )
+            if active_screen_context:
+                section = f"Active Screen Context:\n{active_screen_context}"
+                runtime_context_tail = (
+                    f"{section}\n\n{runtime_context_tail}".strip()
+                    if runtime_context_tail
+                    else section
                 )
 
             def _snapshot_has_prefix(prefix: str) -> bool:
@@ -2481,6 +2684,8 @@ class GhostMicApp:
                 self._transcript_history.clear()
                 self._ai_context_history.clear()
                 self._last_ai_response_text = ""
+                self._active_screen_summary_text = ""
+                self._active_screen_anchor_question = ""
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
@@ -2507,6 +2712,8 @@ class GhostMicApp:
                 self._transcript_history.clear()
                 self._ai_context_history.clear()
                 self._last_ai_response_text = ""
+                self._active_screen_summary_text = ""
+                self._active_screen_anchor_question = ""
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0

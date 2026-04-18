@@ -90,6 +90,14 @@ def test_no_merge_for_non_speaker_segments():
     assert app._should_merge_speaker_segments(previous, incoming) is False
 
 
+def test_merge_for_user_segments_uses_same_policy_as_speaker_segments():
+    app = _app_with_defaults()
+    previous = _user("Can you explain your ETL testing approach", 42.0)
+    incoming = _user("especially for source to target reconciliation?", 42.8)
+
+    assert app._should_merge_speaker_segments(previous, incoming) is True
+
+
 def test_append_merge_updates_timestamp_for_next_pause_gap_check():
     app = _app_for_append()
 

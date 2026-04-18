@@ -48,6 +48,7 @@ class SegmentBubble(QFrame):
 
     def _build_ui(self) -> None:
         is_speaker = self._segment.source == "speaker"
+        is_question_source = self._segment.source in {"speaker", "user"}
         bg = self.SPEAKER_BG if is_speaker else self.USER_BG
         align = Qt.AlignmentFlag.AlignLeft if is_speaker else Qt.AlignmentFlag.AlignRight
 
@@ -60,7 +61,7 @@ class SegmentBubble(QFrame):
         layout.setContentsMargins(10, 6, 10, 6)
 
         # Text
-        if is_speaker:
+        if is_question_source:
             editor = QTextEdit()
             editor.setPlainText(self._segment.text)
             editor.setAcceptRichText(False)
@@ -227,6 +228,10 @@ class TranscriptPanel(QScrollArea):
         # Track manual scroll
         self.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
+    @staticmethod
+    def _is_question_source(source: str) -> bool:
+        return str(source or "").strip().lower() in {"speaker", "user"}
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -236,11 +241,12 @@ class TranscriptPanel(QScrollArea):
         self._remove_placeholder()
         self._segments.append(segment)
         bubble = SegmentBubble(segment)
-        if segment.source == "speaker":
+        if self._is_question_source(segment.source):
             bubble.normalize_requested.connect(self.speaker_normalize_requested.emit)
             bubble.send_requested.connect(self.speaker_send_requested.emit)
             bubble.text_edited.connect(self.speaker_text_edited.emit)
             self._bubbles_by_segment_id[id(segment)] = bubble
+            self.latest_question_changed.emit(str(getattr(segment, "text", "")).strip())
         # Insert before the trailing stretch (last item)
         self._layout.insertWidget(self._layout.count() - 1, bubble)
         if self._auto_scroll:
@@ -248,7 +254,7 @@ class TranscriptPanel(QScrollArea):
 
     def set_segment_text(self, segment: TranscriptSegment, text: str) -> None:
         bubble = self._bubbles_by_segment_id.get(id(segment))
-        if getattr(segment, "source", "") == "speaker":
+        if self._is_question_source(getattr(segment, "source", "")):
             self.latest_question_changed.emit(str(text).strip())
         if bubble is None:
             return
