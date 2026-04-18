@@ -1,7 +1,12 @@
 """Unit tests for automatic speaker-question analysis flow."""
 
+import threading
+
 from ghostmic.domain import TranscriptSegment
-from ghostmic.main import GhostMicApp
+from ghostmic.main import (
+    GhostMicApp,
+    INITIAL_RECORDING_QUESTION_NORMALIZATION_DELAY_MS,
+)
 
 
 class _NoopLogger:
@@ -13,6 +18,29 @@ class _NoopLogger:
 
     def warning(self, *args, **kwargs):
         return None
+
+
+class _EventStoreStub:
+    def __init__(self) -> None:
+        self.events = []
+
+    def append_event(self, kind, text, source="speaker", metadata=None):
+        self.events.append(
+            {
+                "kind": kind,
+                "text": text,
+                "source": source,
+                "metadata": metadata,
+            }
+        )
+
+    def append_transcript(self, segment) -> None:
+        self.append_event(
+            "transcript",
+            getattr(segment, "text", ""),
+            source=getattr(segment, "source", "speaker"),
+            metadata={"confidence": round(float(getattr(segment, "confidence", 1.0)), 4)},
+        )
 
 
 def _app_for_auto(trigger_mode: str = "auto") -> GhostMicApp:
@@ -28,12 +56,42 @@ def _app_for_auto(trigger_mode: str = "auto") -> GhostMicApp:
         }
     }
     app._recording_active = True
+    app._transcript_lock = threading.Lock()
+    app._transcript_history = []
+    app._ai_context_history = []
+    app._session_context_store = _EventStoreStub()
     app._question_normalization_worker = None
+    app._initial_recording_question_pending = False
+    app._initial_recording_question_consumed = False
+    app._initial_recording_question_generation = 0
     app._auto_speaker_silence_generation = 1
     app._auto_speaker_last_signature = ""
     app._auto_speaker_last_trigger_ts = 0.0
+    app._auto_primary_question_sent = False
+    app._active_primary_question_text = ""
+    app._queued_normalized_questions = []
     app._logger = _NoopLogger()
     app._window = None
+    return app
+
+
+def _app_for_normalization_callbacks() -> GhostMicApp:
+    app = GhostMicApp.__new__(GhostMicApp)
+    app._logger = _NoopLogger()
+    app._window = None
+    app._transcript_lock = threading.Lock()
+    app._transcript_history = []
+    app._ai_context_history = []
+    app._session_context_store = _EventStoreStub()
+    app._initial_recording_question_pending = False
+    app._initial_recording_question_consumed = False
+    app._initial_recording_question_generation = 0
+    app._auto_speaker_silence_generation = 1
+    app._auto_primary_question_sent = False
+    app._active_primary_question_text = ""
+    app._queued_normalized_questions = []
+    app._generate_ai_response = lambda force_follow_up=False: None
+    app._prime_ai_context_with_question = lambda segment, question: None
     return app
 
 
@@ -69,8 +127,14 @@ def test_auto_speaker_silence_elapsed_invokes_normalization_with_auto_send():
 
     calls = []
 
-    def _capture(seg, text: str, *, auto_send_after: bool = False):
-        calls.append((seg, text, auto_send_after))
+    def _capture(
+        seg,
+        text: str,
+        *,
+        auto_send_after: bool = False,
+        auto_send_generation=None,
+    ):
+        calls.append((seg, text, auto_send_after, auto_send_generation))
 
     app._on_speaker_question_normalize_requested = _capture
 
@@ -79,6 +143,7 @@ def test_auto_speaker_silence_elapsed_invokes_normalization_with_auto_send():
     assert len(calls) == 1
     assert calls[0][0] is segment
     assert calls[0][2] is True
+    assert calls[0][3] == 1
     assert app._auto_speaker_last_signature
 
 
@@ -92,8 +157,14 @@ def test_auto_speaker_silence_elapsed_supports_user_source_segments():
 
     calls = []
 
-    def _capture(seg, text: str, *, auto_send_after: bool = False):
-        calls.append((seg, text, auto_send_after))
+    def _capture(
+        seg,
+        text: str,
+        *,
+        auto_send_after: bool = False,
+        auto_send_generation=None,
+    ):
+        calls.append((seg, text, auto_send_after, auto_send_generation))
 
     app._on_speaker_question_normalize_requested = _capture
 
@@ -102,6 +173,7 @@ def test_auto_speaker_silence_elapsed_supports_user_source_segments():
     assert len(calls) == 1
     assert calls[0][0] is segment
     assert calls[0][2] is True
+    assert calls[0][3] == 1
 
 
 def test_auto_speaker_silence_elapsed_skips_stale_generation_tokens():
@@ -114,8 +186,14 @@ def test_auto_speaker_silence_elapsed_skips_stale_generation_tokens():
 
     calls = []
 
-    def _capture(seg, text: str, *, auto_send_after: bool = False):
-        calls.append((seg, text, auto_send_after))
+    def _capture(
+        seg,
+        text: str,
+        *,
+        auto_send_after: bool = False,
+        auto_send_generation=None,
+    ):
+        calls.append((seg, text, auto_send_after, auto_send_generation))
 
     app._on_speaker_question_normalize_requested = _capture
 
@@ -134,8 +212,14 @@ def test_auto_speaker_duplicate_signature_is_ignored_within_cooldown():
 
     calls = []
 
-    def _capture(seg, text: str, *, auto_send_after: bool = False):
-        calls.append((seg, text, auto_send_after))
+    def _capture(
+        seg,
+        text: str,
+        *,
+        auto_send_after: bool = False,
+        auto_send_generation=None,
+    ):
+        calls.append((seg, text, auto_send_after, auto_send_generation))
 
     app._on_speaker_question_normalize_requested = _capture
 
@@ -143,6 +227,81 @@ def test_auto_speaker_duplicate_signature_is_ignored_within_cooldown():
     app._on_auto_speaker_silence_elapsed(segment, generation=1)
 
     assert len(calls) == 1
+    assert calls[0][3] == 1
+
+
+def test_initial_recording_question_uses_delayed_normalization_window(monkeypatch):
+    app = _app_for_auto("auto")
+    segment = TranscriptSegment(
+        text="Can you explain how you validate source and target tables in ETL?",
+        source="speaker",
+        timestamp=20.0,
+    )
+
+    timer_calls = []
+
+    class _TimerStub:
+        @staticmethod
+        def singleShot(delay_ms, callback):
+            timer_calls.append((delay_ms, callback))
+
+    monkeypatch.setattr("PyQt6.QtCore.QTimer", _TimerStub)
+
+    auto_calls = []
+    app._schedule_auto_speaker_analysis = lambda seg, delay_ms=None: auto_calls.append(
+        (seg, delay_ms)
+    )
+
+    normalize_calls = []
+    app._on_speaker_question_normalize_requested = lambda seg, text, **kwargs: normalize_calls.append(
+        (seg, text, kwargs)
+    )
+
+    accepted = app._append_transcript_segment(segment, require_recording=True)
+
+    assert accepted is True
+    assert auto_calls == []
+    assert app._initial_recording_question_pending is True
+    assert timer_calls and timer_calls[0][0] == INITIAL_RECORDING_QUESTION_NORMALIZATION_DELAY_MS
+
+    timer_calls[0][1]()
+
+    assert normalize_calls == [
+        (
+            segment,
+            segment.text,
+            {
+                "auto_send_after": False,
+                "initial_recording_question": True,
+                "recording_question_generation": 0,
+            },
+        )
+    ]
+
+
+def test_initial_recording_question_completion_clears_pending_state():
+    app = _app_for_normalization_callbacks()
+    app._initial_recording_question_pending = True
+    app._initial_recording_question_consumed = False
+    app._initial_recording_question_generation = 4
+
+    segment = TranscriptSegment(
+        text="Explain your retry logic",
+        source="speaker",
+        timestamp=30.0,
+    )
+
+    app._on_speaker_question_normalized(
+        segment,
+        "Can you explain your retry and circuit breaker strategy?",
+        follow_up_questions=[],
+        initial_recording_question=True,
+        recording_question_generation=4,
+    )
+
+    assert app._initial_recording_question_pending is False
+    assert app._initial_recording_question_consumed is True
+    assert segment.text == "Can you explain your retry and circuit breaker strategy?"
 
 
 def test_suggested_follow_up_selection_forces_refine_prompt_submission():
@@ -174,7 +333,7 @@ def test_suggested_follow_up_selection_shows_next_three_follow_ups():
             self.follow_ups = []
             self.sent_confirmation = ""
 
-        def set_current_question_text(self, text: str) -> None:
+        def set_current_question_text(self, text: str, *, force: bool = False) -> None:
             self.current_question = text
 
         def set_question_follow_up_suggestions(self, questions):

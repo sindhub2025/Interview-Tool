@@ -140,3 +140,53 @@ def test_follow_up_suggestions_are_limited_and_clickable() -> None:
     assert window._follow_up_status_label is not None
     assert window._follow_up_status_label.isVisible() is True
     assert "Sent to AI" in window._follow_up_status_label.text()
+
+
+def test_queued_normalized_questions_show_send_actions_and_respect_lock() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window.set_current_question_text("What is your ETL validation strategy?")
+    window.set_question_lock_enabled(True)
+    window.set_current_question_text("This should not override")
+
+    assert window._question_text.toPlainText().strip() == "What is your ETL validation strategy?"
+
+    window.set_queued_normalized_questions(
+        [
+            "How do you handle schema drift in production pipelines",
+            "How do you tune retry backoff across dependent services?",
+            "How do you validate data completeness after late arrivals?",
+            "How do you validate data completeness after late arrivals?",
+            "How do you monitor SLA breaches?",
+        ]
+    )
+    window._reveal_question_answer_area()
+    QTest.qWait(300)
+    for _ in range(10):
+        app.processEvents()
+
+    assert window._queued_questions_container is not None
+    assert window._queued_questions_container.isVisible() is True
+    assert len(window._queued_normalized_questions) == 4
+
+    emitted: list[str] = []
+    window.queued_question_send_requested.connect(emitted.append)
+
+    visible_buttons = [
+        btn
+        for btn in window._queued_question_send_buttons
+        if btn.parentWidget() is not None and btn.parentWidget().isVisible()
+    ]
+    assert len(visible_buttons) == 4
+
+    visible_buttons[1].click()
+    for _ in range(5):
+        app.processEvents()
+
+    assert emitted == [window._queued_normalized_questions[1]]

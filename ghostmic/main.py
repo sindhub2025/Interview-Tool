@@ -284,6 +284,9 @@ def _default_config() -> dict:
     }
 
 
+INITIAL_RECORDING_QUESTION_NORMALIZATION_DELAY_MS = 9_000
+
+
 def _load_config(path: str) -> dict:
     """Load config.json; create a default if it does not exist."""
     def _merge_defaults(base: dict, defaults: dict) -> dict:
@@ -429,9 +432,15 @@ class GhostMicApp:
         self._mic_device_fallback_attempted = False
         self._mic_recovery_pending = False
         self._mic_recovery_generation = 0
+        self._initial_recording_question_pending = False
+        self._initial_recording_question_consumed = False
+        self._initial_recording_question_generation = 0
         self._auto_speaker_silence_generation = 0
         self._auto_speaker_last_signature = ""
         self._auto_speaker_last_trigger_ts = 0.0
+        self._auto_primary_question_sent = False
+        self._active_primary_question_text = ""
+        self._queued_normalized_questions: List[dict] = []
 
         # Services
         self._thread_coordinator = ThreadCoordinator()
@@ -579,6 +588,9 @@ class GhostMicApp:
         self._window.ai_panel.text_prompt_submitted.connect(self._on_ai_text_prompt_submitted)
         self._window.suggested_follow_up_selected.connect(
             self._on_suggested_follow_up_selected
+        )
+        self._window.queued_question_send_requested.connect(
+            self._on_queued_question_send_requested
         )
         self._window.transcript_panel.speaker_text_edited.connect(self._on_speaker_transcript_edited)
         self._window.transcript_panel.speaker_normalize_requested.connect(
@@ -1377,6 +1389,7 @@ class GhostMicApp:
 
     def _on_record_toggled(self, recording: bool) -> None:
         if recording:
+            self._reset_auto_question_session_state()
             started_with_cloud_fallback = False
             if self._is_model_loader_running():
                 enabled, detail = self._try_enable_cloud_fast_start()
@@ -1444,6 +1457,7 @@ class GhostMicApp:
         else:
             self._recording_active = False
             self._cancel_pending_mic_recovery()
+            self._reset_auto_question_session_state()
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
@@ -1639,6 +1653,8 @@ class GhostMicApp:
                 if len(self._transcript_history) > 1000:
                     self._transcript_history = self._transcript_history[-1000:]
 
+        question_segment = merged_target if merged_target is not None else segment
+
         if merged_target is not None:
             self._session_context_store.append_transcript(merged_target)
             if self._window:
@@ -1647,8 +1663,10 @@ class GhostMicApp:
                     merged_target.text,
                 )
                 self._window.controls.set_status("Listening…", "#3fb950")
-            if require_recording and self._segment_is_question_source(merged_target):
-                self._schedule_auto_speaker_analysis(merged_target)
+            if require_recording and self._segment_is_question_source(question_segment):
+                if self._maybe_schedule_initial_recording_question_normalization(question_segment):
+                    return True
+                self._schedule_auto_speaker_analysis(question_segment)
             return True
 
         self._session_context_store.append_transcript(segment)
@@ -1657,8 +1675,10 @@ class GhostMicApp:
             self._window.transcript_panel.add_segment(segment)
             self._window.controls.set_status("Listening…", "#3fb950")
 
-        if require_recording and self._segment_is_question_source(segment):
-            self._schedule_auto_speaker_analysis(segment)
+        if require_recording and self._segment_is_question_source(question_segment):
+            if self._maybe_schedule_initial_recording_question_normalization(question_segment):
+                return True
+            self._schedule_auto_speaker_analysis(question_segment)
 
         return True
 
@@ -1706,7 +1726,7 @@ class GhostMicApp:
 
         window = getattr(self, "_window", None)
         if window:
-            window.set_current_question_text(selected)
+            window.set_current_question_text(selected, force=True)
             window.set_question_follow_up_suggestions(
                 self._build_local_follow_up_suggestions(selected)
             )
@@ -2071,6 +2091,102 @@ class GhostMicApp:
     def _segment_is_question_source(self, segment) -> bool:
         return self._is_question_segment_source(getattr(segment, "source", ""))
 
+    @staticmethod
+    def _canonical_question_key(text: str) -> str:
+        return " ".join(str(text or "").split()).strip().rstrip(".?!").lower()
+
+    def _sync_queued_normalized_questions_to_window(self) -> None:
+        if not self._window:
+            return
+        self._window.set_queued_normalized_questions(
+            [str(item.get("text", "")) for item in self._queued_normalized_questions]
+        )
+
+    def _enqueue_normalized_question(
+        self,
+        segment,
+        question: str,
+        *,
+        source: str,
+        metadata: Optional[dict] = None,
+    ) -> bool:
+        key = self._canonical_question_key(question)
+        if not key:
+            return False
+
+        if key == self._canonical_question_key(self._active_primary_question_text):
+            return False
+
+        for item in self._queued_normalized_questions:
+            if key == self._canonical_question_key(str(item.get("text", ""))):
+                return False
+
+        self._queued_normalized_questions.append(
+            {
+                "text": question,
+                "source": source,
+                "segment": segment,
+                "metadata": dict(metadata or {}),
+            }
+        )
+
+        max_queue_items = 4
+        if len(self._queued_normalized_questions) > max_queue_items:
+            self._queued_normalized_questions = self._queued_normalized_questions[-max_queue_items:]
+
+        self._sync_queued_normalized_questions_to_window()
+        return True
+
+    def _pop_queued_normalized_question(self, question: str) -> Optional[dict]:
+        key = self._canonical_question_key(question)
+        for index, item in enumerate(self._queued_normalized_questions):
+            if key == self._canonical_question_key(str(item.get("text", ""))):
+                popped = self._queued_normalized_questions.pop(index)
+                self._sync_queued_normalized_questions_to_window()
+                return popped
+        return None
+
+    def _reset_auto_question_session_state(self) -> None:
+        self._auto_primary_question_sent = False
+        self._active_primary_question_text = ""
+        self._queued_normalized_questions.clear()
+        self._initial_recording_question_pending = False
+        self._initial_recording_question_consumed = False
+        self._initial_recording_question_generation = int(
+            getattr(self, "_initial_recording_question_generation", 0)
+        ) + 1
+        if self._window:
+            self._window.set_question_lock_enabled(False)
+            self._window.clear_queued_normalized_questions()
+
+    def _on_queued_question_send_requested(self, question: str) -> None:
+        from ghostmic.core.transcription_engine import TranscriptSegment
+        from ghostmic.utils.text_processing import clean_text
+
+        cleaned = clean_text(str(question or ""))
+        if not cleaned:
+            return
+
+        queued_item = self._pop_queued_normalized_question(cleaned)
+        if queued_item is None:
+            queued_item = {
+                "segment": TranscriptSegment(text=cleaned, source="speaker", confidence=1.0),
+                "source": "speaker",
+            }
+
+        segment = queued_item.get("segment")
+        if segment is None:
+            segment = TranscriptSegment(text=cleaned, source="speaker", confidence=1.0)
+
+        self._auto_primary_question_sent = True
+        self._active_primary_question_text = cleaned
+
+        if self._window:
+            self._window.set_question_lock_enabled(True)
+            self._window.set_current_question_text(cleaned, force=True)
+
+        self._on_speaker_send_requested(segment, cleaned)
+
     def _prime_ai_context_with_question(self, segment, question: str) -> None:
         from ghostmic.core.transcription_engine import TranscriptSegment
 
@@ -2137,6 +2253,98 @@ class GhostMicApp:
     def _mark_auto_speaker_triggered(self, segment, text: str) -> None:
         self._auto_speaker_last_signature = self._build_auto_speaker_signature(segment, text)
         self._auto_speaker_last_trigger_ts = time.time()
+
+    def _is_current_auto_speaker_generation(self, generation: Optional[int]) -> bool:
+        if generation is None:
+            return True
+        return int(generation) == int(self._auto_speaker_silence_generation)
+
+    def _maybe_schedule_initial_recording_question_normalization(self, segment) -> bool:
+        if not self._is_auto_speaker_analysis_enabled():
+            return False
+        if not self._segment_is_question_source(segment):
+            return False
+        if bool(getattr(self, "_initial_recording_question_consumed", False)):
+            return False
+        if bool(getattr(self, "_initial_recording_question_pending", False)):
+            return True
+
+        from ghostmic.utils.text_processing import clean_text
+
+        cleaned = clean_text(str(getattr(segment, "text", "")))
+        if not self._is_auto_speaker_candidate_text(cleaned):
+            return False
+
+        try:
+            from PyQt6.QtCore import QTimer
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.debug("Initial question normalization timer unavailable: %s", exc)
+            return False
+
+        generation = int(getattr(self, "_initial_recording_question_generation", 0))
+        self._initial_recording_question_pending = True
+        self._logger.info(
+            "Scheduling initial question normalization in %dms.",
+            INITIAL_RECORDING_QUESTION_NORMALIZATION_DELAY_MS,
+        )
+        QTimer.singleShot(
+            INITIAL_RECORDING_QUESTION_NORMALIZATION_DELAY_MS,
+            lambda seg=segment, token=generation: self._on_initial_recording_question_normalization_elapsed(
+                seg,
+                token,
+            ),
+        )
+        return True
+
+    def _on_initial_recording_question_normalization_elapsed(self, segment, generation: int) -> None:
+        if generation != int(getattr(self, "_initial_recording_question_generation", 0)):
+            return
+        if not self._recording_active:
+            return
+        if not self._is_auto_speaker_analysis_enabled():
+            return
+        if not self._segment_is_question_source(segment):
+            return
+
+        from ghostmic.utils.text_processing import clean_text
+
+        cleaned = clean_text(str(getattr(segment, "text", "")))
+        if not cleaned:
+            self._logger.debug("Initial question normalization skipped: transcript was empty.")
+            self._initial_recording_question_pending = False
+            self._initial_recording_question_consumed = True
+            return
+
+        if self._question_normalization_worker is not None:
+            self._logger.debug(
+                "Initial question normalization deferred: normalization worker busy."
+            )
+            try:
+                from PyQt6.QtCore import QTimer
+            except Exception as exc:  # pylint: disable=broad-except
+                self._logger.debug(
+                    "Initial question normalization retry timer unavailable: %s",
+                    exc,
+                )
+                return
+
+            QTimer.singleShot(
+                700,
+                lambda seg=segment, token=generation: self._on_initial_recording_question_normalization_elapsed(
+                    seg,
+                    token,
+                ),
+            )
+            return
+
+        self._mark_auto_speaker_triggered(segment, cleaned)
+        self._on_speaker_question_normalize_requested(
+            segment,
+            cleaned,
+            auto_send_after=False,
+            initial_recording_question=True,
+            recording_question_generation=generation,
+        )
 
     def _schedule_auto_speaker_analysis(self, segment, *, delay_ms: Optional[int] = None) -> None:
         if not self._is_auto_speaker_analysis_enabled():
@@ -2215,6 +2423,7 @@ class GhostMicApp:
             segment,
             cleaned,
             auto_send_after=True,
+            auto_send_generation=generation,
         )
 
     def _on_speaker_question_normalize_requested(
@@ -2223,6 +2432,9 @@ class GhostMicApp:
         text: str,
         *,
         auto_send_after: bool = False,
+        auto_send_generation: Optional[int] = None,
+        initial_recording_question: bool = False,
+        recording_question_generation: Optional[int] = None,
     ) -> None:
         from ghostmic.utils.text_processing import clean_text
 
@@ -2239,6 +2451,9 @@ class GhostMicApp:
 
         if self._window:
             self._window.set_question_follow_up_suggestions([])
+
+        if auto_send_after and auto_send_generation is None:
+            auto_send_generation = int(self._auto_speaker_silence_generation)
 
         if self._question_normalization_worker is not None:
             if auto_send_after:
@@ -2262,26 +2477,35 @@ class GhostMicApp:
             )
             if hasattr(worker, "normalized_with_followups_ready"):
                 worker.normalized_with_followups_ready.connect(
-                    lambda normalized, follow_ups, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalized(
+                    lambda normalized, follow_ups, seg=segment, auto_send=auto_send_after, auto_generation=auto_send_generation, initial=initial_recording_question, recording_generation=recording_question_generation: self._on_speaker_question_normalized(
                         seg,
                         normalized,
                         follow_up_questions=list(follow_ups or []),
                         auto_send=auto_send,
+                        auto_send_generation=auto_generation,
+                        initial_recording_question=initial,
+                        recording_question_generation=recording_generation,
                     )
                 )
             else:
                 worker.normalized_ready.connect(
-                    lambda normalized, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalized(
+                    lambda normalized, seg=segment, auto_send=auto_send_after, auto_generation=auto_send_generation, initial=initial_recording_question, recording_generation=recording_question_generation: self._on_speaker_question_normalized(
                         seg,
                         normalized,
                         auto_send=auto_send,
+                        auto_send_generation=auto_generation,
+                        initial_recording_question=initial,
+                        recording_question_generation=recording_generation,
                     )
                 )
             worker.normalization_error.connect(
-                lambda message, seg=segment, auto_send=auto_send_after: self._on_speaker_question_normalization_error(
+                lambda message, seg=segment, auto_send=auto_send_after, auto_generation=auto_send_generation, initial=initial_recording_question, recording_generation=recording_question_generation: self._on_speaker_question_normalization_error(
                     seg,
                     message,
                     auto_send=auto_send,
+                    auto_send_generation=auto_generation,
+                    initial_recording_question=initial,
+                    recording_question_generation=recording_generation,
                 )
             )
             worker.finished.connect(self._cleanup_question_normalization_worker)
@@ -2313,6 +2537,7 @@ class GhostMicApp:
                     segment,
                     str(exc),
                     auto_send=True,
+                    auto_send_generation=auto_send_generation,
                 )
 
     def _on_speaker_question_normalized(
@@ -2322,8 +2547,46 @@ class GhostMicApp:
         follow_up_questions: Optional[List[str]] = None,
         *,
         auto_send: bool = False,
+        auto_send_generation: Optional[int] = None,
+        initial_recording_question: bool = False,
+        recording_question_generation: Optional[int] = None,
     ) -> None:
         from ghostmic.utils.text_processing import clean_text
+
+        if initial_recording_question and recording_question_generation is not None:
+            if int(recording_question_generation) != int(
+                getattr(self, "_initial_recording_question_generation", 0)
+            ):
+                self._logger.debug(
+                    "Skipping stale initial recording question result: generation=%s current=%s",
+                    recording_question_generation,
+                    getattr(self, "_initial_recording_question_generation", 0),
+                )
+                if self._window:
+                    self._window.transcript_panel.set_segment_normalization_busy(
+                        segment,
+                        False,
+                        "",
+                    )
+                return
+
+        if auto_send and not self._is_current_auto_speaker_generation(auto_send_generation):
+            self._logger.debug(
+                "Skipping stale auto normalization result: generation=%s current=%s",
+                auto_send_generation,
+                self._auto_speaker_silence_generation,
+            )
+            if self._window:
+                self._window.transcript_panel.set_segment_normalization_busy(
+                    segment,
+                    False,
+                    "",
+                )
+            return
+
+        if initial_recording_question:
+            self._initial_recording_question_pending = False
+            self._initial_recording_question_consumed = True
 
         segment_source = str(getattr(segment, "source", "")).strip().lower() or "speaker"
         normalized = clean_text(str(normalized_text or ""))
@@ -2334,6 +2597,7 @@ class GhostMicApp:
                 segment,
                 "Normalization produced empty text.",
                 auto_send=auto_send,
+                auto_send_generation=auto_send_generation,
             )
             return
 
@@ -2345,6 +2609,32 @@ class GhostMicApp:
             normalized,
             source=segment_source,
         )
+
+        is_auto_queue_only = bool(auto_send and self._auto_primary_question_sent)
+        if is_auto_queue_only:
+            queued = self._enqueue_normalized_question(
+                segment,
+                normalized,
+                source=segment_source,
+            )
+            if queued:
+                self._session_context_store.append_event(
+                    "queued_normalized_question",
+                    normalized,
+                    source=segment_source,
+                )
+            if self._window:
+                self._window.transcript_panel.set_segment_text(segment, normalized)
+                self._window.transcript_panel.set_segment_normalization_busy(
+                    segment,
+                    False,
+                    "Question queued",
+                )
+                self._window.controls.set_status(
+                    "New normalized question queued. Click Send to AI to use it.",
+                    "#f2cc60",
+                )
+            return
 
         cleaned_follow_ups: List[str] = []
         seen: set[str] = set()
@@ -2371,6 +2661,8 @@ class GhostMicApp:
             )
             self._window.set_question_follow_up_suggestions(cleaned_follow_ups)
             if auto_send:
+                self._window.set_question_lock_enabled(True)
+                self._window.set_current_question_text(normalized, force=True)
                 self._window.controls.set_status(
                     "Question detected. Generating response…", "#58a6ff"
                 )
@@ -2381,8 +2673,9 @@ class GhostMicApp:
                 )
 
         if auto_send:
-            if segment_source != "speaker":
-                self._prime_ai_context_with_question(segment, normalized)
+            self._auto_primary_question_sent = True
+            self._active_primary_question_text = normalized
+            self._prime_ai_context_with_question(segment, normalized)
             self._session_context_store.append_event(
                 "auto_ai_request",
                 normalized,
@@ -2396,8 +2689,42 @@ class GhostMicApp:
         message: str,
         *,
         auto_send: bool = False,
+        auto_send_generation: Optional[int] = None,
+        initial_recording_question: bool = False,
+        recording_question_generation: Optional[int] = None,
     ) -> None:
         from ghostmic.utils.text_processing import clean_text
+
+        if initial_recording_question and recording_question_generation is not None:
+            if int(recording_question_generation) != int(
+                getattr(self, "_initial_recording_question_generation", 0)
+            ):
+                self._logger.debug(
+                    "Skipping stale initial recording question error: generation=%s current=%s",
+                    recording_question_generation,
+                    getattr(self, "_initial_recording_question_generation", 0),
+                )
+                if self._window:
+                    self._window.transcript_panel.set_segment_normalization_busy(
+                        segment,
+                        False,
+                        "",
+                    )
+                return
+
+        if auto_send and not self._is_current_auto_speaker_generation(auto_send_generation):
+            self._logger.debug(
+                "Skipping stale auto normalization error: generation=%s current=%s",
+                auto_send_generation,
+                self._auto_speaker_silence_generation,
+            )
+            if self._window:
+                self._window.transcript_panel.set_segment_normalization_busy(
+                    segment,
+                    False,
+                    "",
+                )
+            return
 
         segment_source = str(getattr(segment, "source", "")).strip().lower() or "speaker"
         self._logger.warning("Question normalization failed: %s", message)
@@ -2409,6 +2736,10 @@ class GhostMicApp:
                 "Normalization failed",
             )
 
+        if initial_recording_question:
+            self._initial_recording_question_pending = False
+            self._initial_recording_question_consumed = True
+
         if auto_send:
             fallback_question = clean_text(str(getattr(segment, "text", "")))
             if not fallback_question:
@@ -2418,15 +2749,39 @@ class GhostMicApp:
                     )
                 return
 
+            if self._auto_primary_question_sent:
+                queued = self._enqueue_normalized_question(
+                    segment,
+                    fallback_question,
+                    source=segment_source,
+                    metadata={"normalization_error": str(message or "")[:120]},
+                )
+                if queued:
+                    self._session_context_store.append_event(
+                        "queued_normalized_question",
+                        fallback_question,
+                        source=segment_source,
+                        metadata={"normalization_error": str(message or "")[:120]},
+                    )
+                if self._window:
+                    self._window.controls.set_status(
+                        "Normalization failed, but question was queued. Click Send to AI to use it.",
+                        "#f2cc60",
+                    )
+                return
+
             self._session_context_store.append_event(
                 "auto_ai_request",
                 fallback_question,
                 source=segment_source,
                 metadata={"normalization_error": str(message or "")[:120]},
             )
-            if segment_source != "speaker":
-                self._prime_ai_context_with_question(segment, fallback_question)
+            self._auto_primary_question_sent = True
+            self._active_primary_question_text = fallback_question
+            self._prime_ai_context_with_question(segment, fallback_question)
             if self._window:
+                self._window.set_question_lock_enabled(True)
+                self._window.set_current_question_text(fallback_question, force=True)
                 self._window.controls.set_status(
                     "Normalization failed. Generating from transcript…", "#f0883e"
                 )
@@ -2459,6 +2814,10 @@ class GhostMicApp:
             segment.text = question
         self._prime_ai_context_with_question(segment, question)
 
+        self._auto_primary_question_sent = True
+        self._active_primary_question_text = question
+        self._pop_queued_normalized_question(question)
+
         self._session_context_store.append_event(
             "manual_ai_request",
             question,
@@ -2472,6 +2831,8 @@ class GhostMicApp:
                 False,
                 "",
             )
+            self._window.set_question_lock_enabled(True)
+            self._window.set_current_question_text(question, force=True)
             self._window.controls.set_status(
                 "Sending selected question to AI…", "#58a6ff"
             )
@@ -2686,6 +3047,7 @@ class GhostMicApp:
                 self._last_ai_response_text = ""
                 self._active_screen_summary_text = ""
                 self._active_screen_anchor_question = ""
+            self._reset_auto_question_session_state()
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
@@ -2706,7 +3068,9 @@ class GhostMicApp:
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            self._reset_auto_question_session_state()
             self._window.transcript_panel.clear_transcript()
+            self._window.set_current_question_text("", force=True)
             self._window.set_question_follow_up_suggestions([])
             with self._transcript_lock:
                 self._transcript_history.clear()
