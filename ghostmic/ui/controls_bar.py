@@ -1,5 +1,5 @@
 """
-Controls bar: compact record, mic, settings, and capture actions.
+Controls bar: compact record, mic, capture, and settings actions.
 """
 
 from __future__ import annotations
@@ -138,19 +138,19 @@ class ControlsBar(QWidget):
         )
         self._status_label.setVisible(False)
 
-        # Settings button
-        self._settings_btn = QPushButton("Settings")
-        self._settings_btn.setObjectName("settings_btn")
-        self._settings_btn.setFixedSize(86, 38)
-        self._settings_btn.clicked.connect(self._on_settings_clicked)
-        layout.addWidget(self._settings_btn)
-
         # Screen analysis button
         self._screenshot_btn = QPushButton("Capture")
         self._screenshot_btn.setObjectName("screenshot_btn")
         self._screenshot_btn.setFixedSize(88, 38)
         self._screenshot_btn.clicked.connect(self._on_screenshot_clicked)
         layout.addWidget(self._screenshot_btn)
+
+        # Settings button
+        self._settings_btn = QPushButton("Settings")
+        self._settings_btn.setObjectName("settings_btn")
+        self._settings_btn.setFixedSize(86, 38)
+        self._settings_btn.clicked.connect(self._on_settings_clicked)
+        layout.addWidget(self._settings_btn)
 
     # ------------------------------------------------------------------
     # Public API

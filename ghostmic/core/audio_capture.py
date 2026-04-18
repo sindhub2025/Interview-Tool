@@ -247,6 +247,7 @@ class MicCaptureThread(QThread):  # type: ignore[misc]
 
     if pyqtSignal is not None:
         audio_chunk_ready = pyqtSignal(object, str)
+        mic_capture_failed = pyqtSignal(str)
 
     def __init__(
         self,
@@ -271,7 +272,10 @@ class MicCaptureThread(QThread):  # type: ignore[misc]
         try:
             import sounddevice as sd  # type: ignore[import]
         except ImportError:
-            logger.error("sounddevice not installed – mic capture unavailable.")
+            msg = "sounddevice not installed – mic capture unavailable."
+            logger.error(msg)
+            if pyqtSignal is not None:
+                self.mic_capture_failed.emit(msg)  # type: ignore[attr-defined]
             return
 
         logger.info(
@@ -305,6 +309,8 @@ class MicCaptureThread(QThread):  # type: ignore[misc]
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("MicCapture error: %s", exc, exc_info=True)
+            if pyqtSignal is not None:
+                self.mic_capture_failed.emit(str(exc))  # type: ignore[attr-defined]
         finally:
             logger.info("MicCapture: stopped.")
 

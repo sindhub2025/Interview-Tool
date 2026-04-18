@@ -424,6 +424,7 @@ class GhostMicApp:
         self._ui_dispatcher = None
         self._audio_backends_prewarmed = False
         self._mic_prime_in_progress = False
+        self._mic_device_fallback_attempted = False
         self._auto_speaker_silence_generation = 0
         self._auto_speaker_last_signature = ""
         self._auto_speaker_last_trigger_ts = 0.0
@@ -989,6 +990,8 @@ class GhostMicApp:
                 device_index=audio_cfg.get("input_device"),
             )
             self._mic_thread.audio_chunk_ready.connect(self._vad_thread.push_chunk)
+            if hasattr(self._mic_thread, "mic_capture_failed"):
+                self._mic_thread.mic_capture_failed.connect(self._on_mic_capture_failed)
             self._thread_coordinator.register("mic", self._mic_thread)
             self._mic_thread.start()
             self._logger.info("Microphone capture enabled live during recording.")
@@ -1002,6 +1005,53 @@ class GhostMicApp:
         self._thread_coordinator.stop_one("mic", timeout_ms=2000)
         self._mic_thread = None
         self._logger.info("Microphone capture disabled live during recording.")
+
+    def _on_mic_capture_failed(self, detail: str) -> None:
+        """Recover from runtime mic failures and keep UI/config in sync."""
+        if not self._is_mic_capture_enabled():
+            return
+
+        if not self._recording_active and self._mic_thread is None:
+            # Ignore stale failure notifications that can arrive after shutdown.
+            return
+
+        detail_text = str(detail or "unknown microphone error")
+        self._logger.warning("Microphone capture failed: %s", detail_text)
+
+        audio_cfg = self._config.setdefault("audio", {})
+        configured_input = audio_cfg.get("input_device")
+
+        if configured_input is not None and not self._mic_device_fallback_attempted:
+            self._mic_device_fallback_attempted = True
+            audio_cfg["input_device"] = None
+            _save_config(self._config, self._config_path)
+
+            if self._window:
+                self._window.controls.set_status(
+                    "Microphone failed. Retrying default input device...",
+                    "#f0883e",
+                )
+
+            self._disable_mic_capture_live()
+            if self._enable_mic_capture_live():
+                if self._window:
+                    self._window.controls.set_status(
+                        "Microphone recovered on default input device",
+                        "#3fb950",
+                    )
+                return
+
+        self._disable_mic_capture_live()
+        audio_cfg["capture_mic"] = False
+        _save_config(self._config, self._config_path)
+        self._mic_device_fallback_attempted = False
+
+        if self._window:
+            self._window.controls.set_mic_enabled(False)
+            self._window.controls.set_status(
+                "Microphone unavailable. Switched to speaker-only mode.",
+                "#f0883e",
+            )
 
     def _create_audio_threads(self) -> bool:
         """Create fresh audio capture and VAD threads for a new recording.
@@ -1024,6 +1074,7 @@ class GhostMicApp:
                 )
 
             audio_cfg = self._config.get("audio", {})
+            self._mic_device_fallback_attempted = False
 
             self._vad_thread = VADThread(self._buffer)
             self._vad_thread.speech_segment_ready.connect(self._on_speech_segment)
@@ -1047,6 +1098,8 @@ class GhostMicApp:
                 self._mic_thread.audio_chunk_ready.connect(
                     self._vad_thread.push_chunk
                 )
+                if hasattr(self._mic_thread, "mic_capture_failed"):
+                    self._mic_thread.mic_capture_failed.connect(self._on_mic_capture_failed)
                 self._thread_coordinator.register("mic", self._mic_thread)
                 self._logger.info("Microphone capture enabled for this recording session.")
             else:
@@ -1731,6 +1784,7 @@ class GhostMicApp:
         if bool(audio_cfg.get("capture_mic", False)) == enabled:
             return
 
+        self._mic_device_fallback_attempted = False
         audio_cfg["capture_mic"] = enabled
         _save_config(self._config, self._config_path)
 
