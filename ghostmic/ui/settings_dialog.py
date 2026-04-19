@@ -686,9 +686,15 @@ class SettingsDialog(QDialog):
         if sys.platform != "win32":
             return
         try:
-            from ghostmic.core.stealth import apply_stealth
+            from ghostmic.core.stealth import apply_stealth, remove_stealth
             hwnd = int(self.winId())
-            apply_stealth(hwnd)
+            stealth_enabled = bool(
+                self._config.get("ui", {}).get("stealth_enabled", True)
+            )
+            if stealth_enabled:
+                apply_stealth(hwnd)
+            else:
+                remove_stealth(hwnd)
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("SettingsDialog: could not apply stealth: %s", exc)
 

@@ -1163,9 +1163,15 @@ class MainWindow(QMainWindow):
         if sys.platform != "win32":
             return
         try:
-            from ghostmic.core.stealth import apply_stealth
+            from ghostmic.core.stealth import apply_stealth, remove_stealth
             hwnd = int(self.winId())
-            apply_stealth(hwnd)
+            stealth_enabled = bool(
+                self._config.get("ui", {}).get("stealth_enabled", True)
+            )
+            if stealth_enabled:
+                apply_stealth(hwnd)
+            else:
+                remove_stealth(hwnd)
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("MainWindow: could not apply stealth: %s", exc)
 
@@ -1180,6 +1186,7 @@ class MainWindow(QMainWindow):
         QApplication.setFont(font)
         # Allow optional toggling of dock dragging behavior
         self._dock_draggable = bool(ui.get("dock_draggable", True))
+        self._controls.set_stealth_enabled(bool(ui.get("stealth_enabled", True)))
         self._dictation_idle_ms = int(
             self._config.get("dictation", {}).get("commit_idle_ms", 1200)
         )
@@ -1207,7 +1214,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._apply_splitter_proportions)
         else:
             self._apply_startup_collapsed_layout()
+        self._controls.set_stealth_enabled(bool(ui.get("stealth_enabled", True)))
         self._dictation_idle_ms = int(config.get("dictation", {}).get("commit_idle_ms", 1200))
+        QTimer.singleShot(100, self._apply_stealth)
 
     @property
     def is_docked(self) -> bool:

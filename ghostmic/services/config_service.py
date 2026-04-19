@@ -73,6 +73,7 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ui.font_size":            (int,   11,       lambda v: 8 <= v <= 20),
     "ui.window_width":         (int,   420,      lambda v: 200 <= v <= 3000),
     "ui.window_height":        (int,   650,      lambda v: 200 <= v <= 3000),
+    "ui.stealth_enabled":      (bool,  True,     None),
     "ui.compact_mode":         (bool,  False,    None),
     "ui.docked":               (bool,  False,    None),
     "ui.dock_height":          (int,   56,       lambda v: 38 <= v <= 120),

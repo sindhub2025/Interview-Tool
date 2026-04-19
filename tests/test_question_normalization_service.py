@@ -2,6 +2,7 @@
 
 from ghostmic.services.question_normalization_service import (
     _extract_json_payload,
+    _build_normalization_context_block,
     _parse_normalization_result,
     _sanitize_follow_up_questions,
 )
@@ -53,3 +54,23 @@ def test_parse_normalization_result_supports_plain_text_fallback() -> None:
         "How do you validate row counts between source and target tables?"
     )
     assert len(result.follow_up_questions) == 3
+
+
+def test_build_normalization_context_block_includes_resume_and_sql_context() -> None:
+    context = _build_normalization_context_block(
+        "Can you tell me about your experience using SQL window functions in ETL pipelines?",
+        {
+            "resume_profile": {
+                "summary": "Data engineer with SQL and Python experience.",
+                "skills": ["SQL", "Python", "ETL"],
+                "companies": ["Acme"],
+            },
+            "resume_context_enabled": True,
+            "sql_profile_enabled": True,
+        },
+    )
+
+    assert "Resume context:" in context
+    assert "Skills: SQL, Python, ETL" in context
+    assert "SQL context:" in context
+    assert "ROW_NUMBER()" in context

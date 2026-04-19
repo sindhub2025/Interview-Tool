@@ -11,6 +11,11 @@ from typing import List, Optional
 
 from ghostmic.utils.errors import is_rate_limited as _is_rate_limited_shared
 from ghostmic.utils.logger import get_logger
+from ghostmic.utils.resume_context import (
+    build_resume_context_summary,
+    is_resume_related_text,
+)
+from ghostmic.utils.sql_context import build_sql_profile_summary, is_sql_related_text
 from ghostmic.utils.text_processing import ensure_question_format
 
 logger = get_logger(__name__)
@@ -196,6 +201,33 @@ def _parse_normalization_result(
     )
 
 
+def _build_normalization_context_block(question_text: str, ai_config: dict) -> str:
+    """Build a compact context block for transcript normalization prompts."""
+    lines: List[str] = []
+
+    session_context = _normalize_whitespace(ai_config.get("session_context", ""))
+    if session_context:
+        lines.append("Session context:")
+        lines.extend(f"- {line}" for line in session_context.splitlines() if line.strip())
+
+    resume_profile = ai_config.get("resume_profile")
+    resume_context_enabled = bool(ai_config.get("resume_context_enabled", True))
+    if resume_context_enabled and is_resume_related_text(question_text, resume_profile):
+        resume_lines = build_resume_context_summary(resume_profile, max_items=6)
+        if resume_lines:
+            lines.append("Resume context:")
+            lines.extend(f"- {line}" for line in resume_lines)
+
+    sql_profile_enabled = bool(ai_config.get("sql_profile_enabled", False))
+    if sql_profile_enabled or is_sql_related_text(question_text) or is_sql_related_text(session_context):
+        sql_lines = build_sql_profile_summary(max_items_per_section=6)
+        if sql_lines:
+            lines.append("SQL context:")
+            lines.extend(f"- {line}" for line in sql_lines)
+
+    return "\n".join(lines).strip()
+
+
 def normalize_question_with_followups(
     question_text: str,
     ai_config: dict,
@@ -233,19 +265,24 @@ def normalize_question_with_followups(
         model = str(ai_config.get("groq_model", "llama-3.3-70b-versatile")).strip() or "llama-3.3-70b-versatile"
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
 
-    session_context = str(ai_config.get("session_context", "")).strip()
-    context_line = f"\nSession context: {session_context}" if session_context else ""
-    user_prompt = (
-        "Normalize this speaker interview question transcript and generate likely interviewer follow-up questions. "
-        "Return strict JSON only with this exact schema: "
-        '{"normalized_question":"...","follow_up_questions":["...","...","..."]}. '
-        "Rules: "
-        "1) Keep the normalized question faithful to the speaker intent. "
-        "2) follow_up_questions must contain exactly 3 realistic real-world interview follow-up questions. "
-        "3) Do not answer any question. "
-        "4) Avoid duplicates and keep each follow-up concise.\n"
-        f"Raw transcript: {cleaned_question}{context_line}"
-    )
+    context_block = _build_normalization_context_block(cleaned_question, ai_config)
+    prompt_sections = [
+        "Normalize the transcript below into a clear interview question.",
+        "Use the context only to resolve resume facts, SQL terminology, names, and technical shorthand.",
+        "Preserve the original intent. Do not answer the question.",
+        "Return strict JSON only with this exact schema: {\"normalized_question\":\"...\",\"follow_up_questions\":[\"...\",\"...\",\"...\"]}.",
+        "Rules:",
+        "1) Keep the normalized question faithful to the speaker intent.",
+        "2) follow_up_questions must contain exactly 3 realistic real-world interview follow-up questions.",
+        "3) Avoid duplicates and keep each follow-up concise.",
+    ]
+
+    if context_block:
+        prompt_sections.append("Relevant context:")
+        prompt_sections.append(context_block)
+
+    prompt_sections.append(f"Raw transcript: {cleaned_question}")
+    user_prompt = "\n\n".join(prompt_sections)
 
     for attempt in range(retries):
         try:

@@ -46,6 +46,7 @@ class SystemTrayIcon(QSystemTrayIcon):
     Signals:
         show_hide_requested()
         dock_toggle_requested()
+        stealth_toggled(bool)
         start_stop_requested()
         mode_changed(str)
         quit_requested()
@@ -53,6 +54,7 @@ class SystemTrayIcon(QSystemTrayIcon):
 
     show_hide_requested = pyqtSignal()
     dock_toggle_requested = pyqtSignal()
+    stealth_toggled = pyqtSignal(bool)
     start_stop_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)
     quit_requested = pyqtSignal()
@@ -82,6 +84,12 @@ class SystemTrayIcon(QSystemTrayIcon):
         self._dock_action = QAction("📌  Dock Window", menu)
         self._dock_action.triggered.connect(self.dock_toggle_requested)
         menu.addAction(self._dock_action)
+
+        self._stealth_action = QAction("🛡  Hide from Windows Capture", menu)
+        self._stealth_action.setCheckable(True)
+        self._stealth_action.toggled.connect(self._on_stealth_action_toggled)
+        menu.addAction(self._stealth_action)
+        self.set_stealth_enabled(True)
 
         menu.addSeparator()
 
@@ -120,9 +128,27 @@ class SystemTrayIcon(QSystemTrayIcon):
     def set_docked(self, docked: bool) -> None:
         self._dock_action.setText("↩  Undock Window" if docked else "📌  Dock Window")
 
+    def set_stealth_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        prev = self._stealth_action.blockSignals(True)
+        self._stealth_action.setChecked(enabled)
+        self._stealth_action.blockSignals(prev)
+        self._set_stealth_action_label(enabled)
+
+    def _set_stealth_action_label(self, enabled: bool) -> None:
+        if enabled:
+            self._stealth_action.setText("🛡  Hide from Windows Capture")
+        else:
+            self._stealth_action.setText("🪟  Allow Screenshots (Dev)")
+
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
+
+    def _on_stealth_action_toggled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._set_stealth_action_label(enabled)
+        self.stealth_toggled.emit(enabled)
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:

@@ -4,6 +4,7 @@ import threading
 from types import SimpleNamespace
 
 from ghostmic.domain import TranscriptSegment
+from ghostmic.services.ai_trigger_service import AITriggerService
 from ghostmic.main import (
     GhostMicApp,
     INITIAL_RECORDING_QUESTION_NORMALIZATION_DELAY_MS,
@@ -71,6 +72,8 @@ def _app_for_auto(trigger_mode: str = "auto") -> GhostMicApp:
     app._auto_primary_question_sent = False
     app._active_primary_question_text = ""
     app._queued_normalized_questions = []
+    app._normalized_segment_items = []
+    app._normalized_segment_lookup = {}
     app._logger = _NoopLogger()
     app._window = None
     return app
@@ -91,6 +94,8 @@ def _app_for_normalization_callbacks() -> GhostMicApp:
     app._auto_primary_question_sent = False
     app._active_primary_question_text = ""
     app._queued_normalized_questions = []
+    app._normalized_segment_items = []
+    app._normalized_segment_lookup = {}
     app._generate_ai_response = lambda force_follow_up=False: None
     app._prime_ai_context_with_question = lambda segment, question: None
     return app
@@ -327,6 +332,74 @@ def test_register_normalized_segment_keeps_question_format_for_queueing():
     assert app._session_context_store.events[0]["text"] == (
         "How do you validate data quality in production?"
     )
+
+
+def test_register_normalized_segment_routes_auto_send_through_normalization_worker():
+    app = _app_for_normalization_callbacks()
+    app._recording_active = True
+    app._ai_trigger_service = AITriggerService()
+
+    captured = []
+
+    def _capture(seg, text: str, **kwargs):
+        captured.append((seg, text, kwargs))
+
+    app._on_speaker_question_normalize_requested = _capture
+
+    normalized_segment = SimpleNamespace(
+        segment_id="segment-1",
+        normalized_text="First one, what is the possibility if the target has more records than the source",
+        source="speaker",
+        source_chunk_ids=[],
+    )
+
+    app._register_normalized_segment(normalized_segment)
+
+    assert len(app._normalized_segment_items) == 1
+    assert captured and captured[0][0] is normalized_segment
+    assert captured[0][1] == app._normalized_segment_items[0]["text"]
+    assert captured[0][2]["auto_send_after"] is True
+    assert getattr(captured[0][0], "text") == app._normalized_segment_items[0]["text"]
+
+
+def test_normalized_question_callback_updates_streaming_row_before_send():
+    app = _app_for_normalization_callbacks()
+    app._ai_trigger_service = AITriggerService()
+    app._generate_ai_response = lambda force_follow_up=False: None
+    app._normalized_segment_items = [
+        {
+            "segment_id": "segment-1",
+            "text": "First one, what is the possibility if the target has more records than the source",
+            "status": "pending",
+            "source": "speaker",
+            "source_chunk_ids": [],
+        }
+    ]
+    app._normalized_segment_lookup = {"segment-1": app._normalized_segment_items[0]}
+
+    segment = SimpleNamespace(
+        segment_id="segment-1",
+        text="First one, what is the possibility if the target has more records than the source",
+        source="speaker",
+        confidence=1.0,
+        timestamp=30.0,
+    )
+
+    app._on_speaker_question_normalized(
+        segment,
+        "What is the likelihood that the target has more records than the source?",
+        follow_up_questions=["How would you validate row counts between systems?"],
+        auto_send=True,
+    )
+
+    item = app._normalized_segment_items[0]
+    assert item["text"] == "What is the likelihood that the target has more records than the source?"
+    assert item["status"] == "sent"
+    assert app._auto_primary_question_sent is True
+    assert app._active_primary_question_text == (
+        "What is the likelihood that the target has more records than the source?"
+    )
+    assert app._session_context_store.events[-1]["kind"] == "auto_ai_request"
 
 
 def test_suggested_follow_up_selection_forces_refine_prompt_submission():

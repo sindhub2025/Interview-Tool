@@ -36,6 +36,7 @@ def defaults():
             "font_size": 11,
             "window_width": 420,
             "window_height": 650,
+            "stealth_enabled": True,
             "compact_mode": False,
             "docked": False,
             "dock_height": 56,
@@ -105,6 +106,13 @@ class TestConfigServiceValidation:
         svc = ConfigService(tmp_config, defaults)
         cfg = svc.load()
         assert cfg["ui"]["opacity"] == 0.95  # default
+
+    def test_invalid_stealth_toggle_type_resets_to_default(self, tmp_config, defaults):
+        with open(tmp_config, "w") as f:
+            json.dump({"ui": {"stealth_enabled": "yes"}}, f)
+        svc = ConfigService(tmp_config, defaults)
+        cfg = svc.load()
+        assert cfg["ui"]["stealth_enabled"] is True
 
     def test_invalid_enum_resets_to_default(self, tmp_config, defaults):
         with open(tmp_config, "w") as f:

@@ -272,6 +272,7 @@ def _default_config() -> dict:
             "window_x": None,
             "window_y": None,
             "always_on_top": True,
+            "stealth_enabled": True,
             "compact_mode": False,
             "docked": False,
             "dock_height": 56,
@@ -601,8 +602,10 @@ class GhostMicApp:
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
         self._window.controls.mic_toggled.connect(self._on_mic_toggled)
+        self._window.controls.stealth_toggled.connect(self._on_stealth_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)
         self._window.controls.screenshot_requested.connect(self._on_screen_analysis_requested)
+        self._window.controls.set_stealth_enabled(self._is_stealth_enabled())
         self._window.controls.set_mic_enabled(self._is_mic_capture_enabled())
         self._window.dictation_committed.connect(self._on_dictation_committed)
         self._window.ai_panel.text_prompt_submitted.connect(self._on_ai_text_prompt_submitted)
@@ -789,9 +792,11 @@ class GhostMicApp:
         self._tray = SystemTrayIcon()
         self._tray.show_hide_requested.connect(self._toggle_window)
         self._tray.dock_toggle_requested.connect(self._toggle_dock_window)
+        self._tray.stealth_toggled.connect(self._on_stealth_toggled)
         self._tray.start_stop_requested.connect(self._toggle_recording)
         self._tray.mode_changed.connect(self._on_mode_changed)
         self._tray.quit_requested.connect(app.quit)
+        self._tray.set_stealth_enabled(self._is_stealth_enabled())
         if self._window:
             self._tray.set_docked(self._window.is_docked)
             self._tray.set_window_visible(self._window.isVisible())
@@ -1985,6 +1990,8 @@ class GhostMicApp:
         if self._window:
             self._window.update_config(new_config)
             self._window.controls.set_mic_enabled(self._is_mic_capture_enabled())
+        if self._tray:
+            self._tray.set_stealth_enabled(self._is_stealth_enabled())
         self._refresh_ai_runtime_context()
         self._session_context_compactor.update_ai_config(new_config.get("ai", {}))
         if self._hotkey_manager:
@@ -2066,6 +2073,33 @@ class GhostMicApp:
                 )
             if self._tray:
                 self._tray.set_recording(False)
+
+    def _is_stealth_enabled(self) -> bool:
+        return bool(self._config.get("ui", {}).get("stealth_enabled", True))
+
+    def _on_stealth_toggled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        ui_cfg = self._config.setdefault("ui", {})
+        if bool(ui_cfg.get("stealth_enabled", True)) == enabled:
+            return
+
+        ui_cfg["stealth_enabled"] = enabled
+        _save_config(self._config, self._config_path)
+
+        if self._window:
+            self._window.update_config(self._config)
+            if enabled:
+                self._window.controls.set_status("Stealth mode enabled", "#58a6ff")
+            else:
+                self._window.controls.set_status(
+                    "Stealth mode disabled for screenshots",
+                    "#f0883e",
+                )
+
+        if self._tray:
+            self._tray.set_stealth_enabled(enabled)
+
+        self._logger.info("Stealth mode toggled: enabled=%s", enabled)
 
     def _on_mode_changed(self, mode: str) -> None:
         self._logger.info("Mode changed to %s", mode)
@@ -2360,7 +2394,15 @@ class GhostMicApp:
             and trigger_service.should_auto_send(normalized_text)
         )
         if auto_send:
-            self._send_normalized_segment_to_ai(segment_id, auto=True)
+            try:
+                setattr(normalized_segment, "text", normalized_text)
+            except Exception:
+                pass
+            self._on_speaker_question_normalize_requested(
+                normalized_segment,
+                normalized_text,
+                auto_send_after=True,
+            )
 
     def _sync_normalized_segments_to_window(self) -> None:
         if not self._window or not hasattr(self._window, "set_normalized_segments"):
@@ -2375,6 +2417,34 @@ class GhostMicApp:
             for item in list(getattr(self, "_normalized_segment_items", []))
         ]
         self._window.set_normalized_segments(rows)
+
+    def _update_normalized_segment_item(
+        self,
+        segment_id: str,
+        *,
+        text: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Optional[dict]:
+        key = str(segment_id or "").strip()
+        if not key:
+            return None
+
+        lookup = getattr(self, "_normalized_segment_lookup", {})
+        item = lookup.get(key)
+        if item is None:
+            return None
+
+        if text is not None:
+            cleaned_text = " ".join(str(text or "").split()).strip()
+            if cleaned_text:
+                item["text"] = cleaned_text
+
+        if status is not None:
+            normalized_status = str(status).strip().lower()
+            if normalized_status in {"pending", "sent"}:
+                item["status"] = normalized_status
+
+        return item
 
     def _find_pending_normalized_segment_by_text(self, question: str) -> Optional[str]:
         key = self._canonical_question_key(question)
@@ -3017,6 +3087,24 @@ class GhostMicApp:
             source=segment_source,
         )
 
+        segment_id = str(getattr(segment, "segment_id", "")).strip()
+        normalized_item = None
+        if segment_id:
+            normalized_item = self._update_normalized_segment_item(
+                segment_id,
+                text=normalized,
+            )
+        if normalized_item is None:
+            pending_segment_id = self._find_pending_normalized_segment_by_text(normalized)
+            if pending_segment_id:
+                segment_id = pending_segment_id
+                normalized_item = self._update_normalized_segment_item(
+                    segment_id,
+                    text=normalized,
+                )
+        if normalized_item is not None:
+            self._sync_normalized_segments_to_window()
+
         is_auto_queue_only = bool(auto_send and self._auto_primary_question_sent)
         if is_auto_queue_only:
             queued = self._enqueue_normalized_question(
@@ -3080,6 +3168,9 @@ class GhostMicApp:
                 )
 
         if auto_send:
+            if normalized_item is not None:
+                normalized_item["status"] = "sent"
+                self._sync_normalized_segments_to_window()
             self._auto_primary_question_sent = True
             self._active_primary_question_text = normalized
             trigger_service = getattr(self, "_ai_trigger_service", None)
@@ -3137,6 +3228,7 @@ class GhostMicApp:
             return
 
         segment_source = str(getattr(segment, "source", "")).strip().lower() or "speaker"
+        segment_id = str(getattr(segment, "segment_id", "")).strip()
         self._logger.warning("Question normalization failed: %s", message)
         if self._window:
             self._window.set_question_follow_up_suggestions([])
@@ -3158,6 +3250,25 @@ class GhostMicApp:
                         "Question normalization failed", "#f85149"
                     )
                 return
+
+            fallback_item = None
+            if segment_id:
+                fallback_item = self._update_normalized_segment_item(
+                    segment_id,
+                    text=fallback_question,
+                )
+            if fallback_item is None:
+                pending_segment_id = self._find_pending_normalized_segment_by_text(
+                    fallback_question,
+                )
+                if pending_segment_id:
+                    segment_id = pending_segment_id
+                    fallback_item = self._update_normalized_segment_item(
+                        segment_id,
+                        text=fallback_question,
+                    )
+            if fallback_item is not None:
+                self._sync_normalized_segments_to_window()
 
             if self._auto_primary_question_sent:
                 queued = self._enqueue_normalized_question(
@@ -3186,6 +3297,9 @@ class GhostMicApp:
                 source=segment_source,
                 metadata={"normalization_error": str(message or "")[:120]},
             )
+            if fallback_item is not None:
+                fallback_item["status"] = "sent"
+                self._sync_normalized_segments_to_window()
             self._auto_primary_question_sent = True
             self._active_primary_question_text = fallback_question
             trigger_service = getattr(self, "_ai_trigger_service", None)
