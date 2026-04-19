@@ -5,7 +5,7 @@ import time
 import pytest
 
 from ghostmic.domain import TranscriptSegment
-from ghostmic.utils.text_processing import clean_text, merge_segments
+from ghostmic.utils.text_processing import clean_text, ensure_question_format, merge_segments
 
 
 class TestCleanText:
@@ -45,6 +45,12 @@ class TestCleanText:
 
     def test_single_char(self):
         assert clean_text("a") == "A"
+
+    def test_ensure_question_format_appends_question_mark(self):
+        assert (
+            ensure_question_format("how do you validate row counts between source and target tables.")
+            == "how do you validate row counts between source and target tables?"
+        )
 
 
 class TestMergeSegments:

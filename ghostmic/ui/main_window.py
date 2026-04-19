@@ -58,6 +58,7 @@ from ghostmic.ui.controls_bar import ControlsBar
 from ghostmic.ui.styles import MAIN_STYLE
 from ghostmic.ui.transcript_panel import TranscriptPanel
 from ghostmic.utils.logger import get_logger
+from ghostmic.utils.text_processing import ensure_question_format
 
 logger = get_logger(__name__)
 
@@ -113,6 +114,18 @@ QUEUED_SEND_BUTTON_STYLE = (
     "}"
     "QPushButton:pressed {"
     " background-color: rgba(47, 162, 65, 0.48);"
+    "}"
+)
+
+QUEUED_SEND_BUTTON_SENT_STYLE = (
+    "QPushButton {"
+    " color: #c7ffd3;"
+    " font-size: 9pt;"
+    " font-weight: 700;"
+    " background-color: rgba(63, 185, 80, 0.30);"
+    " border: 1px solid rgba(63, 185, 80, 0.90);"
+    " border-radius: 6px;"
+    " padding: 4px 10px;"
     "}"
 )
 
@@ -287,6 +300,7 @@ class MainWindow(QMainWindow):
     dock_state_changed = pyqtSignal(bool)
     suggested_follow_up_selected = pyqtSignal(str)
     queued_question_send_requested = pyqtSignal(str)
+    normalized_segment_send_requested = pyqtSignal(str)
 
     def __init__(self, config: dict, config_path: Optional[str] = None, parent=None) -> None:
         super().__init__(parent)
@@ -301,6 +315,8 @@ class MainWindow(QMainWindow):
         self._question_text_locked = False
         self._question_follow_up_suggestions: list[str] = []
         self._queued_normalized_questions: list[str] = []
+        self._queued_question_segment_ids: list[str] = []
+        self._queued_question_statuses: list[str] = []
         self._follow_up_buttons: list[QPushButton] = []
         self._follow_up_header: QLabel | None = None
         self._follow_up_container: QWidget | None = None
@@ -546,7 +562,7 @@ class MainWindow(QMainWindow):
         self._follow_up_status_label = follow_up_status
         question_layout.addWidget(follow_up_status)
 
-        queued_header = QLabel("Queued Normalized Questions")
+        queued_header = QLabel("Normalized Segments")
         queued_header.setStyleSheet(
             "color: #f2cc60; font-size: 9.5pt; font-weight: 800;"
         )
@@ -559,7 +575,7 @@ class MainWindow(QMainWindow):
         queued_layout.setContentsMargins(0, 0, 0, 0)
         queued_layout.setSpacing(6)
 
-        for index in range(4):
+        for index in range(6):
             row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
@@ -585,6 +601,8 @@ class MainWindow(QMainWindow):
             queued_layout.addWidget(row)
             self._queued_question_labels.append(question_label)
             self._queued_question_send_buttons.append(send_btn)
+            self._queued_question_segment_ids.append("")
+            self._queued_question_statuses.append("pending")
 
         queued_container.hide()
         self._queued_questions_container = queued_container
@@ -735,15 +753,75 @@ class MainWindow(QMainWindow):
     def set_question_lock_enabled(self, locked: bool) -> None:
         self._question_text_locked = bool(locked)
 
+    def set_normalized_segments(self, segments: list[dict]) -> None:
+        rows: list[tuple[str, str, str]] = []
+        seen_ids: set[str] = set()
+        seen_text: set[str] = set()
+
+        for item in list(segments or []):
+            segment_id = " ".join(str(item.get("segment_id", "") or "").split()).strip()
+            text = " ".join(
+                str(item.get("normalized_text") or item.get("text") or "").split()
+            ).strip()
+            status = "sent" if str(item.get("status", "pending")).strip().lower() == "sent" else "pending"
+
+            if not text:
+                continue
+            if status == "pending":
+                text = ensure_question_format(text)
+
+            canonical_text = text.rstrip(".?!").lower()
+            dedupe_key = segment_id or canonical_text
+            if dedupe_key in seen_ids or canonical_text in seen_text:
+                continue
+
+            seen_ids.add(dedupe_key)
+            seen_text.add(canonical_text)
+            rows.append((segment_id, text, status))
+
+            if len(rows) >= len(self._queued_question_labels):
+                break
+
+        self._queued_normalized_questions = [row[1] for row in rows]
+        self._queued_question_segment_ids = [row[0] for row in rows]
+        self._queued_question_statuses = [row[2] for row in rows]
+
+        for index, label in enumerate(self._queued_question_labels):
+            button = self._queued_question_send_buttons[index]
+            if index < len(rows):
+                _, text, status = rows[index]
+                label.setText(text)
+                label.parentWidget().show()
+                if status == "sent":
+                    button.setEnabled(False)
+                    button.setText("Sent")
+                    button.setStyleSheet(QUEUED_SEND_BUTTON_SENT_STYLE)
+                else:
+                    button.setEnabled(True)
+                    button.setText("Send to AI")
+                    button.setStyleSheet(QUEUED_SEND_BUTTON_STYLE)
+            else:
+                label.setText("")
+                label.parentWidget().hide()
+
+        self._update_queued_questions_visibility()
+
+        has_content = bool(self._latest_question_text) or bool(self._queued_normalized_questions)
+        if has_content and not self._qa_revealed:
+            # Normalized segments arrived before any AI response — trigger the
+            # expanding animation so the user can see the queued questions.
+            self._reveal_question_answer_area()
+        self._question_card.setVisible(self._qa_revealed and has_content)
+        if self._qa_revealed:
+            QTimer.singleShot(0, self._apply_splitter_proportions)
+
     def set_queued_normalized_questions(self, questions: list[str]) -> None:
         deduped: list[str] = []
         seen: set[str] = set()
         for question in questions:
-            cleaned = " ".join(str(question or "").split()).strip()
+            cleaned = ensure_question_format(question)
             if not cleaned:
                 continue
-            if not cleaned.endswith("?"):
-                cleaned = f"{cleaned.rstrip('.!')}?"
             canonical = cleaned.rstrip(".?!").lower()
             if canonical in seen:
                 continue
@@ -751,32 +829,21 @@ class MainWindow(QMainWindow):
             deduped.append(cleaned)
             if len(deduped) >= len(self._queued_question_labels):
                 break
-
-        self._queued_normalized_questions = deduped
-
-        for index, label in enumerate(self._queued_question_labels):
-            button = self._queued_question_send_buttons[index]
-            if index < len(deduped):
-                label.setText(deduped[index])
-                label.parentWidget().show()
-                button.setEnabled(True)
-            else:
-                label.setText("")
-                label.parentWidget().hide()
-
-        self._update_queued_questions_visibility()
-        self._question_card.setVisible(
-            self._qa_revealed
-            and (
-                bool(self._latest_question_text)
-                or bool(self._queued_normalized_questions)
-            )
+        self.set_normalized_segments(
+            [
+                {
+                    "segment_id": "",
+                    "normalized_text": question,
+                    "status": "pending",
+                }
+                for question in deduped
+            ]
         )
-        if self._qa_revealed:
-            QTimer.singleShot(0, self._apply_splitter_proportions)
 
     def clear_queued_normalized_questions(self) -> None:
-        self.set_queued_normalized_questions([])
+        self._queued_question_segment_ids = []
+        self._queued_question_statuses = []
+        self.set_normalized_segments([])
 
     def clear_follow_up_status(self) -> None:
         if self._follow_up_status_label is not None:
@@ -897,6 +964,13 @@ class MainWindow(QMainWindow):
     def _on_queued_question_send_clicked(self, index: int) -> None:
         if index < 0 or index >= len(self._queued_normalized_questions):
             return
+
+        if index < len(self._queued_question_segment_ids):
+            segment_id = self._queued_question_segment_ids[index].strip()
+            if segment_id:
+                self.normalized_segment_send_requested.emit(segment_id)
+                return
+
         selected = self._queued_normalized_questions[index].strip()
         if selected:
             self.queued_question_send_requested.emit(selected)

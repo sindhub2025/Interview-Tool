@@ -1,6 +1,7 @@
 """Unit tests for automatic speaker-question analysis flow."""
 
 import threading
+from types import SimpleNamespace
 
 from ghostmic.domain import TranscriptSegment
 from ghostmic.main import (
@@ -293,7 +294,7 @@ def test_initial_recording_question_completion_clears_pending_state():
 
     app._on_speaker_question_normalized(
         segment,
-        "Can you explain your retry and circuit breaker strategy?",
+        "Can you explain your retry and circuit breaker strategy",
         follow_up_questions=[],
         initial_recording_question=True,
         recording_question_generation=4,
@@ -302,6 +303,30 @@ def test_initial_recording_question_completion_clears_pending_state():
     assert app._initial_recording_question_pending is False
     assert app._initial_recording_question_consumed is True
     assert segment.text == "Can you explain your retry and circuit breaker strategy?"
+
+
+def test_register_normalized_segment_keeps_question_format_for_queueing():
+    app = _app_for_normalization_callbacks()
+    app._recording_active = False
+    app._normalized_segment_items = []
+    app._normalized_segment_lookup = {}
+
+    normalized_segment = SimpleNamespace(
+        segment_id="segment-1",
+        normalized_text="How do you validate data quality in production",
+        source="speaker",
+        source_chunk_ids=[],
+    )
+
+    app._register_normalized_segment(normalized_segment)
+
+    assert len(app._normalized_segment_items) == 1
+    assert app._normalized_segment_items[0]["text"] == (
+        "How do you validate data quality in production?"
+    )
+    assert app._session_context_store.events[0]["text"] == (
+        "How do you validate data quality in production?"
+    )
 
 
 def test_suggested_follow_up_selection_forces_refine_prompt_submission():

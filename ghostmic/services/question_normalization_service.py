@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from ghostmic.utils.errors import is_rate_limited as _is_rate_limited_shared
 from ghostmic.utils.logger import get_logger
+from ghostmic.utils.text_processing import ensure_question_format
 
 logger = get_logger(__name__)
 
@@ -173,9 +174,9 @@ def _parse_normalization_result(
 ) -> QuestionNormalizationResult:
     payload = _extract_json_payload(model_text)
     if payload is not None:
-        normalized = _normalize_whitespace(payload.get("normalized_question", ""))
+        normalized = ensure_question_format(payload.get("normalized_question", ""))
         if not normalized:
-            normalized = _normalize_whitespace(fallback_question)
+            normalized = ensure_question_format(fallback_question)
         follow_ups = _sanitize_follow_up_questions(
             payload.get("follow_up_questions", []),
             normalized,
@@ -185,9 +186,9 @@ def _parse_normalization_result(
             follow_up_questions=follow_ups,
         )
 
-    normalized = _normalize_whitespace(model_text)
+    normalized = ensure_question_format(model_text)
     if not normalized:
-        normalized = _normalize_whitespace(fallback_question)
+        normalized = ensure_question_format(fallback_question)
     follow_ups = _sanitize_follow_up_questions([], normalized)
     return QuestionNormalizationResult(
         normalized_question=normalized,

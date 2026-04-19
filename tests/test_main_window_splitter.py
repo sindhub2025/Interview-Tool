@@ -190,3 +190,32 @@ def test_queued_normalized_questions_show_send_actions_and_respect_lock() -> Non
         app.processEvents()
 
     assert emitted == [window._queued_normalized_questions[1]]
+
+
+def test_pending_normalized_segments_render_as_questions() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window.set_normalized_segments(
+        [
+            {
+                "segment_id": "segment-1",
+                "normalized_text": "How do you validate data quality in production",
+                "status": "pending",
+            }
+        ]
+    )
+    for _ in range(5):
+        app.processEvents()
+
+    assert window._queued_question_labels[0].text() == (
+        "How do you validate data quality in production?"
+    )
+    assert window._queued_normalized_questions[0] == (
+        "How do you validate data quality in production?"
+    )

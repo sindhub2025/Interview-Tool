@@ -40,6 +40,10 @@ from ghostmic.services.resume_service import ResumeService
 from ghostmic.services.session_context_store import SessionContextStore
 from ghostmic.services.thread_coordinator import ThreadCoordinator
 from ghostmic.services.runtime_state import RuntimeStateCache
+from ghostmic.services.transcript_store import TranscriptStore
+from ghostmic.services.normalizer_service import NormalizerService
+from ghostmic.services.segment_manager import SegmentManager
+from ghostmic.services.ai_trigger_service import AITriggerService
 
 # Logger is set up in _main() after parsing --debug, but we need it here
 # for module-level imports that may log warnings.
@@ -252,6 +256,13 @@ def _default_config() -> dict:
             "known_local_torch_broken": False,
             "known_local_torch_error": "",
             "known_local_torch_marked_at": 0,
+            "streaming_normalization_enabled": True,
+            "streaming_processing_interval_ms": 3500,
+            "streaming_buffer_seconds": 30.0,
+            "streaming_buffer_max_chunks": 260,
+            "streaming_pause_boundary_seconds": 1.15,
+            "streaming_soft_flush_seconds": 10.0,
+            "streaming_soft_flush_chunks": 8,
         },
         "ui": {
             "opacity": 0.95,
@@ -285,6 +296,7 @@ def _default_config() -> dict:
 
 
 INITIAL_RECORDING_QUESTION_NORMALIZATION_DELAY_MS = 9_000
+STREAMING_SEGMENT_LOOP_INTERVAL_MS = 2_500
 
 
 def _load_config(path: str) -> dict:
@@ -441,6 +453,13 @@ class GhostMicApp:
         self._auto_primary_question_sent = False
         self._active_primary_question_text = ""
         self._queued_normalized_questions: List[dict] = []
+        self._streaming_segment_timer = None
+        self._transcript_store: TranscriptStore | None = None
+        self._normalizer_service: NormalizerService | None = None
+        self._segment_manager: SegmentManager | None = None
+        self._ai_trigger_service: AITriggerService | None = None
+        self._normalized_segment_items: list[dict] = []
+        self._normalized_segment_lookup: dict[str, dict] = {}
 
         # Services
         self._thread_coordinator = ThreadCoordinator()
@@ -456,6 +475,7 @@ class GhostMicApp:
         )
         self._resume_service = ResumeService()
         self._resume_profile = self._resume_service.get_profile()
+        self._ensure_streaming_pipeline_initialized()
 
     def run(self) -> int:
         """Initialise everything and start the Qt event loop."""
@@ -592,6 +612,10 @@ class GhostMicApp:
         self._window.queued_question_send_requested.connect(
             self._on_queued_question_send_requested
         )
+        if hasattr(self._window, "normalized_segment_send_requested"):
+            self._window.normalized_segment_send_requested.connect(
+                self._on_normalized_segment_send_requested
+            )
         self._window.transcript_panel.speaker_text_edited.connect(self._on_speaker_transcript_edited)
         self._window.transcript_panel.speaker_normalize_requested.connect(
             self._on_speaker_question_normalize_requested
@@ -714,13 +738,13 @@ class GhostMicApp:
         normalized_text: str,
         follow_up_questions: List[str],
     ) -> None:
-        from ghostmic.utils.text_processing import clean_text
+        from ghostmic.utils.text_processing import clean_text, ensure_question_format
 
         if not self._window:
             return
 
-        normalized = clean_text(str(normalized_text or ""))
-        display_question = normalized or clean_text(str(base_question or ""))
+        normalized = ensure_question_format(clean_text(str(normalized_text or "")))
+        display_question = normalized or ensure_question_format(clean_text(str(base_question or "")))
         if display_question:
             self._window.set_current_question_text(display_question)
 
@@ -1390,6 +1414,8 @@ class GhostMicApp:
     def _on_record_toggled(self, recording: bool) -> None:
         if recording:
             self._reset_auto_question_session_state()
+            if self._is_streaming_normalization_enabled():
+                self._reset_streaming_normalization_state(clear_ui=True)
             started_with_cloud_fallback = False
             if self._is_model_loader_running():
                 enabled, detail = self._try_enable_cloud_fast_start()
@@ -1447,6 +1473,8 @@ class GhostMicApp:
 
             self._ensure_ai_thread()
             self._recording_active = True
+            if self._is_streaming_normalization_enabled():
+                self._start_streaming_processing_loop()
             if started_with_cloud_fallback and self._window:
                 self._window.controls.set_status(
                     "Recording… cloud transcription active",
@@ -1455,9 +1483,11 @@ class GhostMicApp:
             if self._tray:
                 self._tray.set_recording(True)
         else:
+            if self._is_streaming_normalization_enabled():
+                self._stop_streaming_processing_loop(flush=True)
             self._recording_active = False
             self._cancel_pending_mic_recovery()
-            self._reset_auto_question_session_state()
+            self._reset_auto_question_session_state(clear_ui=False)
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
@@ -1663,10 +1693,13 @@ class GhostMicApp:
                     merged_target.text,
                 )
                 self._window.controls.set_status("Listening…", "#3fb950")
-            if require_recording and self._segment_is_question_source(question_segment):
-                if self._maybe_schedule_initial_recording_question_normalization(question_segment):
-                    return True
-                self._schedule_auto_speaker_analysis(question_segment)
+            if require_recording:
+                if self._is_streaming_normalization_enabled():
+                    self._ingest_streaming_transcript_chunk(segment)
+                elif self._segment_is_question_source(question_segment):
+                    if self._maybe_schedule_initial_recording_question_normalization(question_segment):
+                        return True
+                    self._schedule_auto_speaker_analysis(question_segment)
             return True
 
         self._session_context_store.append_transcript(segment)
@@ -1675,10 +1708,13 @@ class GhostMicApp:
             self._window.transcript_panel.add_segment(segment)
             self._window.controls.set_status("Listening…", "#3fb950")
 
-        if require_recording and self._segment_is_question_source(question_segment):
-            if self._maybe_schedule_initial_recording_question_normalization(question_segment):
-                return True
-            self._schedule_auto_speaker_analysis(question_segment)
+        if require_recording:
+            if self._is_streaming_normalization_enabled():
+                self._ingest_streaming_transcript_chunk(segment)
+            elif self._segment_is_question_source(question_segment):
+                if self._maybe_schedule_initial_recording_question_normalization(question_segment):
+                    return True
+                self._schedule_auto_speaker_analysis(question_segment)
 
         return True
 
@@ -1954,6 +1990,18 @@ class GhostMicApp:
         if self._hotkey_manager:
             self._hotkey_manager.reload(new_config.get("hotkeys", {}))
 
+        if self._is_streaming_normalization_enabled():
+            # Rebuild runtime thresholds from fresh config.
+            self._normalizer_service = None
+            self._segment_manager = None
+            self._ensure_streaming_pipeline_initialized()
+            self._ensure_streaming_segment_timer()
+            if self._recording_active:
+                self._start_streaming_processing_loop()
+        else:
+            self._stop_streaming_processing_loop(flush=False)
+            self._reset_streaming_normalization_state(clear_ui=True)
+
         new_audio_cfg = dict(new_config.get("audio", {}))
         if new_audio_cfg != prev_audio_cfg:
             self._logger.info("Audio settings changed; reinitializing capture threads.")
@@ -2073,6 +2121,347 @@ class GhostMicApp:
         else:
             self._logger.warning("Unable to focus dictation target for Win+H capture.")
 
+    def _is_streaming_normalization_enabled(self) -> bool:
+        config = getattr(self, "_config", {})
+        transcription_cfg = config.get("transcription", {}) if isinstance(config, dict) else {}
+        return bool(transcription_cfg.get("streaming_normalization_enabled", False))
+
+    def _ensure_streaming_pipeline_initialized(self) -> None:
+        config = getattr(self, "_config", {})
+        transcription_cfg = config.get("transcription", {}) if isinstance(config, dict) else {}
+
+        if getattr(self, "_transcript_store", None) is None:
+            raw_buffer_seconds = transcription_cfg.get("streaming_buffer_seconds", 30.0)
+            raw_buffer_chunks = transcription_cfg.get("streaming_buffer_max_chunks", 260)
+            try:
+                buffer_seconds = float(raw_buffer_seconds)
+            except (TypeError, ValueError):
+                buffer_seconds = 30.0
+            try:
+                buffer_chunks = int(raw_buffer_chunks)
+            except (TypeError, ValueError):
+                buffer_chunks = 260
+
+            self._transcript_store = TranscriptStore(
+                max_window_seconds=max(20.0, min(45.0, buffer_seconds)),
+                max_chunks=max(60, min(600, buffer_chunks)),
+            )
+
+        if getattr(self, "_normalizer_service", None) is None:
+            raw_pause_seconds = transcription_cfg.get("streaming_pause_boundary_seconds", 1.15)
+            raw_soft_flush_seconds = transcription_cfg.get("streaming_soft_flush_seconds", 10.0)
+            raw_soft_flush_chunks = transcription_cfg.get("streaming_soft_flush_chunks", 8)
+            try:
+                pause_seconds = float(raw_pause_seconds)
+            except (TypeError, ValueError):
+                pause_seconds = 1.15
+            try:
+                soft_flush_seconds = float(raw_soft_flush_seconds)
+            except (TypeError, ValueError):
+                soft_flush_seconds = 10.0
+            try:
+                soft_flush_chunks = int(raw_soft_flush_chunks)
+            except (TypeError, ValueError):
+                soft_flush_chunks = 8
+
+            self._normalizer_service = NormalizerService(
+                pause_boundary_seconds=pause_seconds,
+                soft_flush_seconds=soft_flush_seconds,
+                soft_flush_chunks=soft_flush_chunks,
+            )
+
+        if getattr(self, "_segment_manager", None) is None and self._normalizer_service is not None:
+            self._segment_manager = SegmentManager(
+                self._normalizer_service,
+                max_overlap_chunks=2,
+            )
+
+        if getattr(self, "_ai_trigger_service", None) is None:
+            self._ai_trigger_service = AITriggerService()
+
+        if not hasattr(self, "_normalized_segment_items"):
+            self._normalized_segment_items = []
+        if not hasattr(self, "_normalized_segment_lookup"):
+            self._normalized_segment_lookup = {}
+
+    def _streaming_processing_interval_ms(self) -> int:
+        config = getattr(self, "_config", {})
+        transcription_cfg = config.get("transcription", {}) if isinstance(config, dict) else {}
+        raw_interval = transcription_cfg.get(
+            "streaming_processing_interval_ms",
+            STREAMING_SEGMENT_LOOP_INTERVAL_MS,
+        )
+        try:
+            interval_ms = int(raw_interval)
+        except (TypeError, ValueError):
+            interval_ms = STREAMING_SEGMENT_LOOP_INTERVAL_MS
+        return max(1_500, min(4_000, interval_ms))
+
+    def _ensure_streaming_segment_timer(self) -> None:
+        timer = getattr(self, "_streaming_segment_timer", None)
+        if timer is not None:
+            timer.setInterval(self._streaming_processing_interval_ms())
+            return
+
+        try:
+            from PyQt6.QtCore import QTimer
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.debug("Streaming segment timer unavailable: %s", exc)
+            return
+
+        timer_parent = self._window if self._window is not None else None
+        timer = QTimer(timer_parent)
+        timer.setInterval(self._streaming_processing_interval_ms())
+        timer.timeout.connect(self._process_streaming_transcript_chunks)
+        self._streaming_segment_timer = timer
+
+    def _start_streaming_processing_loop(self) -> None:
+        if not self._is_streaming_normalization_enabled():
+            return
+
+        self._ensure_streaming_pipeline_initialized()
+        self._ensure_streaming_segment_timer()
+        timer = getattr(self, "_streaming_segment_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+
+    def _stop_streaming_processing_loop(self, *, flush: bool = False) -> None:
+        if flush:
+            self._process_streaming_transcript_chunks(force_flush=True)
+
+        timer = getattr(self, "_streaming_segment_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+
+    def _reset_streaming_normalization_state(self, *, clear_ui: bool) -> None:
+        self._ensure_streaming_pipeline_initialized()
+
+        if self._transcript_store is not None:
+            self._transcript_store.reset()
+        if self._segment_manager is not None:
+            self._segment_manager.reset()
+        trigger_service = getattr(self, "_ai_trigger_service", None)
+        if trigger_service is not None:
+            trigger_service.reset()
+
+        self._normalized_segment_items.clear()
+        self._normalized_segment_lookup.clear()
+
+        if clear_ui and self._window and hasattr(self._window, "set_normalized_segments"):
+            self._window.set_normalized_segments([])
+
+    def _ingest_streaming_transcript_chunk(self, segment) -> None:
+        if not self._is_streaming_normalization_enabled():
+            return
+        if not self._recording_active:
+            return
+
+        self._ensure_streaming_pipeline_initialized()
+        if self._transcript_store is None:
+            return
+
+        chunk = self._transcript_store.append_from_transcript_segment(segment)
+        if chunk is None:
+            return
+
+        # Always attempt to process after every ingested chunk.  The
+        # NormalizerService's boundary and soft-flush logic decides whether
+        # enough material has accumulated for a complete segment.  Limiting
+        # this to only terminal-punctuation chunks caused transcripts to sit
+        # unprocessed for long intervals.
+        self._process_streaming_transcript_chunks(force_flush=False)
+
+    def _process_streaming_transcript_chunks(self, force_flush: bool = False) -> None:
+        if not self._is_streaming_normalization_enabled():
+            return
+        if not self._recording_active and not force_flush:
+            return
+
+        self._ensure_streaming_pipeline_initialized()
+        if self._segment_manager is None or self._transcript_store is None:
+            return
+
+        segments = self._segment_manager.consume_ready_segments(
+            self._transcript_store,
+            force_flush=force_flush,
+        )
+        if not segments:
+            return
+
+        for normalized_segment in segments:
+            self._register_normalized_segment(normalized_segment)
+
+        self._sync_normalized_segments_to_window()
+
+    def _register_normalized_segment(self, normalized_segment) -> None:
+        segment_id = str(getattr(normalized_segment, "segment_id", "")).strip()
+        if not segment_id:
+            return
+        if segment_id in self._normalized_segment_lookup:
+            return
+
+        normalized_text = str(getattr(normalized_segment, "normalized_text", "")).strip()
+        if not normalized_text:
+            return
+
+        source = str(getattr(normalized_segment, "source", "speaker") or "speaker").strip().lower() or "speaker"
+        source_chunk_ids = list(getattr(normalized_segment, "source_chunk_ids", []) or [])
+
+        # Only register question-like segments for UI display and AI dispatch.
+        # Statements, greetings, filler, and other non-question text are kept
+        # as context only — they don't clutter the normalized segments panel.
+        from ghostmic.services.ai_trigger_service import is_question_like
+        from ghostmic.utils.text_processing import ensure_question_format
+
+        if not is_question_like(normalized_text):
+            self._logger.debug(
+                "Normalized segment skipped (not question-like): %r",
+                normalized_text[:80],
+            )
+            return
+
+        normalized_text = ensure_question_format(normalized_text)
+
+        # Always log to session context so the AI has full conversation awareness,
+        # regardless of whether this segment is a question.
+        self._session_context_store.append_event(
+            "normalized_segment",
+            normalized_text,
+            source=source,
+            metadata={
+                "segment_id": segment_id,
+                "source_chunk_ids": source_chunk_ids,
+            },
+        )
+
+        item = {
+            "segment_id": segment_id,
+            "text": normalized_text,
+            "status": "pending",
+            "source": source,
+            "source_chunk_ids": source_chunk_ids,
+        }
+        self._normalized_segment_items.append(item)
+        self._normalized_segment_lookup[segment_id] = item
+
+        max_items = 12
+        if len(self._normalized_segment_items) > max_items:
+            removed = self._normalized_segment_items[:-max_items]
+            self._normalized_segment_items = self._normalized_segment_items[-max_items:]
+            for old in removed:
+                old_id = str(old.get("segment_id", "")).strip()
+                if old_id:
+                    self._normalized_segment_lookup.pop(old_id, None)
+
+        trigger_service = getattr(self, "_ai_trigger_service", None)
+        auto_send = bool(
+            self._recording_active
+            and trigger_service is not None
+            and trigger_service.should_auto_send(normalized_text)
+        )
+        if auto_send:
+            self._send_normalized_segment_to_ai(segment_id, auto=True)
+
+    def _sync_normalized_segments_to_window(self) -> None:
+        if not self._window or not hasattr(self._window, "set_normalized_segments"):
+            return
+
+        rows = [
+            {
+                "segment_id": str(item.get("segment_id", "")),
+                "normalized_text": str(item.get("text", "")),
+                "status": str(item.get("status", "pending")),
+            }
+            for item in list(getattr(self, "_normalized_segment_items", []))
+        ]
+        self._window.set_normalized_segments(rows)
+
+    def _find_pending_normalized_segment_by_text(self, question: str) -> Optional[str]:
+        key = self._canonical_question_key(question)
+        if not key:
+            return None
+
+        for item in list(getattr(self, "_normalized_segment_items", [])):
+            if str(item.get("status", "pending")) == "sent":
+                continue
+            text = str(item.get("text", ""))
+            if key == self._canonical_question_key(text):
+                return str(item.get("segment_id", "")).strip() or None
+
+        return None
+
+    def _on_normalized_segment_send_requested(self, segment_id: str) -> None:
+        self._send_normalized_segment_to_ai(str(segment_id or "").strip(), auto=False)
+
+    def _send_normalized_segment_to_ai(self, segment_id: str, *, auto: bool) -> None:
+        key = str(segment_id or "").strip()
+        if not key:
+            return
+
+        lookup = getattr(self, "_normalized_segment_lookup", {})
+        item = lookup.get(key)
+        if item is None:
+            return
+        if str(item.get("status", "pending")).strip().lower() == "sent":
+            return
+
+        from ghostmic.utils.text_processing import ensure_question_format
+
+        question_text = ensure_question_format(str(item.get("text", "")).strip())
+        if not question_text:
+            return
+
+        source = str(item.get("source", "speaker") or "speaker").strip().lower() or "speaker"
+
+        from ghostmic.core.transcription_engine import TranscriptSegment
+
+        question_segment = TranscriptSegment(
+            text=question_text,
+            source=source,
+            confidence=1.0,
+            timestamp=time.time(),
+        )
+
+        item["status"] = "sent"
+        trigger_service = getattr(self, "_ai_trigger_service", None)
+        if trigger_service is not None:
+            trigger_service.mark_first_question_sent()
+
+        self._auto_primary_question_sent = True
+        self._active_primary_question_text = question_text
+        self._pop_queued_normalized_question(question_text)
+        self._prime_ai_context_with_question(question_segment, question_text)
+
+        event_kind = "auto_ai_request" if auto else "manual_ai_request"
+        self._session_context_store.append_event(
+            event_kind,
+            question_text,
+            source=source,
+            metadata={
+                "segment_id": key,
+                "source_chunk_ids": list(item.get("source_chunk_ids", []) or []),
+            },
+        )
+
+        if self._window:
+            self._window.set_question_lock_enabled(True)
+            self._window.set_current_question_text(question_text, force=True)
+            self._window.set_question_follow_up_suggestions([])
+            if auto:
+                self._window.controls.set_status(
+                    "Question detected. Generating response…",
+                    "#58a6ff",
+                )
+            else:
+                self._window.controls.set_status(
+                    "Sending selected segment to AI…",
+                    "#58a6ff",
+                )
+            self._window.ai_panel.show_thinking("Generating response…")
+
+        self._sync_normalized_segments_to_window()
+        self._generate_ai_response(force_follow_up=False)
+
     def _on_speaker_transcript_edited(self, segment, text: str) -> None:
         from ghostmic.utils.text_processing import clean_text
 
@@ -2096,6 +2485,8 @@ class GhostMicApp:
         return " ".join(str(text or "").split()).strip().rstrip(".?!").lower()
 
     def _sync_queued_normalized_questions_to_window(self) -> None:
+        if self._is_streaming_normalization_enabled():
+            return
         if not self._window:
             return
         self._window.set_queued_normalized_questions(
@@ -2110,6 +2501,9 @@ class GhostMicApp:
         source: str,
         metadata: Optional[dict] = None,
     ) -> bool:
+        from ghostmic.utils.text_processing import ensure_question_format
+
+        question = ensure_question_format(question)
         key = self._canonical_question_key(question)
         if not key:
             return False
@@ -2146,7 +2540,7 @@ class GhostMicApp:
                 return popped
         return None
 
-    def _reset_auto_question_session_state(self) -> None:
+    def _reset_auto_question_session_state(self, *, clear_ui: bool = True) -> None:
         self._auto_primary_question_sent = False
         self._active_primary_question_text = ""
         self._queued_normalized_questions.clear()
@@ -2155,16 +2549,24 @@ class GhostMicApp:
         self._initial_recording_question_generation = int(
             getattr(self, "_initial_recording_question_generation", 0)
         ) + 1
-        if self._window:
+        trigger_service = getattr(self, "_ai_trigger_service", None)
+        if trigger_service is not None:
+            trigger_service.reset()
+        if clear_ui and self._window:
             self._window.set_question_lock_enabled(False)
             self._window.clear_queued_normalized_questions()
 
     def _on_queued_question_send_requested(self, question: str) -> None:
         from ghostmic.core.transcription_engine import TranscriptSegment
-        from ghostmic.utils.text_processing import clean_text
+        from ghostmic.utils.text_processing import clean_text, ensure_question_format
 
-        cleaned = clean_text(str(question or ""))
+        cleaned = ensure_question_format(clean_text(str(question or "")))
         if not cleaned:
+            return
+
+        normalized_segment_id = self._find_pending_normalized_segment_by_text(cleaned)
+        if normalized_segment_id:
+            self._send_normalized_segment_to_ai(normalized_segment_id, auto=False)
             return
 
         queued_item = self._pop_queued_normalized_question(cleaned)
@@ -2180,6 +2582,9 @@ class GhostMicApp:
 
         self._auto_primary_question_sent = True
         self._active_primary_question_text = cleaned
+        trigger_service = getattr(self, "_ai_trigger_service", None)
+        if trigger_service is not None:
+            trigger_service.mark_first_question_sent()
 
         if self._window:
             self._window.set_question_lock_enabled(True)
@@ -2551,7 +2956,7 @@ class GhostMicApp:
         initial_recording_question: bool = False,
         recording_question_generation: Optional[int] = None,
     ) -> None:
-        from ghostmic.utils.text_processing import clean_text
+        from ghostmic.utils.text_processing import clean_text, ensure_question_format
 
         if initial_recording_question and recording_question_generation is not None:
             if int(recording_question_generation) != int(
@@ -2589,9 +2994,11 @@ class GhostMicApp:
             self._initial_recording_question_consumed = True
 
         segment_source = str(getattr(segment, "source", "")).strip().lower() or "speaker"
-        normalized = clean_text(str(normalized_text or ""))
+        normalized = ensure_question_format(clean_text(str(normalized_text or "")))
         if not normalized:
-            normalized = str(getattr(segment, "text", "")).strip()
+            normalized = ensure_question_format(
+                clean_text(str(getattr(segment, "text", "")).strip())
+            )
         if not normalized:
             self._on_speaker_question_normalization_error(
                 segment,
@@ -2675,6 +3082,9 @@ class GhostMicApp:
         if auto_send:
             self._auto_primary_question_sent = True
             self._active_primary_question_text = normalized
+            trigger_service = getattr(self, "_ai_trigger_service", None)
+            if trigger_service is not None:
+                trigger_service.mark_first_question_sent()
             self._prime_ai_context_with_question(segment, normalized)
             self._session_context_store.append_event(
                 "auto_ai_request",
@@ -2778,6 +3188,9 @@ class GhostMicApp:
             )
             self._auto_primary_question_sent = True
             self._active_primary_question_text = fallback_question
+            trigger_service = getattr(self, "_ai_trigger_service", None)
+            if trigger_service is not None:
+                trigger_service.mark_first_question_sent()
             self._prime_ai_context_with_question(segment, fallback_question)
             if self._window:
                 self._window.set_question_lock_enabled(True)
@@ -2816,7 +3229,18 @@ class GhostMicApp:
 
         self._auto_primary_question_sent = True
         self._active_primary_question_text = question
+        trigger_service = getattr(self, "_ai_trigger_service", None)
+        if trigger_service is not None:
+            trigger_service.mark_first_question_sent()
         self._pop_queued_normalized_question(question)
+
+        normalized_segment_id = self._find_pending_normalized_segment_by_text(question)
+        if normalized_segment_id:
+            lookup = getattr(self, "_normalized_segment_lookup", {})
+            item = lookup.get(normalized_segment_id)
+            if item is not None:
+                item["status"] = "sent"
+            self._sync_normalized_segments_to_window()
 
         self._session_context_store.append_event(
             "manual_ai_request",
@@ -3048,6 +3472,8 @@ class GhostMicApp:
                 self._active_screen_summary_text = ""
                 self._active_screen_anchor_question = ""
             self._reset_auto_question_session_state()
+            if self._is_streaming_normalization_enabled():
+                self._reset_streaming_normalization_state(clear_ui=True)
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
@@ -3069,6 +3495,8 @@ class GhostMicApp:
         )
         if reply == QMessageBox.StandardButton.Yes:
             self._reset_auto_question_session_state()
+            if self._is_streaming_normalization_enabled():
+                self._reset_streaming_normalization_state(clear_ui=True)
             self._window.transcript_panel.clear_transcript()
             self._window.set_current_question_text("", force=True)
             self._window.set_question_follow_up_suggestions([])
@@ -3098,6 +3526,7 @@ class GhostMicApp:
         if self._follow_up_suggestion_worker and self._follow_up_suggestion_worker.isRunning():
             self._follow_up_suggestion_worker.requestInterruption()
             self._follow_up_suggestion_worker.wait(1500)
+        self._stop_streaming_processing_loop(flush=False)
         self._stop_audio_capture()
         self._session_context_compactor.stop(timeout=1.5)
 

@@ -39,6 +39,8 @@ _FILLER_RE = re.compile(
     re.IGNORECASE,
 )
 
+_QUESTION_END_RE = re.compile(r"[.?!\"')\]]+\s*$")
+
 
 def clean_text(
     text: str,
@@ -77,6 +79,19 @@ def clean_text(
         text = text[0].upper() + text[1:] if len(text) > 1 else text.upper()
 
     return text
+
+
+def ensure_question_format(text: str) -> str:
+    """Normalize text so it ends with a single question mark."""
+    cleaned = " ".join(str(text or "").split()).strip()
+    if not cleaned:
+        return ""
+
+    cleaned = _QUESTION_END_RE.sub("", cleaned).strip()
+    if not cleaned:
+        return ""
+
+    return f"{cleaned}?"
 
 
 def merge_segments(

@@ -45,9 +45,11 @@ def test_sanitize_follow_up_questions_deduplicates_and_fills_three_items() -> No
 
 def test_parse_normalization_result_supports_plain_text_fallback() -> None:
     result = _parse_normalization_result(
-        "How do you validate row counts between source and target tables?",
+        "How do you validate row counts between source and target tables",
         fallback_question="raw transcript",
     )
 
-    assert result.normalized_question.startswith("How do you validate row counts")
+    assert result.normalized_question == (
+        "How do you validate row counts between source and target tables?"
+    )
     assert len(result.follow_up_questions) == 3
