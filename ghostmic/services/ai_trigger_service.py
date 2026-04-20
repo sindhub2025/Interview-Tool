@@ -72,6 +72,14 @@ _EMBEDDED_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Declarative comparative prompts often appear in interview speech
+# without an explicit interrogative starter (e.g. "The difference
+# between DBMS and RDBMS").
+_COMPARATIVE_PROMPT_RE = re.compile(
+    r"\b(?:the\s+)?difference(?:s)?\s+between\s+.+?\s+and\s+\S",
+    re.IGNORECASE,
+)
+
 
 def is_question_like(text: str) -> bool:
     """Return True when text resembles an interview question or prompt.
@@ -81,6 +89,7 @@ def is_question_like(text: str) -> bool:
     - Interrogative sentence forms (what, how, why, …)
     - Imperative interview prompts (tell me about, explain, describe, …)
     - Embedded question patterns (what is the difference, how do you, …)
+    - Declarative comparative prompts (the difference between X and Y)
     """
     cleaned = " ".join(str(text or "").split()).strip()
     if len(cleaned) < 8:
@@ -110,6 +119,11 @@ def is_question_like(text: str) -> bool:
     # words and contain no question markers at all
     if _FALSE_POSITIVE_PREFIX_RE.match(lowered):
         return False
+
+    # Comparative prompts without explicit question words are still
+    # interview questions when both sides of the comparison are present.
+    if len(tokens) >= 5 and _COMPARATIVE_PROMPT_RE.search(lowered):
+        return True
 
     # Standard interrogative starters
     if tokens[0] in _INTERROGATIVE_STARTERS:

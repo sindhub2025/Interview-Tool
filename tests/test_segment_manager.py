@@ -83,3 +83,34 @@ def test_duplicate_chunks_do_not_reemit_duplicate_segments() -> None:
 
     second_emit = manager.consume_ready_segments(store)
     assert second_emit == []
+
+
+def test_force_flush_keeps_continuation_chunks_together_across_pause() -> None:
+    store = TranscriptStore(max_window_seconds=30.0, max_chunks=120)
+    manager = SegmentManager(
+        NormalizerService(
+            pause_boundary_seconds=1.15,
+            soft_flush_seconds=10.0,
+            soft_flush_chunks=8,
+        )
+    )
+
+    store.append_chunk(
+        raw_text="The difference between DBMS and",
+        source="user",
+        timestamp_start=0.0,
+        timestamp_end=1.0,
+        chunk_id="u1",
+    )
+    store.append_chunk(
+        raw_text="RDBMS",
+        source="user",
+        timestamp_start=3.0,
+        timestamp_end=3.5,
+        chunk_id="u2",
+    )
+
+    emitted = manager.consume_ready_segments(store, force_flush=True)
+    assert len(emitted) == 1
+    assert emitted[0].source_chunk_ids == ["u1", "u2"]
+    assert emitted[0].normalized_text == "The difference between DBMS and RDBMS"

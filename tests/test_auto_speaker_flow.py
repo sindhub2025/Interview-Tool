@@ -362,6 +362,53 @@ def test_register_normalized_segment_routes_auto_send_through_normalization_work
     assert getattr(captured[0][0], "text") == app._normalized_segment_items[0]["text"]
 
 
+def test_register_normalized_segment_keeps_latest_three():
+    app = _app_for_normalization_callbacks()
+    app._recording_active = False
+    app._enqueue_streaming_segment_normalization = lambda *args, **kwargs: None
+
+    segments = [
+        SimpleNamespace(
+            segment_id=f"segment-{index}",
+            normalized_text=f"How do you handle production issue {index}",
+            source="speaker",
+            source_chunk_ids=[],
+        )
+        for index in range(4)
+    ]
+
+    for segment in segments:
+        app._register_normalized_segment(segment)
+
+    assert len(app._normalized_segment_items) == 3
+    assert [item["segment_id"] for item in app._normalized_segment_items] == [
+        "segment-1",
+        "segment-2",
+        "segment-3",
+    ]
+
+
+def test_enqueue_normalized_question_keeps_latest_three():
+    app = _app_for_auto("manual")
+    app._queued_normalized_questions = []
+    app._active_primary_question_text = ""
+    app._window = None
+
+    for index in range(4):
+        app._enqueue_normalized_question(
+            SimpleNamespace(segment_id=f"segment-{index}"),
+            f"How do you handle production issue {index}",
+            source="speaker",
+        )
+
+    assert len(app._queued_normalized_questions) == 3
+    assert [item["text"] for item in app._queued_normalized_questions] == [
+        "How do you handle production issue 1?",
+        "How do you handle production issue 2?",
+        "How do you handle production issue 3?",
+    ]
+
+
 def test_normalized_question_callback_updates_streaming_row_before_send():
     app = _app_for_normalization_callbacks()
     app._ai_trigger_service = AITriggerService()

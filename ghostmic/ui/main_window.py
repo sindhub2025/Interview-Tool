@@ -779,8 +779,8 @@ class MainWindow(QMainWindow):
             seen_text.add(canonical_text)
             rows.append((segment_id, text, status))
 
-            if len(rows) >= len(self._queued_question_labels):
-                break
+        # Keep only the latest three normalized questions in the visible queue.
+        rows = rows[-3:]
 
         self._queued_normalized_questions = [row[1] for row in rows]
         self._queued_question_segment_ids = [row[0] for row in rows]
@@ -827,8 +827,6 @@ class MainWindow(QMainWindow):
                 continue
             seen.add(canonical)
             deduped.append(cleaned)
-            if len(deduped) >= len(self._queued_question_labels):
-                break
         self.set_normalized_segments(
             [
                 {

@@ -432,6 +432,7 @@ class GhostMicApp:
         self._model_error_message: Optional[str] = None
         self._last_transcription_drop_log = 0.0
         self._recording_active = False
+        self._mic_recording_active = False
         self._recording_lock = threading.Lock()
         self._dictation_hotkey_guard_until = 0.0
         self._startup_api_worker = None
@@ -1312,7 +1313,7 @@ class GhostMicApp:
             return
 
         self._mic_recovery_pending = False
-        if not self._recording_active or not self._is_mic_capture_enabled():
+        if not self._is_any_recording_active() or not self._is_mic_capture_enabled():
             return
 
         self._disable_mic_capture_live()
@@ -1341,7 +1342,7 @@ class GhostMicApp:
         if not self._is_mic_capture_enabled():
             return
 
-        if not self._recording_active and self._mic_thread is None:
+        if not self._is_any_recording_active() and self._mic_thread is None:
             # Ignore stale failure notifications that can arrive after shutdown.
             return
 
@@ -1350,7 +1351,7 @@ class GhostMicApp:
 
         if (
             allow_transient_retry
-            and self._recording_active
+            and self._is_any_recording_active()
             and self._is_transient_mic_failure(detail_text)
             and self._schedule_mic_live_restart(detail_text, delay_ms=700)
         ):
@@ -1488,6 +1489,115 @@ class GhostMicApp:
         self._mic_thread = None
         self._vad_thread = None
 
+    def _is_any_recording_active(self) -> bool:
+        """Return True if either the Record session or mic-only session is active."""
+        return bool(
+            getattr(self, "_recording_active", False)
+            or getattr(self, "_mic_recording_active", False)
+        )
+
+    # ------------------------------------------------------------------
+    # Mic-only recording session
+    # ------------------------------------------------------------------
+
+    def _create_mic_only_audio_threads(self) -> bool:
+        """Create VAD + mic capture threads for a mic-only recording session.
+
+        Unlike _create_audio_threads(), this skips system audio capture
+        and only sets up the microphone → VAD → transcription pipeline.
+        """
+        try:
+            from ghostmic.core.audio_buffer import AudioBuffer
+            from ghostmic.core.audio_capture import MicCaptureThread
+            from ghostmic.core.vad import VADThread
+
+            if not hasattr(self, '_buffer') or self._buffer is None:
+                audio_cfg = self._config.get("audio", {})
+                self._buffer = AudioBuffer(
+                    sample_rate=audio_cfg.get("sample_rate", 16_000)
+                )
+
+            audio_cfg = self._config.get("audio", {})
+            self._cancel_pending_mic_recovery()
+            self._mic_device_fallback_attempted = False
+
+            self._vad_thread = VADThread(self._buffer)
+            self._vad_thread.speech_segment_ready.connect(self._on_speech_segment)
+            self._thread_coordinator.register("vad", self._vad_thread)
+
+            # No system audio thread for mic-only mode
+            self._sys_audio_thread = None
+
+            self._mic_thread = MicCaptureThread(
+                self._buffer,
+                device_index=audio_cfg.get("input_device"),
+            )
+            self._mic_thread.audio_chunk_ready.connect(
+                self._vad_thread.push_chunk
+            )
+            if hasattr(self._mic_thread, "mic_capture_failed"):
+                self._mic_thread.mic_capture_failed.connect(self._on_mic_only_capture_failed)
+            self._thread_coordinator.register("mic", self._mic_thread)
+
+            self._logger.info("Created mic-only audio threads (no system audio).")
+            return True
+
+        except ImportError as exc:
+            self._logger.warning("Audio libraries not available for mic-only: %s", exc)
+            return False
+
+    def _start_mic_only_capture(self) -> bool:
+        """Start a mic-only recording session with full transcription pipeline."""
+        if not self._is_transcription_ready():
+            return False
+
+        if not self._create_mic_only_audio_threads():
+            return False
+
+        if self._vad_thread:
+            self._vad_thread.start()
+        if self._mic_thread:
+            self._mic_thread.start()
+        return True
+
+    def _stop_mic_only_capture(self) -> None:
+        """Stop the mic-only recording session."""
+        self._thread_coordinator.stop_one("mic", timeout_ms=2000)
+        self._thread_coordinator.stop_one("vad", timeout_ms=2000)
+
+        self._sys_audio_thread = None
+        self._mic_thread = None
+        self._vad_thread = None
+
+    def _on_mic_only_capture_failed(self, detail: str) -> None:
+        """Handle mic capture failure during mic-only recording."""
+        if not self._mic_recording_active:
+            return
+
+        detail_text = str(detail or "unknown microphone error")
+        self._logger.warning("Mic-only capture failed: %s", detail_text)
+
+        # Stop the mic-only session and update UI
+        if self._is_streaming_normalization_enabled():
+            self._stop_streaming_processing_loop(flush=True)
+        self._mic_recording_active = False
+        self._cancel_pending_mic_recovery()
+        self._stop_mic_only_capture()
+
+        if self._transcription_thread:
+            self._transcription_thread.clear_pending_segments()
+
+        audio_cfg = self._config.setdefault("audio", {})
+        audio_cfg["capture_mic"] = False
+        _save_config(self._config, self._config_path)
+
+        if self._window:
+            self._window.controls.set_mic_enabled(False)
+            self._window.controls.set_status(
+                "Microphone capture failed. Check settings.",
+                "#f85149",
+            )
+
     # ------------------------------------------------------------------
     # AI engine
     # ------------------------------------------------------------------
@@ -1613,6 +1723,19 @@ class GhostMicApp:
 
     def _on_record_toggled(self, recording: bool) -> None:
         if recording:
+            # If mic-only session is active, stop it before starting full recording
+            if self._mic_recording_active:
+                self._logger.info("Stopping mic-only session before starting full recording.")
+                if self._is_streaming_normalization_enabled():
+                    self._stop_streaming_processing_loop(flush=True)
+                self._mic_recording_active = False
+                self._stop_mic_only_capture()
+                if self._window:
+                    self._window.controls.set_mic_enabled(False)
+                audio_cfg = self._config.setdefault("audio", {})
+                audio_cfg["capture_mic"] = False
+                _save_config(self._config, self._config_path)
+
             self._reset_auto_question_session_state()
             if self._is_streaming_normalization_enabled():
                 self._reset_streaming_normalization_state(clear_ui=True)
@@ -1812,7 +1935,7 @@ class GhostMicApp:
         return False
 
     def _append_transcript_segment(self, segment, require_recording: bool) -> bool:
-        if require_recording and not self._recording_active:
+        if require_recording and not self._is_any_recording_active():
             self._logger.debug(
                 "Ignoring transcription while recording is off (source=%s).",
                 getattr(segment, "source", "unknown"),
@@ -2183,6 +2306,7 @@ class GhostMicApp:
     def _on_settings_saved(self, new_config: dict) -> None:
         prev_audio_cfg = dict(self._config.get("audio", {}))
         was_recording = bool(self._recording_active)
+        was_mic_recording = bool(self._mic_recording_active)
 
         self._config = new_config
         _save_config(new_config, self._config_path)
@@ -2202,7 +2326,7 @@ class GhostMicApp:
             self._segment_manager = None
             self._ensure_streaming_pipeline_initialized()
             self._ensure_streaming_segment_timer()
-            if self._recording_active:
+            if self._is_any_recording_active():
                 self._start_streaming_processing_loop()
         else:
             self._stop_streaming_processing_loop(flush=False)
@@ -2224,54 +2348,116 @@ class GhostMicApp:
                         )
                     if self._tray:
                         self._tray.set_recording(False)
+            elif was_mic_recording:
+                if not self._start_mic_only_capture():
+                    self._mic_recording_active = False
+                    if self._window:
+                        self._window.controls.set_mic_enabled(False)
+                        self._window.controls.set_status(
+                            "Could not restart mic capture with new settings.",
+                            "#f85149",
+                        )
 
     def _on_mic_toggled(self, enabled: bool) -> None:
         enabled = bool(enabled)
         audio_cfg = self._config.setdefault("audio", {})
-        if bool(audio_cfg.get("capture_mic", False)) == enabled:
-            return
 
         self._cancel_pending_mic_recovery()
         self._mic_device_fallback_attempted = False
         audio_cfg["capture_mic"] = enabled
         _save_config(self._config, self._config_path)
 
-        if self._window:
-            self._window.controls.set_status(
-                "Microphone capture enabled" if enabled else "Speaker-only mode enabled",
-                "#58a6ff",
+        # ── Case 1: Record is already active → add/remove mic to existing session ──
+        if self._recording_active:
+            if enabled and self._enable_mic_capture_live():
+                if self._window:
+                    self._window.controls.set_status("Microphone capture enabled", "#3fb950")
+                return
+
+            if not enabled:
+                self._disable_mic_capture_live()
+                if self._window:
+                    self._window.controls.set_status("Speaker-only mode enabled", "#58a6ff")
+                return
+
+            # Live enable failed; fall back to full capture restart
+            self._logger.info(
+                "Live mic enable failed; falling back to full capture restart."
             )
-
-        if not self._recording_active:
-            if enabled:
-                self._prime_mic_capture_async()
+            self._stop_audio_capture()
+            if not self._start_audio_capture():
+                self._recording_active = False
+                if self._window:
+                    self._window.controls.set_recording(False)
+                    self._window.controls.set_status(
+                        "Could not restart capture after mic toggle.",
+                        "#f85149",
+                    )
+                if self._tray:
+                    self._tray.set_recording(False)
             return
 
-        if enabled and self._enable_mic_capture_live():
-            if self._window:
-                self._window.controls.set_status("Microphone capture enabled", "#3fb950")
-            return
+        # ── Case 2: No active recording → start/stop a mic-only session ──
+        if enabled:
+            # Start a mic-only recording session with full pipeline
+            self._reset_auto_question_session_state()
+            if self._is_streaming_normalization_enabled():
+                self._reset_streaming_normalization_state(clear_ui=True)
 
-        if not enabled:
-            self._disable_mic_capture_live()
-            if self._window:
-                self._window.controls.set_status("Speaker-only mode enabled", "#58a6ff")
-            return
-
-        self._logger.info(
-            "Live mic enable failed; falling back to full capture restart."
-        )
-        self._stop_audio_capture()
-        if not self._start_audio_capture():
-            self._recording_active = False
-            if self._window:
-                self._window.controls.set_recording(False)
-                self._window.controls.set_status(
-                    "Could not restart capture after mic toggle.",
-                    "#f85149",
+            if not self._start_mic_only_capture():
+                self._logger.warning(
+                    "Mic-only session blocked: transcription unavailable. last_error=%s",
+                    self._model_error_message,
                 )
-            if self._tray:
-                self._tray.set_recording(False)
+                self._mic_recording_active = False
+                audio_cfg["capture_mic"] = False
+                _save_config(self._config, self._config_path)
+                if self._window:
+                    self._window.controls.set_mic_enabled(False)
+                    self._window.controls.set_status(
+                        "Transcription unavailable. Check AI panel/logs.",
+                        "#f85149",
+                    )
+                    if self._model_error_message:
+                        self._window.ai_panel.show_error(
+                            "Cannot start mic capture until transcription is ready.\n"
+                            f"Reason: {self._model_error_message}"
+                        )
+                return
+
+            self._ensure_ai_thread()
+            self._mic_recording_active = True
+            if self._is_streaming_normalization_enabled():
+                self._start_streaming_processing_loop()
+            if self._window:
+                self._window.controls.set_status(
+                    "Mic recording active — listening…",
+                    "#3fb950",
+                )
+            self._logger.info("Mic-only recording session started.")
+        else:
+            # Stop the mic-only recording session
+            if not self._mic_recording_active:
+                return
+
+            if self._is_streaming_normalization_enabled():
+                self._stop_streaming_processing_loop(flush=True)
+            self._mic_recording_active = False
+            self._cancel_pending_mic_recovery()
+            self._reset_auto_question_session_state(clear_ui=False)
+            self._auto_speaker_silence_generation += 1
+            self._auto_speaker_last_signature = ""
+            self._auto_speaker_last_trigger_ts = 0.0
+            self._stop_mic_only_capture()
+            if self._transcription_thread:
+                self._transcription_thread.clear_pending_segments()
+            if self._ai_thread:
+                self._ai_thread.clear_pending_requests()
+            with self._transcript_lock:
+                self._ai_context_history.clear()
+            if self._window:
+                self._window.controls.set_status("Mic stopped", "#58a6ff")
+            self._logger.info("Mic-only recording session stopped.")
 
     def _is_stealth_enabled(self) -> bool:
         return bool(self._config.get("ui", {}).get("stealth_enabled", True))
@@ -2495,7 +2681,7 @@ class GhostMicApp:
     def _ingest_streaming_transcript_chunk(self, segment) -> None:
         if not self._is_streaming_normalization_enabled():
             return
-        if not self._recording_active:
+        if not self._is_any_recording_active():
             return
 
         self._ensure_streaming_pipeline_initialized()
@@ -2516,7 +2702,7 @@ class GhostMicApp:
     def _process_streaming_transcript_chunks(self, force_flush: bool = False) -> None:
         if not self._is_streaming_normalization_enabled():
             return
-        if not self._recording_active and not force_flush:
+        if not self._is_any_recording_active() and not force_flush:
             return
 
         self._ensure_streaming_pipeline_initialized()
@@ -2596,7 +2782,7 @@ class GhostMicApp:
         self._normalized_segment_items.append(item)
         self._normalized_segment_lookup[segment_id] = item
 
-        max_items = 12
+        max_items = 3
         if len(self._normalized_segment_items) > max_items:
             removed = self._normalized_segment_items[:-max_items]
             self._normalized_segment_items = self._normalized_segment_items[-max_items:]
@@ -2606,14 +2792,20 @@ class GhostMicApp:
                     self._normalized_segment_lookup.pop(old_id, None)
 
         trigger_service = getattr(self, "_ai_trigger_service", None)
-        is_first_question = bool(
-            self._recording_active
-            and trigger_service is not None
-            and trigger_service.should_auto_send(normalized_text)
+        # Auto-promote ANY question-like segment during recording to the top
+        # Question area — not just the first one.  Each new question replaces
+        # the previous primary question and triggers a fresh AI response.
+        should_auto_promote = bool(
+            self._is_any_recording_active()
+            and is_question_like(normalized_text)
         )
-        if is_first_question:
-            # First question: use the existing path which also sets context and
-            # triggers an AI response immediately after normalization.
+        # Keep the trigger service in sync so other subsystems know a question
+        # has been dispatched.
+        if should_auto_promote and trigger_service is not None:
+            trigger_service.mark_first_question_sent()
+
+        if should_auto_promote:
+            # Promote to top Question area, normalize, and trigger AI response.
             try:
                 setattr(normalized_segment, "text", normalized_text)
             except Exception:
@@ -2624,8 +2816,7 @@ class GhostMicApp:
                 auto_send_after=True,
             )
         else:
-            # Subsequent questions: queue them for background AI normalization
-            # so the displayed text is always clean, not raw transcript.
+            # Non-question text: queue for background AI normalization only.
             self._enqueue_streaming_segment_normalization(segment_id, normalized_text)
 
 
@@ -2819,7 +3010,7 @@ class GhostMicApp:
             }
         )
 
-        max_queue_items = 4
+        max_queue_items = 3
         if len(self._queued_normalized_questions) > max_queue_items:
             self._queued_normalized_questions = self._queued_normalized_questions[-max_queue_items:]
 
@@ -2999,7 +3190,7 @@ class GhostMicApp:
     def _on_initial_recording_question_normalization_elapsed(self, segment, generation: int) -> None:
         if generation != int(getattr(self, "_initial_recording_question_generation", 0)):
             return
-        if not self._recording_active:
+        if not self._is_any_recording_active():
             return
         if not self._is_auto_speaker_analysis_enabled():
             return
@@ -3078,7 +3269,7 @@ class GhostMicApp:
     def _on_auto_speaker_silence_elapsed(self, segment, generation: int) -> None:
         if generation != self._auto_speaker_silence_generation:
             return
-        if not self._recording_active:
+        if not self._is_any_recording_active():
             return
         if not self._is_auto_speaker_analysis_enabled():
             return
@@ -3330,31 +3521,10 @@ class GhostMicApp:
         if normalized_item is not None:
             self._sync_normalized_segments_to_window()
 
-        is_auto_queue_only = bool(auto_send and self._auto_primary_question_sent)
-        if is_auto_queue_only:
-            queued = self._enqueue_normalized_question(
-                segment,
-                normalized,
-                source=segment_source,
-            )
-            if queued:
-                self._session_context_store.append_event(
-                    "queued_normalized_question",
-                    normalized,
-                    source=segment_source,
-                )
-            if self._window:
-                self._window.transcript_panel.set_segment_text(segment, normalized)
-                self._window.transcript_panel.set_segment_normalization_busy(
-                    segment,
-                    False,
-                    "Question queued",
-                )
-                self._window.controls.set_status(
-                    "New normalized question queued. Click Send to AI to use it.",
-                    "#f2cc60",
-                )
-            return
+        # Every auto-sent question is promoted to the top Question area and
+        # triggers an AI response — no queuing.  This ensures each new
+        # question from recording mode is treated as the active primary
+        # question rather than being tucked away in Normalized Segments.
 
         cleaned_follow_ups: List[str] = []
         seen: set[str] = set()
@@ -3495,27 +3665,8 @@ class GhostMicApp:
             if fallback_item is not None:
                 self._sync_normalized_segments_to_window()
 
-            if self._auto_primary_question_sent:
-                queued = self._enqueue_normalized_question(
-                    segment,
-                    fallback_question,
-                    source=segment_source,
-                    metadata={"normalization_error": str(message or "")[:120]},
-                )
-                if queued:
-                    self._session_context_store.append_event(
-                        "queued_normalized_question",
-                        fallback_question,
-                        source=segment_source,
-                        metadata={"normalization_error": str(message or "")[:120]},
-                    )
-                if self._window:
-                    self._window.controls.set_status(
-                        "Normalization failed, but question was queued. Click Send to AI to use it.",
-                        "#f2cc60",
-                    )
-                return
-
+            # Always promote the fallback question to the top Question area
+            # and trigger an AI response — no queuing for subsequent questions.
             self._session_context_store.append_event(
                 "auto_ai_request",
                 fallback_question,

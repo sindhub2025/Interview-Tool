@@ -52,6 +52,13 @@ def test_embedded_question_patterns_detected() -> None:
     assert is_question_like("Now is there a way to optimize that further") is True
 
 
+def test_comparative_prompt_detected_without_interrogative_prefix() -> None:
+    """Comparative prompts like 'the difference between X and Y' should be treated as questions."""
+    assert is_question_like("The difference between DBMS and RDBMS") is True
+    assert is_question_like("The difference between DBMS and") is False
+    assert is_question_like("I know the difference between DBMS and RDBMS") is False
+
+
 def test_short_text_rejected() -> None:
     """Very short text should never match as a question."""
     assert is_question_like("What?") is False

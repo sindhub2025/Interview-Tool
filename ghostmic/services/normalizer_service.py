@@ -11,6 +11,37 @@ from ghostmic.utils.text_processing import clean_text
 
 _TERMINAL_PUNCTUATION_RE = re.compile(r"[.?!][\"')\]]*\s*$")
 
+# Chunks ending with these tail words are often mid-thought and should
+# not be split solely because of a pause gap.
+_CONTINUATION_TAIL_WORDS = {
+    "and",
+    "or",
+    "to",
+    "of",
+    "for",
+    "with",
+    "without",
+    "between",
+    "than",
+    "versus",
+    "vs",
+    "that",
+    "which",
+    "who",
+    "whose",
+    "where",
+    "when",
+    "while",
+    "if",
+    "because",
+    "in",
+    "on",
+    "at",
+    "by",
+    "as",
+    "about",
+}
+
 
 @dataclass(frozen=True)
 class SegmentCandidate:
@@ -104,6 +135,11 @@ class NormalizerService:
             if pause < self._pause_boundary_seconds:
                 continue
 
+            # Do not split on pause if the current chunk clearly ends as an
+            # unfinished phrase (for example: "... between DBMS and").
+            if self._ends_with_incomplete_tail(current.raw_text):
+                continue
+
             joined = self._normalize_text(chunks[start_index : index + 1])
             if joined:
                 return index
@@ -152,6 +188,25 @@ class NormalizerService:
         except Exception:  # pylint: disable=broad-except
             pass  # Never let SQL correction break the normalization pipeline
         return normalized
+
+    @staticmethod
+    def _ends_with_incomplete_tail(text: str) -> bool:
+        cleaned = clean_text(str(text or "")).strip()
+        if not cleaned:
+            return False
+
+        if cleaned.endswith((",", ";", ":", "-", "(", "/")):
+            return True
+
+        tail = re.sub(r"[\"')\]]+$", "", cleaned).strip().lower()
+        if not tail:
+            return False
+
+        last_token = re.sub(r"[^a-z0-9']+", "", tail.split()[-1])
+        if not last_token:
+            return False
+
+        return last_token in _CONTINUATION_TAIL_WORDS
 
     @staticmethod
     def _dominant_source(chunks: Sequence[TranscriptChunk]) -> str:
