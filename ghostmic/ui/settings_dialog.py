@@ -79,8 +79,11 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("GhostMic — Settings")
         self.setMinimumSize(520, 460)
         self.setStyleSheet(MAIN_STYLE)
+        self._stealth_enabled_check = QCheckBox("Hide from Windows capture (stealth mode)")
+        self._stealth_enabled_check.setChecked(True)
         self._build_ui()
         self._load_values()
+        self._stealth_enabled_check.toggled.connect(lambda _checked: self._apply_stealth())
         # Apply stealth after the dialog has a valid HWND
         QTimer.singleShot(100, self._apply_stealth)
 
@@ -144,6 +147,8 @@ class SettingsDialog(QDialog):
         self._dictation_idle_spin.setSingleStep(100)
         self._dictation_idle_spin.setSuffix(" ms")
         form.addRow("Dictation commit idle:", self._dictation_idle_spin)
+
+        form.addRow("Stealth mode:", self._stealth_enabled_check)
 
         return w
 
@@ -510,6 +515,7 @@ class SettingsDialog(QDialog):
         self._font_spin.setValue(ui.get("font_size", 11))
         self._width_spin.setValue(ui.get("window_width", 420))
         self._height_spin.setValue(ui.get("window_height", 650))
+        self._stealth_enabled_check.setChecked(bool(ui.get("stealth_enabled", True)))
 
     def _save(self) -> None:
         cfg = dict(self._config)
@@ -577,6 +583,7 @@ class SettingsDialog(QDialog):
         cfg["ui"]["font_size"] = self._font_spin.value()
         cfg["ui"]["window_width"] = self._width_spin.value()
         cfg["ui"]["window_height"] = self._height_spin.value()
+        cfg["ui"]["stealth_enabled"] = self._stealth_enabled_check.isChecked()
 
         self.settings_saved.emit(cfg)
         self.accept()
@@ -604,8 +611,6 @@ class SettingsDialog(QDialog):
                 self._loopback_combo.addItem(dev["name"], dev["index"])
         except Exception:  # pylint: disable=broad-except
             pass
-
-    # ------------------------------------------------------------------
     # Resume actions
     # ------------------------------------------------------------------
 
@@ -688,9 +693,7 @@ class SettingsDialog(QDialog):
         try:
             from ghostmic.core.stealth import apply_stealth, remove_stealth
             hwnd = int(self.winId())
-            stealth_enabled = bool(
-                self._config.get("ui", {}).get("stealth_enabled", True)
-            )
+            stealth_enabled = bool(self._stealth_enabled_check.isChecked())
             if stealth_enabled:
                 apply_stealth(hwnd)
             else:

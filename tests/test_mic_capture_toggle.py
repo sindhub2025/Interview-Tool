@@ -278,3 +278,25 @@ def test_mic_runtime_failure_after_fallback_switches_to_speaker_only(monkeypatch
     assert app._config["audio"]["capture_mic"] is False
     assert app._mic_device_fallback_attempted is False
     assert app._window.controls.mic_enabled_calls == [False]
+
+
+def test_startup_mic_state_primes_enabled_microphone(monkeypatch):
+    app = _make_app(capture_mic=True)
+    called = []
+
+    app._prime_mic_capture_async = lambda: called.append("prime")
+
+    app._sync_startup_mic_state()
+
+    assert called == ["prime"]
+
+
+def test_startup_mic_state_skips_when_disabled(monkeypatch):
+    app = _make_app(capture_mic=False)
+    called = []
+
+    app._prime_mic_capture_async = lambda: called.append("prime")
+
+    app._sync_startup_mic_state()
+
+    assert called == []

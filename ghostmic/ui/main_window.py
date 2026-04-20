@@ -1186,7 +1186,6 @@ class MainWindow(QMainWindow):
         QApplication.setFont(font)
         # Allow optional toggling of dock dragging behavior
         self._dock_draggable = bool(ui.get("dock_draggable", True))
-        self._controls.set_stealth_enabled(bool(ui.get("stealth_enabled", True)))
         self._dictation_idle_ms = int(
             self._config.get("dictation", {}).get("commit_idle_ms", 1200)
         )
@@ -1214,7 +1213,6 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._apply_splitter_proportions)
         else:
             self._apply_startup_collapsed_layout()
-        self._controls.set_stealth_enabled(bool(ui.get("stealth_enabled", True)))
         self._dictation_idle_ms = int(config.get("dictation", {}).get("commit_idle_ms", 1200))
         QTimer.singleShot(100, self._apply_stealth)
 

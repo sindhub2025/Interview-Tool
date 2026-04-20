@@ -40,40 +40,16 @@ def test_capture_button_is_before_settings_button() -> None:
             settings_index = idx
 
     assert capture_index is not None
-    stealth_index = None
     assert settings_index is not None
-    for idx in range(layout.count()):
-        item = layout.itemAt(idx)
-        if item is None:
-            continue
-
-        widget = item.widget()
-        if widget is None:
-            continue
-
-        if widget is controls._stealth_btn:
-            stealth_index = idx
-
-    assert stealth_index is not None
     assert capture_index < settings_index
-    assert capture_index < stealth_index < settings_index
+    assert not hasattr(controls, "_stealth_btn")
 
 
-def test_stealth_button_toggles_and_can_be_synced() -> None:
+def test_controls_bar_no_longer_exposes_a_stealth_toggle() -> None:
     app = _qt_app()
     assert app is not None
 
     controls = ControlsBar()
 
-    emitted: list[bool] = []
-    controls.stealth_toggled.connect(emitted.append)
-
-    controls._stealth_btn.click()
-    assert emitted == [False]
-    assert controls.is_stealth_enabled is False
-    assert controls._stealth_btn.text() == "Stealth Off"
-
-    controls.set_stealth_enabled(True)
-    assert emitted == [False]
-    assert controls.is_stealth_enabled is True
-    assert controls._stealth_btn.text() == "Stealth On"
+    assert not hasattr(controls, "stealth_toggled")
+    assert not hasattr(controls, "is_stealth_enabled")

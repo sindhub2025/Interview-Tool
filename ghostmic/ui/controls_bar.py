@@ -67,7 +67,6 @@ class ControlsBar(QWidget):
     Signals:
         record_toggled(bool): Emitted when recording is toggled.
         mode_changed(str): Emitted when the mode dropdown changes.
-        stealth_toggled(bool): Emitted when capture hiding is toggled.
         settings_requested(): Emitted when the settings button is clicked.
         screenshot_requested(): Emitted when the screen analysis button is clicked.
     """
@@ -75,7 +74,6 @@ class ControlsBar(QWidget):
     record_toggled = pyqtSignal(bool)
     mic_toggled = pyqtSignal(bool)
     mode_changed = pyqtSignal(str)
-    stealth_toggled = pyqtSignal(bool)
     settings_requested = pyqtSignal()
     screenshot_requested = pyqtSignal()
 
@@ -85,7 +83,6 @@ class ControlsBar(QWidget):
         super().__init__(parent)
         self._recording = False
         self._mic_enabled = False
-        self._stealth_enabled = True
         self._api_connected = False
         self._api_backend = "Groq"
         self._build_ui()
@@ -148,15 +145,6 @@ class ControlsBar(QWidget):
         self._screenshot_btn.clicked.connect(self._on_screenshot_clicked)
         layout.addWidget(self._screenshot_btn)
 
-        # Capture hiding toggle used for development screenshots
-        self._stealth_btn = QPushButton("Stealth On")
-        self._stealth_btn.setObjectName("stealth_btn")
-        self._stealth_btn.setFixedSize(104, 38)
-        self._stealth_btn.setCheckable(True)
-        self._stealth_btn.toggled.connect(self._on_stealth_toggled)
-        layout.addWidget(self._stealth_btn)
-        self.set_stealth_enabled(True)
-
         # Settings button
         self._settings_btn = QPushButton("Settings")
         self._settings_btn.setObjectName("settings_btn")
@@ -177,11 +165,6 @@ class ControlsBar(QWidget):
     def is_mic_enabled(self) -> bool:
         """Return whether microphone capture is enabled."""
         return self._mic_enabled
-
-    @property
-    def is_stealth_enabled(self) -> bool:
-        """Return whether capture hiding is enabled."""
-        return self._stealth_enabled
 
     def set_recording(self, recording: bool) -> None:
         """Sync button state with actual recording status."""
@@ -226,14 +209,6 @@ class ControlsBar(QWidget):
         self._screenshot_btn.setEnabled(not busy)
         self._screenshot_btn.setText("Analyzing" if busy else "Capture")
 
-    def set_stealth_enabled(self, enabled: bool) -> None:
-        """Sync the capture-hiding toggle without re-emitting the signal."""
-        self._stealth_enabled = bool(enabled)
-        prev = self._stealth_btn.blockSignals(True)
-        self._stealth_btn.setChecked(self._stealth_enabled)
-        self._stealth_btn.blockSignals(prev)
-        self._apply_stealth_button_state()
-
     def current_mode(self) -> str:
         return self._mode_combo.currentText()
 
@@ -268,37 +243,6 @@ class ControlsBar(QWidget):
             "QPushButton:hover { background-color: rgba(139, 148, 158, 0.24); }"
         )
 
-    def _apply_stealth_button_state(self) -> None:
-        if self._stealth_enabled:
-            self._stealth_btn.setText("Stealth On")
-            self._stealth_btn.setStyleSheet(
-                "QPushButton {"
-                " background-color: rgba(63, 185, 80, 0.20);"
-                " border: 1px solid rgba(63, 185, 80, 0.72);"
-                " border-radius: 6px;"
-                " color: #d2ffd9;"
-                " font-size: 10pt;"
-                " font-weight: 600;"
-                "}"
-                "QPushButton:hover { background-color: rgba(63, 185, 80, 0.30); }"
-                "QPushButton:pressed { background-color: rgba(47, 162, 65, 0.42); }"
-            )
-            return
-
-        self._stealth_btn.setText("Stealth Off")
-        self._stealth_btn.setStyleSheet(
-            "QPushButton {"
-            " background-color: rgba(248, 81, 73, 0.16);"
-            " border: 1px solid rgba(248, 81, 73, 0.58);"
-            " border-radius: 6px;"
-            " color: #ffd7d7;"
-            " font-size: 10pt;"
-            " font-weight: 600;"
-            "}"
-            "QPushButton:hover { background-color: rgba(248, 81, 73, 0.24); }"
-            "QPushButton:pressed { background-color: rgba(195, 43, 53, 0.38); }"
-        )
-
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
@@ -311,11 +255,6 @@ class ControlsBar(QWidget):
         self._mic_enabled = bool(checked)
         self._apply_mic_button_state()
         self.mic_toggled.emit(self._mic_enabled)
-
-    def _on_stealth_toggled(self, checked: bool) -> None:
-        self._stealth_enabled = bool(checked)
-        self._apply_stealth_button_state()
-        self.stealth_toggled.emit(self._stealth_enabled)
 
     def _on_settings_clicked(self) -> None:
         self.settings_requested.emit()

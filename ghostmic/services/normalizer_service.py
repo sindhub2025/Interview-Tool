@@ -137,6 +137,20 @@ class NormalizerService:
         normalized = clean_text(text)
         if len(normalized) < self._min_segment_chars:
             return ""
+        # Minimum word count guard — rejects fragments like "Has more records than?"
+        if len(normalized.split()) < 5:
+            return ""
+        # Apply SQL term corrections synchronously (cheap, no API call).
+        # This fixes common Whisper misrecognitions like "soda" → "COUNT()".
+        try:
+            from ghostmic.utils.sql_context import apply_sql_corrections, is_sql_related_text
+            if is_sql_related_text(normalized):
+                corrected = apply_sql_corrections(normalized)
+                corrected_text = str(corrected.get("text", "") or "").strip()
+                if corrected_text:
+                    normalized = corrected_text
+        except Exception:  # pylint: disable=broad-except
+            pass  # Never let SQL correction break the normalization pipeline
         return normalized
 
     @staticmethod

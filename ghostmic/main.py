@@ -461,6 +461,9 @@ class GhostMicApp:
         self._ai_trigger_service: AITriggerService | None = None
         self._normalized_segment_items: list[dict] = []
         self._normalized_segment_lookup: dict[str, dict] = {}
+        # Queue of (segment_id, raw_text) tuples awaiting background AI normalization.
+        self._pending_normalization_queue: list[tuple[str, str]] = []
+
 
         # Services
         self._thread_coordinator = ThreadCoordinator()
@@ -532,6 +535,13 @@ class GhostMicApp:
             self._start_audio_threads()
             _write_startup_trace("run.start_audio_threads.ok")
 
+            startup_step = "sync_startup_mic_state"
+            self._sync_startup_mic_state()
+            _write_startup_trace(
+                "run.sync_startup_mic_state.ok",
+                capture_mic=self._is_mic_capture_enabled(),
+            )
+
             startup_step = "setup_hotkeys"
             self._setup_hotkeys()
             _write_startup_trace("run.setup_hotkeys.ok")
@@ -602,10 +612,8 @@ class GhostMicApp:
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
         self._window.controls.mic_toggled.connect(self._on_mic_toggled)
-        self._window.controls.stealth_toggled.connect(self._on_stealth_toggled)
         self._window.controls.settings_requested.connect(self._on_settings_requested)
         self._window.controls.screenshot_requested.connect(self._on_screen_analysis_requested)
-        self._window.controls.set_stealth_enabled(self._is_stealth_enabled())
         self._window.controls.set_mic_enabled(self._is_mic_capture_enabled())
         self._window.dictation_committed.connect(self._on_dictation_committed)
         self._window.ai_panel.text_prompt_submitted.connect(self._on_ai_text_prompt_submitted)
@@ -666,11 +674,190 @@ class GhostMicApp:
         if self._question_normalization_worker:
             self._question_normalization_worker.deleteLater()
             self._question_normalization_worker = None
+        # Process the next pending streaming segment normalization, if any.
+        self._drain_streaming_segment_normalization_queue()
+
 
     def _cleanup_follow_up_suggestion_worker(self) -> None:
         if self._follow_up_suggestion_worker:
             self._follow_up_suggestion_worker.deleteLater()
             self._follow_up_suggestion_worker = None
+
+    # ------------------------------------------------------------------
+    # Fix 1 & 5: Streaming segment AI normalization queue
+    # All question segments (not just the first) are AI-cleaned before
+    # they appear in the Normalized Segments panel.
+    # ------------------------------------------------------------------
+
+    def _enqueue_streaming_segment_normalization(self, segment_id: str, raw_text: str) -> None:
+        """Add a streaming segment to the background AI normalization queue."""
+        queue = getattr(self, "_pending_normalization_queue", None)
+        if queue is None:
+            self._pending_normalization_queue = []
+            queue = self._pending_normalization_queue
+
+        # Avoid double-queuing the same segment
+        for queued_id, _ in queue:
+            if queued_id == segment_id:
+                return
+
+        queue.append((segment_id, raw_text))
+        self._logger.debug(
+            "Queued streaming segment for AI normalization: %s (%d in queue)",
+            segment_id,
+            len(queue),
+        )
+        self._drain_streaming_segment_normalization_queue()
+
+    def _drain_streaming_segment_normalization_queue(self) -> None:
+        """Start a background AI normalization for the next queued segment, if the worker is free."""
+        if getattr(self, "_question_normalization_worker", None) is not None:
+            return  # Worker busy — will be called again from _cleanup_question_normalization_worker
+
+
+        queue = getattr(self, "_pending_normalization_queue", [])
+        if not queue:
+            return
+
+        segment_id, raw_text = queue.pop(0)
+
+        # Safety: skip if segment no longer exists in the lookup
+        lookup = getattr(self, "_normalized_segment_lookup", {})
+        if segment_id not in lookup:
+            # Try the next one
+            self._drain_streaming_segment_normalization_queue()
+            return
+
+        try:
+            from ghostmic.services.question_normalization_service import (
+                QuestionNormalizationWorker,
+            )
+
+            worker = QuestionNormalizationWorker(
+                self._build_ai_runtime_config(),
+                raw_text,
+                parent=None,
+            )
+            if hasattr(worker, "normalized_with_followups_ready"):
+                worker.normalized_with_followups_ready.connect(
+                    lambda normalized, follow_ups, sid=segment_id: self._on_streaming_segment_ai_normalized(
+                        sid, normalized, list(follow_ups or [])
+                    )
+                )
+            else:
+                worker.normalized_ready.connect(
+                    lambda normalized, sid=segment_id: self._on_streaming_segment_ai_normalized(
+                        sid, normalized, []
+                    )
+                )
+            worker.normalization_error.connect(
+                lambda message, sid=segment_id: self._on_streaming_segment_ai_normalization_error(
+                    sid, message
+                )
+            )
+            worker.finished.connect(self._cleanup_question_normalization_worker)
+            self._question_normalization_worker = worker
+            self._logger.debug("Starting AI normalization worker for segment %s", segment_id)
+            worker.start()
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.warning(
+                "Could not start streaming segment AI normalization for %s: %s",
+                segment_id,
+                exc,
+            )
+            # Still drain the queue even if this one failed
+            self._drain_streaming_segment_normalization_queue()
+
+    def _on_streaming_segment_ai_normalized(
+        self,
+        segment_id: str,
+        normalized_text: str,
+        follow_up_questions: List[str],
+    ) -> None:
+        """Called when background AI normalization of a streaming segment succeeds."""
+        from ghostmic.utils.text_processing import clean_text, ensure_question_format
+
+        normalized = ensure_question_format(clean_text(str(normalized_text or "")))
+        if not normalized:
+            self._logger.debug(
+                "AI normalization for segment %s returned empty; keeping original text.",
+                segment_id,
+            )
+            return
+
+        item = self._update_normalized_segment_item(segment_id, text=normalized)
+        if item is None:
+            return  # Segment was evicted from the lookup; nothing to update
+
+        self._logger.info(
+            "Streaming segment %s AI-normalized: %r",
+            segment_id,
+            normalized[:80],
+        )
+
+        # Update follow-up suggestions on the item for later use
+        cleaned_follow_ups: List[str] = []
+        seen: set[str] = set()
+        for q in list(follow_up_questions or []):
+            candidate = clean_text(str(q or ""))
+            if not candidate:
+                continue
+            if not candidate.endswith("?"):
+                candidate = f"{candidate.rstrip('.!')}?"
+            canonical = candidate.rstrip(".?!").lower()
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            cleaned_follow_ups.append(candidate)
+            if len(cleaned_follow_ups) >= 3:
+                break
+        if cleaned_follow_ups:
+            item["follow_up_questions"] = cleaned_follow_ups
+
+        self._sync_normalized_segments_to_window()
+
+    def _on_streaming_segment_ai_normalization_error(
+        self,
+        segment_id: str,
+        message: str,
+    ) -> None:
+        """Called when AI normalization of a streaming segment fails — keep original text."""
+        self._logger.warning(
+            "AI normalization failed for streaming segment %s: %s", segment_id, message
+        )
+        # Original text stays in place — no UI update needed, segment remains usable.
+
+    def _auto_send_next_pending_segment(self) -> None:
+        """Fix 5: After an AI response completes, auto-clean the next pending segment.
+
+        This keeps the Normalized Segments panel continuously fresh without
+        requiring manual 'Send to AI' clicks for every new question.
+        """
+        if not self._is_streaming_normalization_enabled():
+            return
+
+        lookup = getattr(self, "_normalized_segment_lookup", {})
+        items = getattr(self, "_normalized_segment_items", [])
+        for item in items:
+            if str(item.get("status", "pending")).lower() != "pending":
+                continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            from ghostmic.services.ai_trigger_service import is_question_like
+            if not is_question_like(text):
+                continue
+            seg_id = str(item.get("segment_id", "")).strip()
+            if not seg_id or seg_id not in lookup:
+                continue
+            # Only re-queue for normalization if it hasn't been cleaned yet by AI
+            # (i.e. text still looks like raw transcript).  We check by seeing
+            # whether a queued normalization entry already exists.
+            queue = getattr(self, "_pending_normalization_queue", [])
+            already_queued = any(qid == seg_id for qid, _ in queue)
+            if not already_queued:
+                self._enqueue_streaming_segment_normalization(seg_id, text)
+            break  # Process one at a time — subsequent ones will be drained in order
 
     @staticmethod
     def _build_local_follow_up_suggestions(question: str) -> List[str]:
@@ -1013,6 +1200,14 @@ class GhostMicApp:
             name="mic-prime",
             daemon=True,
         ).start()
+
+    def _sync_startup_mic_state(self) -> None:
+        """Prime microphone capture during startup when mic mode is enabled."""
+        if not self._is_mic_capture_enabled():
+            return
+
+        self._logger.info("Startup mic capture is enabled; priming microphone backend.")
+        self._prime_mic_capture_async()
 
     def _enable_mic_capture_live(self) -> bool:
         """Enable microphone capture without restarting speaker/VAD threads."""
@@ -1786,6 +1981,10 @@ class GhostMicApp:
             self._window.ai_panel.finish_response(full_text)
             self._window.controls.set_status("✓ Response ready", "#3fb950")
             self._logger.info("AI response displayed successfully (%d chars).", len(full_text))
+        # Fix 5: Kick off AI normalization for the next pending streaming segment
+        # so subsequent questions get cleaned up while the user reads the response.
+        self._auto_send_next_pending_segment()
+
 
     def _on_screen_analysis_requested(self) -> None:
         if not self._window:
@@ -2217,6 +2416,9 @@ class GhostMicApp:
             self._normalized_segment_items = []
         if not hasattr(self, "_normalized_segment_lookup"):
             self._normalized_segment_lookup = {}
+        if not hasattr(self, "_pending_normalization_queue"):
+            self._pending_normalization_queue = []
+
 
     def _streaming_processing_interval_ms(self) -> int:
         config = getattr(self, "_config", {})
@@ -2280,9 +2482,15 @@ class GhostMicApp:
 
         self._normalized_segment_items.clear()
         self._normalized_segment_lookup.clear()
+        # Clear any pending segment normalization jobs so stale segments from a
+        # previous recording session are not processed after a restart.
+        queue = getattr(self, "_pending_normalization_queue", None)
+        if queue is not None:
+            queue.clear()
 
         if clear_ui and self._window and hasattr(self._window, "set_normalized_segments"):
             self._window.set_normalized_segments([])
+
 
     def _ingest_streaming_transcript_chunk(self, segment) -> None:
         if not self._is_streaming_normalization_enabled():
@@ -2354,6 +2562,16 @@ class GhostMicApp:
             )
             return
 
+        # Minimum word count guard — rejects fragments like "Has more records than?"
+        word_count = len(normalized_text.split())
+        if word_count < 5:
+            self._logger.debug(
+                "Normalized segment skipped (too short, %d words): %r",
+                word_count,
+                normalized_text[:80],
+            )
+            return
+
         normalized_text = ensure_question_format(normalized_text)
 
         # Always log to session context so the AI has full conversation awareness,
@@ -2388,12 +2606,14 @@ class GhostMicApp:
                     self._normalized_segment_lookup.pop(old_id, None)
 
         trigger_service = getattr(self, "_ai_trigger_service", None)
-        auto_send = bool(
+        is_first_question = bool(
             self._recording_active
             and trigger_service is not None
             and trigger_service.should_auto_send(normalized_text)
         )
-        if auto_send:
+        if is_first_question:
+            # First question: use the existing path which also sets context and
+            # triggers an AI response immediately after normalization.
             try:
                 setattr(normalized_segment, "text", normalized_text)
             except Exception:
@@ -2403,6 +2623,11 @@ class GhostMicApp:
                 normalized_text,
                 auto_send_after=True,
             )
+        else:
+            # Subsequent questions: queue them for background AI normalization
+            # so the displayed text is always clean, not raw transcript.
+            self._enqueue_streaming_segment_normalization(segment_id, normalized_text)
+
 
     def _sync_normalized_segments_to_window(self) -> None:
         if not self._window or not hasattr(self._window, "set_normalized_segments"):
