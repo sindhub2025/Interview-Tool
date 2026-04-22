@@ -1482,14 +1482,21 @@ class MainWindow(QMainWindow):
         y = available.y()
 
         # Do not set a window tooltip while docked; keep the dock pill passive.
-        self.setGeometry(x, y, dock_width, dock_height)
         self.show()
         self.raise_()
         self.activateWindow()
+        QTimer.singleShot(0, lambda: self.setGeometry(x, y, dock_width, dock_height))
         QTimer.singleShot(60, self._apply_stealth)
 
     def _set_docked_ui(self, docked: bool) -> None:
         self._set_root_style(docked)
+        if docked:
+            self.setStyleSheet(
+                MAIN_STYLE
+                + "\nQMainWindow { background-color: transparent; }\n"
+            )
+        else:
+            self.setStyleSheet(MAIN_STYLE)
         self._dock_indicator.setVisible(docked)
         # Hide full controls when docked so only the restore pill remains.
         self._title_bar.setVisible(not docked)

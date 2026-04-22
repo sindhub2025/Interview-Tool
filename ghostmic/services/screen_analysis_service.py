@@ -154,7 +154,7 @@ def analyze_screenshot_with_groq(
     api_key: str,
     *,
     model: str = GROQ_VISION_MODEL,
-    prompt: str = DEFAULT_SCREEN_PROMPT,
+    prompt: str = DEEP_ANALYSIS_SCREEN_PROMPT,
     timeout: float = 90.0,
 ) -> str:
     """Send a screenshot to Groq vision and return the assistant response text."""
@@ -211,7 +211,7 @@ def analyze_screenshot_with_gemini(
     api_key: str,
     *,
     model: str = GEMINI_VISION_MODEL,
-    prompt: str = DEFAULT_SCREEN_PROMPT,
+    prompt: str = DEEP_ANALYSIS_SCREEN_PROMPT,
     timeout: float = 90.0,
 ) -> str:
     """Send a screenshot to Gemini vision and return assistant response text."""

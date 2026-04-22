@@ -72,6 +72,26 @@ def test_splitter_proportions_are_reapplied_on_config_update() -> None:
     assert ai_height > transcript_height * 2
 
 
+def test_docked_mode_clears_the_main_window_background_style() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window.enter_dock_mode()
+    for _ in range(10):
+        app.processEvents()
+
+    assert "QMainWindow { background-color: transparent; }" in window.styleSheet()
+    assert "background-color: transparent" in window._root.styleSheet()
+    assert window.geometry().width() == 120
+    assert window.geometry().height() == 20
+
+
 def test_speaker_question_layout_preserves_majority_height_for_ai_panel() -> None:
     app = _qt_app()
     assert app is not None
