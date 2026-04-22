@@ -381,8 +381,16 @@ def _load_config(path: str) -> dict:
 def _save_config(config: dict, path: str) -> None:
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        should_redact_api_keys = (
+            not getattr(sys, "frozen", False)
+            and os.path.abspath(path) == os.path.abspath(BUNDLED_CONFIG_PATH)
+        )
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump(redact_api_keys_for_disk(config), fh, indent=2)
+            json.dump(
+                redact_api_keys_for_disk(config) if should_redact_api_keys else config,
+                fh,
+                indent=2,
+            )
     except OSError as exc:
         _early_logger.error("Could not save config: %s", exc)
 

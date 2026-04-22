@@ -127,7 +127,7 @@ class ConfigService:
     def save(self) -> None:
         """Persist current config to disk (single write point)."""
         with self._lock:
-            data = redact_api_keys_for_disk(self._config)
+            data = copy.deepcopy(self._config)
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self._path)), exist_ok=True)
             with open(self._path, "w", encoding="utf-8") as fh:
