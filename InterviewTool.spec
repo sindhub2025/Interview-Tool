@@ -17,12 +17,14 @@ hiddenimports = [
     "sounddevice",
     "groq",
     "openai",
+    "google.genai",
     "requests",
 ]
 
 # faster_whisper relies on dynamic imports; include submodules explicitly.
 hiddenimports += collect_submodules("faster_whisper")
 hiddenimports += collect_submodules("ctranslate2")
+hiddenimports += collect_submodules("google.genai")
 
 binaries = []
 binaries += collect_dynamic_libs("torch")

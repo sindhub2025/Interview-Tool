@@ -121,6 +121,14 @@ class TestConfigServiceValidation:
         cfg = svc.load()
         assert cfg["ai"]["trigger_mode"] == "auto"
 
+    def test_backend_accepts_gemini_value(self, tmp_config, defaults):
+        with open(tmp_config, "w") as f:
+            json.dump({"ai": {"backend": "gemini", "main_backend": "gemini"}}, f)
+        svc = ConfigService(tmp_config, defaults)
+        cfg = svc.load()
+        assert cfg["ai"]["backend"] == "gemini"
+        assert cfg["ai"]["main_backend"] == "gemini"
+
     def test_invalid_dock_height_resets_to_default(self, tmp_config, defaults):
         with open(tmp_config, "w") as f:
             json.dump({"ui": {"dock_height": 5}}, f)

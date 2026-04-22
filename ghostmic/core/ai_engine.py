@@ -1,7 +1,7 @@
 """
 AI response engine.
 
-Groq is the active backend exposed in the app.
+Groq and Gemini are active backends exposed in the app.
 OpenAI code paths are intentionally preserved for future re-enable.
 
 Runs in a dedicated QThread and emits streaming response tokens.
@@ -544,10 +544,15 @@ class AIThread(QThread):  # type: ignore[misc]
             self._config.get("expose_openai_provider", False)
         )
 
-        if requested_backend in (None, "", "groq"):
+        normalized = str(requested_backend or "").strip().lower()
+
+        if normalized in ("", "groq"):
             return "groq"
 
-        if requested_backend == "openai":
+        if normalized == "gemini":
+            return "gemini"
+
+        if normalized == "openai":
             if expose_openai:
                 return "openai"
             logger.info("AIThread: OpenAI backend is hidden; using 'groq'")
@@ -555,7 +560,7 @@ class AIThread(QThread):  # type: ignore[misc]
 
         logger.info(
             "AIThread: backend %r is unsupported; using 'groq'",
-            requested_backend,
+            normalized,
         )
         return "groq"
 
@@ -730,6 +735,13 @@ class AIThread(QThread):  # type: ignore[misc]
                     )
                     logger.info("AIThread: _generate_groq() completed")
                     return True
+                if backend == "gemini":
+                    logger.info("AIThread: calling _generate_gemini()")
+                    self._generate_gemini(
+                        context, system_prompt, temperature
+                    )
+                    logger.info("AIThread: _generate_gemini() completed")
+                    return True
 
                 logger.error("AIThread: unknown backend %r", backend)
                 if pyqtSignal is not None:
@@ -846,6 +858,37 @@ class AIThread(QThread):  # type: ignore[misc]
         )
         self._generate_stream(
             client, system_prompt, context, temperature, "groq"
+        )
+
+    def _generate_gemini(
+        self, context: str, system_prompt: str, temperature: float
+    ) -> None:
+        logger.info("AIThread: _generate_gemini() called")
+        try:
+            from google import genai  # type: ignore[import]
+        except ImportError as e:
+            error_msg = (
+                "google-genai package not installed. "
+                "Run: pip install google-genai"
+            )
+            if pyqtSignal is not None:
+                self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
+            raise RuntimeError(error_msg) from e
+
+        api_key = str(self._config.get("gemini_api_key", "")).strip()
+        if not api_key:
+            error_msg = "Gemini API key not set. Add it in Settings -> AI."
+            if pyqtSignal is not None:
+                self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
+            raise ValueError(error_msg)
+
+        logger.info("AIThread: creating Gemini client...")
+        client = genai.Client(api_key=api_key)
+        logger.info(
+            "AIThread: Gemini client created, calling _generate_gemini_stream()..."
+        )
+        self._generate_gemini_stream(
+            client, system_prompt, context, temperature
         )
 
     # ------------------------------------------------------------------
@@ -984,6 +1027,122 @@ class AIThread(QThread):  # type: ignore[misc]
             logger.warning("AIThread (%s): %s", backend_name, error_msg)
             raise RuntimeError(error_msg)
 
+    def _generate_gemini_stream(
+        self,
+        client,
+        system_prompt: str,
+        context: str,
+        temperature: float,
+    ) -> None:
+        """Generate response using Gemini streaming API."""
+        logger.info("AIThread (gemini): _generate_gemini_stream() starting")
+        full_response: List[str] = []
+        stream = None
+
+        try:
+            from google.genai import types  # type: ignore[import]
+
+            model = str(
+                self._config.get("gemini_model", "gemini-3-flash-preview")
+            ).strip() or "gemini-3-flash-preview"
+
+            logger.info(
+                "AIThread (gemini): using model=%s, context_length=%d",
+                model,
+                len(context),
+            )
+
+            stream = client.models.generate_content_stream(
+                model=model,
+                contents=context,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=temperature,
+                ),
+            )
+            logger.info(
+                "AIThread (gemini): stream object created, starting iteration"
+            )
+
+            stream_timeout = self._config.get("stream_timeout", 30.0)
+            stream_start = time.time()
+            chunk_count = 0
+
+            for chunk in stream:
+                if self._stop_event.is_set():
+                    logger.info(
+                        "AIThread (gemini): stream cancelled by stop event"
+                    )
+                    break
+
+                elapsed = time.time() - stream_start
+                if elapsed > stream_timeout:
+                    error_msg = f"Stream timeout after {stream_timeout}s"
+                    logger.error("AIThread (gemini): %s", error_msg)
+                    raise RuntimeError(error_msg)
+
+                delta = str(getattr(chunk, "text", "") or "")
+                if delta:
+                    full_response.append(delta)
+                    chunk_count += 1
+
+            logger.debug(
+                "AIThread (gemini): stream finished (chunks: %d)",
+                chunk_count,
+            )
+
+        except Exception as exc:  # pylint: disable=broad-except
+            error_msg = f"Gemini stream error: {exc}"
+            logger.error("AIThread (gemini): %s", error_msg)
+            raise RuntimeError(error_msg) from exc
+
+        finally:
+            if stream is not None and hasattr(stream, "close"):
+                try:
+                    stream.close()
+                except Exception as e:  # pylint: disable=broad-except
+                    logger.debug(
+                        "AIThread (gemini): error closing stream: %s",
+                        e,
+                    )
+
+        complete = "".join(full_response)
+        if complete.strip():
+            if self._on_ready:
+                self._on_ready(complete)
+            if pyqtSignal is not None:
+                self.ai_response_ready.emit(complete)  # type: ignore[attr-defined]
+            logger.info(
+                "AIThread (gemini): response ready (%d chars)",
+                len(complete),
+            )
+        else:
+            error_msg = "No response generated from Gemini"
+            logger.warning("AIThread (gemini): %s", error_msg)
+            raise RuntimeError(error_msg)
+
+    @staticmethod
+    def _extract_gemini_text(response: Any) -> str:
+        """Extract plain text content from Gemini SDK responses."""
+        text = str(getattr(response, "text", "") or "").strip()
+        if text:
+            return text
+
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) or []
+            chunks: List[str] = []
+            for part in parts:
+                part_text = str(getattr(part, "text", "") or "").strip()
+                if part_text:
+                    chunks.append(part_text)
+            merged = "\n".join(chunks).strip()
+            if merged:
+                return merged
+
+        return ""
+
     # ------------------------------------------------------------------
     # Connectivity Test
     # ------------------------------------------------------------------
@@ -1006,6 +1165,9 @@ class AIThread(QThread):  # type: ignore[misc]
             if test_backend == "openai":
                 response = self._test_openai(test_msg)
                 return (True, "openai", response)
+            elif test_backend == "gemini":
+                response = self._test_gemini(test_msg)
+                return (True, "gemini", response)
             elif test_backend == "groq":
                 response = self._test_groq(test_msg)
                 return (True, "groq", response)
@@ -1078,6 +1240,79 @@ class AIThread(QThread):  # type: ignore[misc]
                 ):
                     logger.debug(
                         "AIThread: OpenAI rate limit, retrying in "
+                        "%.1fs... (attempt %d/%d)",
+                        retry_delay,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise
+        return ""
+
+    def _test_gemini(self, message: str) -> str:
+        """Send test message to Gemini and return response."""
+        api_key = str(self._config.get("gemini_api_key", "")).strip()
+        if not api_key:
+            raise ValueError("Gemini API key not set")
+
+        model = str(
+            self._config.get("gemini_model", "gemini-3-flash-preview")
+        ).strip() or "gemini-3-flash-preview"
+        max_retries = 3
+        retry_delay = 1.0
+
+        for attempt in range(max_retries):
+            try:
+                try:
+                    from google import genai  # type: ignore[import]
+                    from google.genai import types  # type: ignore[import]
+                except ImportError as e:
+                    raise RuntimeError(
+                        "google-genai package not installed"
+                    ) from e
+
+                client = genai.Client(api_key=api_key)
+                response = client.models.generate_content(
+                    model=model,
+                    contents=message,
+                    config=types.GenerateContentConfig(
+                        temperature=0.7,
+                    ),
+                )
+
+                text = self._extract_gemini_text(response)
+                if text:
+                    return text
+
+                logger.warning(
+                    "AIThread: Gemini response had no content"
+                )
+                return ""
+
+            except TimeoutError as e:
+                if attempt < max_retries - 1:
+                    logger.debug(
+                        "AIThread: Gemini test timeout, retrying in "
+                        "%.1fs... (attempt %d/%d)",
+                        retry_delay,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise RuntimeError(
+                        f"Gemini test timeout after {max_retries} retries"
+                    ) from e
+            except Exception as e:
+                if (
+                    attempt < max_retries - 1
+                    and "rate" in str(e).lower()
+                ):
+                    logger.debug(
+                        "AIThread: Gemini rate limit, retrying in "
                         "%.1fs... (attempt %d/%d)",
                         retry_delay,
                         attempt + 1,

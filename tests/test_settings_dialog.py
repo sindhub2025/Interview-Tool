@@ -87,3 +87,37 @@ def test_settings_dialog_saves_stealth_checkbox_state() -> None:
         assert emitted[0]["ui"]["stealth_enabled"] is False
     finally:
         dialog.deleteLater()
+
+
+def test_settings_dialog_includes_gemini_backend_option() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    dialog = SettingsDialog(_base_config())
+    try:
+        assert dialog._backend_combo.findText("gemini") >= 0
+    finally:
+        dialog.deleteLater()
+
+
+def test_settings_dialog_saves_gemini_backend_and_key() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    dialog = SettingsDialog(_base_config(stealth_enabled=True))
+    try:
+        emitted: list[dict] = []
+        dialog.settings_saved.connect(emitted.append)
+
+        dialog._backend_combo.setCurrentText("gemini")
+        dialog._gemini_api_key_edit.setText("test-gemini-key")
+        dialog._gemini_model_combo.setCurrentText("gemini-3-flash-preview")
+        dialog._save()
+
+        assert emitted
+        assert emitted[0]["ai"]["backend"] == "gemini"
+        assert emitted[0]["ai"]["main_backend"] == "gemini"
+        assert emitted[0]["ai"]["gemini_api_key"] == "test-gemini-key"
+        assert emitted[0]["ai"]["gemini_model"] == "gemini-3-flash-preview"
+    finally:
+        dialog.deleteLater()

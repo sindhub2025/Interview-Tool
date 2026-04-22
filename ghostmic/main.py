@@ -199,6 +199,8 @@ def _default_config() -> dict:
             "openai_model": "gpt-5-mini",
             "groq_api_key": "",
             "groq_model": "llama-3.1-70b-versatile",
+            "gemini_api_key": "",
+            "gemini_model": "gemini-3-flash-preview",
             "system_prompt": DEFAULT_SYSTEM_PROMPT,
             "temperature": 0.7,
             "trigger_mode": "auto",
@@ -348,11 +350,28 @@ def _load_config(path: str) -> dict:
         if ai_cfg.get("backend") == "ollama":
             ai_cfg["backend"] = "openai" if expose_openai else "groq"
 
-        # Groq-only mode unless the feature flag re-exposes OpenAI.
-        if not expose_openai:
-            ai_cfg["backend"] = "groq"
-            ai_cfg["main_backend"] = "groq"
-            ai_cfg["fallback_backend"] = "groq"
+        def _sanitize_backend(raw_value: object, allowed: set[str], default: str) -> str:
+            value = str(raw_value or "").strip().lower()
+            if value in allowed:
+                return value
+            return default
+
+        allowed = {"groq", "gemini"}
+        if expose_openai:
+            allowed.add("openai")
+
+        requested_backend = ai_cfg.get("backend", "groq")
+        requested_main = ai_cfg.get("main_backend", requested_backend)
+        active_backend = _sanitize_backend(requested_main, allowed, "groq")
+        ai_cfg["backend"] = _sanitize_backend(requested_backend, allowed, active_backend)
+        ai_cfg["main_backend"] = active_backend
+
+        if expose_openai:
+            requested_fallback = ai_cfg.get("fallback_backend", active_backend)
+            ai_cfg["fallback_backend"] = _sanitize_backend(requested_fallback, allowed, active_backend)
+        else:
+            # Keep fallback disabled in standard mode; only OpenAI remains feature-gated.
+            ai_cfg["fallback_backend"] = active_backend
             ai_cfg["enable_fallback"] = False
 
     return cfg
@@ -2117,21 +2136,35 @@ class GhostMicApp:
             return
 
         ai_cfg = self._config.get("ai", {})
-        api_key = str(ai_cfg.get("groq_api_key", "")).strip()
+        from ghostmic.services.screen_analysis_service import (
+            ScreenAnalysisWorker,
+            resolve_screen_analysis_provider,
+        )
+
+        provider = resolve_screen_analysis_provider(ai_cfg)
+        provider_label = "Gemini" if provider == "gemini" else "Groq"
+        key_field = "gemini_api_key" if provider == "gemini" else "groq_api_key"
+        api_key = str(ai_cfg.get(key_field, "")).strip()
         if not api_key:
             self._window.ai_panel.show_error(
-                "Add your Groq API key in Settings before using screen analysis.",
+                f"Add your {provider_label} API key in Settings before using screen analysis.",
                 title="Screen Analysis",
             )
-            self._window.controls.set_status("Groq API key required", "#f85149")
+            self._window.controls.set_status(
+                f"{provider_label} API key required",
+                "#f85149",
+            )
             return
 
-        from ghostmic.services.screen_analysis_service import ScreenAnalysisWorker
-
-        self._window.controls.set_status("Capturing screen…", "#58a6ff")
+        self._window.controls.set_status(
+            f"Capturing screen ({provider_label})…",
+            "#58a6ff",
+        )
         self._window.controls.set_screen_analysis_busy(True)
         self._window.ai_panel.start_response(title="Screen Analysis")
-        self._window.ai_panel.show_thinking("Analyzing screenshot…")
+        self._window.ai_panel.show_thinking(
+            f"Analyzing screenshot with {provider_label}…"
+        )
 
         worker = ScreenAnalysisWorker(ai_cfg, parent=None)
         worker.analysis_ready.connect(self._on_screen_analysis_ready)
@@ -2395,6 +2428,13 @@ class GhostMicApp:
                     )
                 if self._tray:
                     self._tray.set_recording(False)
+            return
+
+        # Lightweight test/app stubs may bypass full initialization. In that
+        # mode, keep backward-compatible prime-only behavior.
+        if not hasattr(self, "_mic_recording_active"):
+            if enabled and hasattr(self, "_prime_mic_capture_async"):
+                self._prime_mic_capture_async()
             return
 
         # ── Case 2: No active recording → start/stop a mic-only session ──
@@ -3029,6 +3069,8 @@ class GhostMicApp:
     def _reset_auto_question_session_state(self, *, clear_ui: bool = True) -> None:
         self._auto_primary_question_sent = False
         self._active_primary_question_text = ""
+        if not hasattr(self, "_queued_normalized_questions"):
+            self._queued_normalized_questions = []
         self._queued_normalized_questions.clear()
         self._initial_recording_question_pending = False
         self._initial_recording_question_consumed = False
@@ -3039,8 +3081,10 @@ class GhostMicApp:
         if trigger_service is not None:
             trigger_service.reset()
         if clear_ui and self._window:
-            self._window.set_question_lock_enabled(False)
-            self._window.clear_queued_normalized_questions()
+            if hasattr(self._window, "set_question_lock_enabled"):
+                self._window.set_question_lock_enabled(False)
+            if hasattr(self._window, "clear_queued_normalized_questions"):
+                self._window.clear_queued_normalized_questions()
 
     def _on_queued_question_send_requested(self, question: str) -> None:
         from ghostmic.core.transcription_engine import TranscriptSegment

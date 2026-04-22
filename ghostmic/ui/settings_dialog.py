@@ -211,14 +211,12 @@ class SettingsDialog(QDialog):
         form = QFormLayout(w)
 
         self._backend_combo = QComboBox()
+        backend_options = ["groq", "gemini"]
         if self._expose_openai_provider:
-            self._backend_combo.addItems(["groq", "openai"])
-            self._backend_combo.setEnabled(True)
-            form.addRow("Backend:", self._backend_combo)
-        else:
-            self._backend_combo.addItems(["groq"])
-            self._backend_combo.setEnabled(False)
-            form.addRow("Backend (fixed):", self._backend_combo)
+            backend_options.append("openai")
+        self._backend_combo.addItems(backend_options)
+        self._backend_combo.setEnabled(True)
+        form.addRow("Backend:", self._backend_combo)
 
         self._openai_api_key_edit = QLineEdit()
         self._openai_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -276,6 +274,37 @@ class SettingsDialog(QDialog):
             ]
         )
         form.addRow("Groq model:", self._groq_model_combo)
+
+        self._gemini_api_key_edit = QLineEdit()
+        self._gemini_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._gemini_api_key_edit.setPlaceholderText(
+            "Get your key at aistudio.google.com/app/apikey"
+        )
+        self._gemini_key_toggle = QPushButton("👁")
+        self._gemini_key_toggle.setFixedSize(28, 28)
+        self._gemini_key_toggle.setCheckable(True)
+        self._gemini_key_toggle.setStyleSheet("QPushButton { background: transparent; border: none; }")
+        self._gemini_key_toggle.toggled.connect(
+            lambda checked: self._gemini_api_key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        gemini_key_row = QWidget()
+        gemini_key_layout = QHBoxLayout(gemini_key_row)
+        gemini_key_layout.setContentsMargins(0, 0, 0, 0)
+        gemini_key_layout.addWidget(self._gemini_api_key_edit)
+        gemini_key_layout.addWidget(self._gemini_key_toggle)
+        form.addRow("Gemini API key:", gemini_key_row)
+
+        self._gemini_model_combo = QComboBox()
+        self._gemini_model_combo.addItems(
+            [
+                "gemini-3-flash-preview",
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+            ]
+        )
+        form.addRow("Gemini model:", self._gemini_model_combo)
 
         self._trigger_combo = QComboBox()
         self._trigger_combo.addItems(["auto", "manual", "continuous"])
@@ -480,7 +509,7 @@ class SettingsDialog(QDialog):
 
         # AI
         backend = ai.get("main_backend") or ai.get("backend", "groq")
-        if not self._expose_openai_provider and backend != "groq":
+        if self._backend_combo.findText(backend) < 0:
             backend = "groq"
         b_idx = self._backend_combo.findText(backend)
         if b_idx >= 0:
@@ -497,6 +526,13 @@ class SettingsDialog(QDialog):
         gm_idx = self._groq_model_combo.findText(gm)
         if gm_idx >= 0:
             self._groq_model_combo.setCurrentIndex(gm_idx)
+
+        self._gemini_api_key_edit.setText(ai.get("gemini_api_key", ""))
+        gemini_model = ai.get("gemini_model", "gemini-3-flash-preview")
+        gemini_model_idx = self._gemini_model_combo.findText(gemini_model)
+        if gemini_model_idx >= 0:
+            self._gemini_model_combo.setCurrentIndex(gemini_model_idx)
+
         trigger = ai.get("trigger_mode", "auto")
         t_idx = self._trigger_combo.findText(trigger)
         if t_idx >= 0:
@@ -551,15 +587,11 @@ class SettingsDialog(QDialog):
         cfg.setdefault("ai", {})
         cfg["ai"]["expose_openai_provider"] = self._expose_openai_provider
 
-        selected_backend = (
-            self._backend_combo.currentText()
-            if self._expose_openai_provider
-            else "groq"
-        )
+        selected_backend = self._backend_combo.currentText() or "groq"
         cfg["ai"]["backend"] = selected_backend
         cfg["ai"]["main_backend"] = selected_backend
         if not self._expose_openai_provider:
-            cfg["ai"]["fallback_backend"] = "groq"
+            cfg["ai"]["fallback_backend"] = selected_backend
             cfg["ai"]["enable_fallback"] = False
 
         if self._expose_openai_provider:
@@ -568,6 +600,8 @@ class SettingsDialog(QDialog):
 
         cfg["ai"]["groq_api_key"] = self._groq_api_key_edit.text()
         cfg["ai"]["groq_model"] = self._groq_model_combo.currentText()
+        cfg["ai"]["gemini_api_key"] = self._gemini_api_key_edit.text()
+        cfg["ai"]["gemini_model"] = self._gemini_model_combo.currentText()
         cfg["ai"].pop("ollama_model", None)
         cfg["ai"].pop("ollama_url", None)
         cfg["ai"]["trigger_mode"] = self._trigger_combo.currentText()

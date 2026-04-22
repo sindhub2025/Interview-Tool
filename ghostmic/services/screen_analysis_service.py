@@ -1,4 +1,4 @@
-"""Silent full-screen screenshot capture and Groq vision analysis."""
+"""Silent full-screen screenshot capture and multimodal vision analysis."""
 
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ from ghostmic.utils.logger import get_logger
 logger = get_logger(__name__)
 
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+GEMINI_VISION_MODEL = "gemini-3-flash-preview"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 SCREEN_ANALYSIS_TEMPERATURE = 0.1
-SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS = 256
+SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS = 1024
+GEMINI_INLINE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 DEFAULT_SCREEN_PROMPT = (
     "Look at the screenshot for the main question, task, or problem the user is dealing with. "
     "Answer that directly using the on-screen context, and connect related labels, code, error messages, or UI clues when they help. "
@@ -77,6 +79,28 @@ def extract_groq_text(response_json: Dict[str, Any]) -> str:
     raise RuntimeError("Groq response did not contain readable text.")
 
 
+def extract_gemini_text(response: Any) -> str:
+    """Extract assistant text from a Gemini SDK response."""
+    text = str(getattr(response, "text", "") or "").strip()
+    if text:
+        return text
+
+    candidates = getattr(response, "candidates", None) or []
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", None) or []
+        chunks: list[str] = []
+        for part in parts:
+            part_text = str(getattr(part, "text", "") or "").strip()
+            if part_text:
+                chunks.append(part_text)
+        merged = "\n".join(chunks).strip()
+        if merged:
+            return merged
+
+    raise RuntimeError("Gemini response did not contain readable text.")
+
+
 def analyze_screenshot_with_groq(
     image_bytes: bytes,
     api_key: str,
@@ -134,6 +158,64 @@ def analyze_screenshot_with_groq(
     return extract_groq_text(response_json)
 
 
+def analyze_screenshot_with_gemini(
+    image_bytes: bytes,
+    api_key: str,
+    *,
+    model: str = GEMINI_VISION_MODEL,
+    prompt: str = DEFAULT_SCREEN_PROMPT,
+    timeout: float = 90.0,
+) -> str:
+    """Send a screenshot to Gemini vision and return assistant response text."""
+    if not api_key:
+        raise ValueError("Gemini API key is required for screen analysis.")
+    if len(image_bytes) > GEMINI_INLINE_IMAGE_MAX_BYTES:
+        raise RuntimeError(
+            "Screenshot is too large for Gemini inline image requests (20 MB limit). "
+            "Try reducing display resolution or capturing fewer monitors."
+        )
+
+    try:
+        from google import genai  # type: ignore[import]
+        from google.genai import types  # type: ignore[import]
+    except ImportError as exc:
+        raise RuntimeError(
+            "google-genai package not installed. Run: pip install google-genai"
+        ) from exc
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model,
+            # Docs recommend placing the prompt after image content.
+            contents=[
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type="image/png",
+                ),
+                prompt,
+            ],
+            config=types.GenerateContentConfig(
+                temperature=SCREEN_ANALYSIS_TEMPERATURE,
+                max_output_tokens=SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS,
+            ),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        raise RuntimeError(f"Gemini request failed: {exc}") from exc
+
+    return extract_gemini_text(response)
+
+
+def resolve_screen_analysis_provider(ai_config: dict) -> str:
+    """Return provider used for screen analysis based on active backend."""
+    backend = str(
+        ai_config.get("main_backend") or ai_config.get("backend") or "groq"
+    ).strip().lower()
+    if backend == "gemini":
+        return "gemini"
+    return "groq"
+
+
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
 except ImportError:  # pragma: no cover - fallback for non-Qt environments
@@ -142,7 +224,7 @@ except ImportError:  # pragma: no cover - fallback for non-Qt environments
 
 
 class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
-    """Qt-only background worker for screen capture and Groq analysis.
+    """Qt-only background worker for screen capture and provider analysis.
 
     This class requires PyQt6 at import time so ``pyqtSignal`` is not ``None``;
     only then do the ``analysis_ready`` and ``analysis_error`` signals exist.
@@ -172,13 +254,30 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
                 metadata["height"],
                 len(image_bytes),
             )
-            result = analyze_screenshot_with_groq(
-                image_bytes,
-                str(self._ai_config.get("groq_api_key", "")).strip(),
-                model=GROQ_VISION_MODEL,
-                prompt=DEFAULT_SCREEN_PROMPT,
-                timeout=float(self._ai_config.get("screen_analysis_timeout", 90.0)),
-            )
+            timeout = float(self._ai_config.get("screen_analysis_timeout", 90.0))
+            provider = resolve_screen_analysis_provider(self._ai_config)
+
+            if provider == "gemini":
+                result = analyze_screenshot_with_gemini(
+                    image_bytes,
+                    str(self._ai_config.get("gemini_api_key", "")).strip(),
+                    model=str(
+                        self._ai_config.get("gemini_vision_model", GEMINI_VISION_MODEL)
+                    ).strip() or GEMINI_VISION_MODEL,
+                    prompt=DEFAULT_SCREEN_PROMPT,
+                    timeout=timeout,
+                )
+            else:
+                result = analyze_screenshot_with_groq(
+                    image_bytes,
+                    str(self._ai_config.get("groq_api_key", "")).strip(),
+                    model=str(
+                        self._ai_config.get("groq_vision_model", GROQ_VISION_MODEL)
+                    ).strip() or GROQ_VISION_MODEL,
+                    prompt=DEFAULT_SCREEN_PROMPT,
+                    timeout=timeout,
+                )
+
             self.analysis_ready.emit(result)
         except Exception as exc:  # pylint: disable=broad-except
             logger.exception("Screen analysis failed: %s", exc)

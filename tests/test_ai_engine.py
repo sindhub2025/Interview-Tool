@@ -394,3 +394,21 @@ def test_build_system_prompt_includes_resume_policy_when_profile_available():
 
     assert "Resume usage policy:" in prompt
     assert "source of truth" in prompt
+
+
+def test_resolve_active_backend_accepts_gemini_when_openai_hidden():
+    thread = AIThread.__new__(AIThread)
+    thread._config = {"expose_openai_provider": False}
+
+    assert thread._resolve_active_backend("gemini") == "gemini"
+    assert thread._resolve_active_backend("openai") == "groq"
+
+
+def test_extract_gemini_text_from_candidate_parts_when_text_empty():
+    part1 = type("Part", (), {"text": "First line."})()
+    part2 = type("Part", (), {"text": "Second line."})()
+    content = type("Content", (), {"parts": [part1, part2]})()
+    candidate = type("Candidate", (), {"content": content})()
+    response = type("Response", (), {"text": "", "candidates": [candidate]})()
+
+    assert AIThread._extract_gemini_text(response) == "First line.\nSecond line."
