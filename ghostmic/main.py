@@ -2177,8 +2177,8 @@ class GhostMicApp:
         if not self._window:
             return
         summary_text = str(full_text or "").strip()
-        if len(summary_text) > 2000:
-            summary_text = summary_text[:2000] + "..."
+        if len(summary_text) > 8000:
+            summary_text = summary_text[:8000] + "..."
         self._active_screen_summary_text = summary_text
         self._active_screen_anchor_question = ""
         self._session_context_store.append_screen_summary(full_text)

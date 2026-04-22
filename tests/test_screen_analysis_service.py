@@ -9,6 +9,7 @@ import requests
 
 from ghostmic.services.screen_analysis_service import (
     DEFAULT_SCREEN_PROMPT,
+    DEEP_ANALYSIS_SCREEN_PROMPT,
     GEMINI_VISION_MODEL,
     GROQ_VISION_MODEL,
     SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS,
@@ -65,6 +66,24 @@ def test_default_screen_prompt_is_question_focused() -> None:
     assert "short summary" in prompt
     assert "1-2 sentences" in prompt
     assert "connect related" in prompt
+
+
+def test_deep_analysis_prompt_extracts_tables_and_er() -> None:
+    prompt = DEEP_ANALYSIS_SCREEN_PROMPT.lower()
+
+    assert "tables detected" in prompt
+    assert "er relationships" in prompt
+    assert "column" in prompt
+    assert "primary key" in prompt or "pk" in prompt
+    assert "foreign key" in prompt or "fk" in prompt
+    assert "code" in prompt
+    assert "sql" in prompt
+    assert "content summary" in prompt
+    assert "sample" in prompt
+
+
+def test_max_completion_tokens_supports_detailed_output() -> None:
+    assert SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS >= 4096
 
 
 def test_resolve_screen_analysis_provider_prefers_gemini_when_selected() -> None:
@@ -128,7 +147,7 @@ def test_analyze_screenshot_with_gemini_builds_expected_payload(monkeypatch) -> 
     assert calls["model"] == GEMINI_VISION_MODEL
     assert calls["part_data"] == b"fake-image-bytes"
     assert calls["part_mime"] == "image/png"
-    assert calls["contents"][1] == DEFAULT_SCREEN_PROMPT
+    assert calls["contents"][1] == DEEP_ANALYSIS_SCREEN_PROMPT
     assert calls["config"].kwargs["temperature"] == SCREEN_ANALYSIS_TEMPERATURE
     assert (
         calls["config"].kwargs["max_output_tokens"]
@@ -171,7 +190,7 @@ def test_analyze_screenshot_with_groq_builds_expected_payload(monkeypatch) -> No
     assert result == "Found a login dialog."
     assert calls["url"].endswith("/chat/completions")
     assert calls["json"]["model"] == GROQ_VISION_MODEL
-    assert calls["json"]["messages"][0]["content"][0]["text"] == DEFAULT_SCREEN_PROMPT
+    assert calls["json"]["messages"][0]["content"][0]["text"] == DEEP_ANALYSIS_SCREEN_PROMPT
     assert calls["json"]["messages"][0]["content"][1]["type"] == "image_url"
     assert calls["json"]["temperature"] == SCREEN_ANALYSIS_TEMPERATURE
     assert calls["json"]["max_completion_tokens"] == SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS

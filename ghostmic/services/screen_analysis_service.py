@@ -15,14 +15,62 @@ GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GEMINI_VISION_MODEL = "gemini-3-flash-preview"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 SCREEN_ANALYSIS_TEMPERATURE = 0.1
-SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS = 1024
+SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS = 4096
 GEMINI_INLINE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+# Legacy short-form prompt (kept for backward compatibility)
 DEFAULT_SCREEN_PROMPT = (
     "Look at the screenshot for the main question, task, or problem the user is dealing with. "
     "Answer that directly using the on-screen context, and connect related labels, code, error messages, or UI clues when they help. "
     "Keep the response as a very short summary: 1-2 sentences, or up to 3 bullets if that is clearer. "
     "If no clear question is visible, give the briefest useful summary of what matters on screen. "
     "Do not include step-by-step analysis or filler."
+)
+
+DEEP_ANALYSIS_SCREEN_PROMPT = (
+    "Analyze this screenshot thoroughly and extract ALL meaningful content. "
+    "Your analysis must be detailed enough that someone who cannot see the screenshot "
+    "can answer follow-up questions about it with high accuracy.\n\n"
+    "Produce your response in these sections:\n\n"
+    "## Content Summary\n"
+    "A clear 2-4 sentence overview of what is on screen (application name, page type, "
+    "purpose, and any visible questions/problems/tasks).\n\n"
+    "## Tables Detected\n"
+    "If ANY tables, grids, spreadsheets, or tabular data are visible, extract EACH table:\n"
+    "- Table name or description (use headers, tab titles, or infer from context)\n"
+    "- ALL column names exactly as shown\n"
+    "- Inferred data type for each column (VARCHAR, INT, DATE, BOOLEAN, FLOAT, TEXT, etc.)\n"
+    "- Whether the column appears to be a primary key (PK) or foreign key (FK)\n"
+    "- Up to 5 sample data rows transcribed exactly\n"
+    "- Total row count if visible\n"
+    "Format each table as:\n"
+    "### Table: <name>\n"
+    "| Column | Type | Key |\n"
+    "| --- | --- | --- |\n"
+    "| col_name | VARCHAR | PK |\n\n"
+    "Sample rows:\n"
+    "| val1 | val2 | ... |\n\n"
+    "## ER Relationships\n"
+    "If multiple tables are detected or column names suggest relationships "
+    "(e.g. user_id in one table referencing users table), describe them:\n"
+    "- TableA.column → TableB.column (one-to-many / many-to-many / one-to-one)\n"
+    "- Provide a text-based ER diagram using this format:\n"
+    "  [TableA] --(1:N)--> [TableB] via column_name\n"
+    "If only one table is found, describe likely relationships based on FK-like columns.\n\n"
+    "## Code & Errors\n"
+    "Transcribe any visible code snippets, SQL queries, error messages, stack traces, "
+    "or log entries exactly as shown. Identify the programming language if possible.\n\n"
+    "## Key Data Points\n"
+    "List any important values, settings, configurations, form field values, "
+    "dropdown selections, status indicators, URLs, file paths, or other contextual "
+    "information visible on screen.\n\n"
+    "IMPORTANT RULES:\n"
+    "- Be extremely precise with table column names, values, and data — accuracy is critical\n"
+    "- Do NOT skip or summarize table contents; transcribe them fully\n"
+    "- If no tables are found, say 'No tables detected' and focus on other sections\n"
+    "- Your output will be used to answer SQL-related follow-up questions, "
+    "so table structure must be complete and exact\n"
+    "- Answers can be as long as needed — do not artificially shorten"
 )
 
 
@@ -264,7 +312,7 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
                     model=str(
                         self._ai_config.get("gemini_vision_model", GEMINI_VISION_MODEL)
                     ).strip() or GEMINI_VISION_MODEL,
-                    prompt=DEFAULT_SCREEN_PROMPT,
+                    prompt=DEEP_ANALYSIS_SCREEN_PROMPT,
                     timeout=timeout,
                 )
             else:
@@ -274,7 +322,7 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
                     model=str(
                         self._ai_config.get("groq_vision_model", GROQ_VISION_MODEL)
                     ).strip() or GROQ_VISION_MODEL,
-                    prompt=DEFAULT_SCREEN_PROMPT,
+                    prompt=DEEP_ANALYSIS_SCREEN_PROMPT,
                     timeout=timeout,
                 )
 
