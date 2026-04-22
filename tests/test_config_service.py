@@ -81,6 +81,28 @@ class TestConfigServiceLoadSave:
             data = json.load(f)
         assert data["ai"]["backend"] == "groq"
 
+    def test_save_redacts_api_keys_before_writing(self, tmp_config, defaults):
+        svc = ConfigService(tmp_config, defaults)
+        svc.load()
+        svc.update_section(
+            "ai",
+            {
+                "groq_api_key": "live-groq-key",
+                "gemini_api_key": "live-gemini-key",
+                "openai_api_key": "live-openai-key",
+            },
+        )
+
+        svc.save()
+
+        with open(tmp_config) as f:
+            data = json.load(f)
+
+        assert data["ai"]["groq_api_key"] == ""
+        assert data["ai"]["gemini_api_key"] == ""
+        assert data["ai"]["openai_api_key"] == ""
+        assert svc.get("ai.groq_api_key") == "live-groq-key"
+
     def test_roundtrip(self, tmp_config, defaults):
         svc = ConfigService(tmp_config, defaults)
         svc.load()

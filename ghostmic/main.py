@@ -35,6 +35,7 @@ from ghostmic.utils.logger import (
     get_logger,
 )
 from ghostmic.core.ai_engine import DEFAULT_SYSTEM_PROMPT
+from ghostmic.services.config_service import redact_api_keys_for_disk
 from ghostmic.services.session_context_compactor import SessionContextCompactor
 from ghostmic.services.resume_service import ResumeService
 from ghostmic.services.session_context_store import SessionContextStore
@@ -381,7 +382,7 @@ def _save_config(config: dict, path: str) -> None:
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump(config, fh, indent=2)
+            json.dump(redact_api_keys_for_disk(config), fh, indent=2)
     except OSError as exc:
         _early_logger.error("Could not save config: %s", exc)
 

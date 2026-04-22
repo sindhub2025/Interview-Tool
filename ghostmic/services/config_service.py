@@ -89,6 +89,16 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
 }
 
 
+def redact_api_keys_for_disk(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a deep copy with API keys blanked before disk persistence."""
+    redacted = copy.deepcopy(config)
+    ai_section = redacted.get("ai")
+    if isinstance(ai_section, dict):
+        for key in ("groq_api_key", "gemini_api_key", "openai_api_key"):
+            ai_section[key] = ""
+    return redacted
+
+
 class ConfigService:
     """Centralized config management with validation and thread-safe access.
 
@@ -117,7 +127,7 @@ class ConfigService:
     def save(self) -> None:
         """Persist current config to disk (single write point)."""
         with self._lock:
-            data = copy.deepcopy(self._config)
+            data = redact_api_keys_for_disk(self._config)
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self._path)), exist_ok=True)
             with open(self._path, "w", encoding="utf-8") as fh:
