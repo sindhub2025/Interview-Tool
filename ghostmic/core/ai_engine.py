@@ -92,6 +92,25 @@ RUNTIME_RATE_LIMIT_MAX_DELAY: float = 8.0
 RESUME_CORRECTION_HIGH_THRESHOLD: float = 0.87
 RESUME_CORRECTION_MEDIUM_THRESHOLD: float = 0.74
 
+# ---------------------------------------------------------------------------
+# Two-stage Groq → Gemini continuation prompt
+# ---------------------------------------------------------------------------
+TWO_STAGE_CONTINUATION_SYSTEM_PROMPT = """\
+You are continuing an AI response that was started by a fast initial model.
+The initial response has already been delivered to the user.
+Your job is to CONTINUE and COMPLETE the answer.
+
+Rules:
+- Do NOT repeat, rephrase, or summarize anything from the initial response.
+- Start exactly where the initial response left off.
+- Add depth, examples, nuance, or additional points that were missing.
+- If the initial response was already complete and adequate, respond with \
+just: [COMPLETE]
+- Write naturally as a seamless continuation of the initial response.
+- Match the same tone, style, and detail level as the initial response.
+- Do not use phrases like "Building on the above" or "As mentioned".
+"""
+
 # Jaccard similarity threshold below which two questions are considered
 # different topics.  0.25 means less than 25 % word overlap → new topic.
 TOPIC_SHIFT_THRESHOLD: float = 0.25
@@ -386,6 +405,9 @@ class AIThread(QThread):  # type: ignore[misc]
         ai_response_ready = pyqtSignal(str)
         ai_error = pyqtSignal(str)
         ai_thinking = pyqtSignal()
+        # Two-stage Groq → Gemini signals
+        ai_continuation_thinking = pyqtSignal()
+        ai_continuation_ready = pyqtSignal(str)
 
     def __init__(
         self,
@@ -660,6 +682,31 @@ class AIThread(QThread):  # type: ignore[misc]
         temperature = float(self._config.get("temperature", 0.7))
         logger.info("AIThread: temperature=%.1f", temperature)
 
+        # ── Two-stage Groq → Gemini mode ──────────────────────────────
+        two_stage = bool(self._config.get("two_stage_enabled", False))
+        has_groq_key = bool(
+            str(self._config.get("groq_api_key", "")).strip()
+        )
+        has_gemini_key = bool(
+            str(self._config.get("gemini_api_key", "")).strip()
+        )
+
+        if two_stage and has_groq_key and has_gemini_key:
+            logger.info(
+                "AIThread: two-stage mode active (Groq → Gemini)"
+            )
+            self._generate_two_stage(
+                context, system_prompt, temperature
+            )
+            return
+
+        if two_stage and not (has_groq_key and has_gemini_key):
+            logger.warning(
+                "AIThread: two_stage_enabled but missing API key(s); "
+                "falling back to single-backend mode."
+            )
+
+        # ── Single-backend mode (original behaviour) ──────────────────
         logger.info("AIThread: trying main backend: %s", main_backend)
         success = self._try_generate(
             main_backend, context, system_prompt, temperature
@@ -684,6 +731,204 @@ class AIThread(QThread):  # type: ignore[misc]
             logger.error(
                 "AIThread: both main and fallback backends failed"
             )
+
+    # ------------------------------------------------------------------
+    # Two-stage Groq → Gemini pipeline
+    # ------------------------------------------------------------------
+
+    def _generate_two_stage(
+        self,
+        context: str,
+        system_prompt: str,
+        temperature: float,
+    ) -> None:
+        """Fast Groq initial response followed by Gemini continuation.
+
+        Stage 1 – Groq delivers a quick response and emits
+        ``ai_response_ready`` so the user sees an answer immediately.
+
+        Stage 2 – Gemini receives the original context *and* the Groq
+        response, and is asked to continue/complete without repeating.
+        The continuation is emitted via ``ai_continuation_ready``.
+        """
+        # ── Stage 1: Groq fast response ───────────────────────────────
+        groq_text = ""
+        try:
+            groq_text = self._run_groq_initial(context, system_prompt, temperature)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "AIThread two-stage: Groq stage-1 failed (%s); "
+                "falling back to Gemini-only.",
+                exc,
+            )
+
+        if not groq_text:
+            # Groq failed or returned empty → fall back to Gemini for
+            # the whole answer (single-backend behaviour).
+            logger.info(
+                "AIThread two-stage: Groq returned empty; using Gemini only."
+            )
+            try:
+                self._generate_gemini(context, system_prompt, temperature)
+            except Exception as exc:  # pylint: disable=broad-except
+                error_msg = f"Two-stage fallback Gemini failed: {exc}"
+                logger.error("AIThread: %s", error_msg)
+                if pyqtSignal is not None:
+                    self.ai_error.emit(error_msg)  # type: ignore[attr-defined]
+            return
+
+        # Emit Groq response immediately so the user sees it.
+        if self._on_ready:
+            self._on_ready(groq_text)
+        if pyqtSignal is not None:
+            self.ai_response_ready.emit(groq_text)  # type: ignore[attr-defined]
+        logger.info(
+            "AIThread two-stage: Groq initial response delivered (%d chars).",
+            len(groq_text),
+        )
+
+        # ── Stage 2: Gemini continuation ──────────────────────────────
+        if self._stop_event.is_set():
+            return
+
+        if pyqtSignal is not None:
+            self.ai_continuation_thinking.emit()  # type: ignore[attr-defined]
+
+        try:
+            continuation = self._run_gemini_continuation(
+                context, system_prompt, groq_text, temperature
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "AIThread two-stage: Gemini continuation failed: %s", exc
+            )
+            # Groq response was already delivered; continuation failure
+            # is non-critical — the user already has an answer.
+            return
+
+        # Skip if Gemini determined the answer was already complete.
+        if not continuation or "[COMPLETE]" in continuation:
+            logger.info(
+                "AIThread two-stage: Gemini indicated response is complete."
+            )
+            return
+
+        if pyqtSignal is not None:
+            self.ai_continuation_ready.emit(continuation)  # type: ignore[attr-defined]
+        logger.info(
+            "AIThread two-stage: Gemini continuation delivered (%d chars).",
+            len(continuation),
+        )
+
+    def _run_groq_initial(
+        self,
+        context: str,
+        system_prompt: str,
+        temperature: float,
+    ) -> str:
+        """Call Groq (non-streaming) and return the full response text."""
+        try:
+            from openai import OpenAI  # type: ignore[import]
+        except ImportError as exc:
+            raise RuntimeError(
+                "openai package not installed. Run: pip install openai"
+            ) from exc
+
+        api_key = str(self._config.get("groq_api_key", "")).strip()
+        if not api_key:
+            raise ValueError("Groq API key not set for two-stage mode.")
+
+        model = str(
+            self._config.get("groq_model", "llama-3.3-70b-versatile")
+        ).strip() or "llama-3.3-70b-versatile"
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
+
+        logger.info(
+            "AIThread two-stage: calling Groq (model=%s, context=%d chars)",
+            model,
+            len(context),
+        )
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context},
+            ],
+            temperature=temperature,
+            max_tokens=512,
+            stream=False,
+            timeout=30.0,
+        )
+
+        if (
+            response.choices
+            and response.choices[0].message
+            and response.choices[0].message.content
+        ):
+            return response.choices[0].message.content.strip()
+        return ""
+
+    def _run_gemini_continuation(
+        self,
+        original_context: str,
+        original_system_prompt: str,
+        groq_response: str,
+        temperature: float,
+    ) -> str:
+        """Call Gemini with the Groq response to continue/complete the answer."""
+        try:
+            from google import genai  # type: ignore[import]
+            from google.genai import types  # type: ignore[import]
+        except ImportError as exc:
+            raise RuntimeError(
+                "google-genai package not installed. Run: pip install google-genai"
+            ) from exc
+
+        api_key = str(self._config.get("gemini_api_key", "")).strip()
+        if not api_key:
+            raise ValueError("Gemini API key not set for two-stage continuation.")
+
+        model = str(
+            self._config.get("gemini_model", "gemini-3-flash-preview")
+        ).strip() or "gemini-3-flash-preview"
+
+        continuation_user_prompt = (
+            "Original question/context:\n"
+            f"{original_context}\n\n"
+            "Initial response already delivered to user:\n"
+            f"{groq_response}\n\n"
+            "Continue and complete this response. Add depth, examples, "
+            "or additional points that are missing. "
+            "If the initial response is already complete, respond with "
+            "just: [COMPLETE]"
+        )
+
+        client = genai.Client(api_key=api_key)
+
+        logger.info(
+            "AIThread two-stage: calling Gemini continuation "
+            "(model=%s, prompt=%d chars)",
+            model,
+            len(continuation_user_prompt),
+        )
+        response = client.models.generate_content(
+            model=model,
+            contents=continuation_user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=TWO_STAGE_CONTINUATION_SYSTEM_PROMPT,
+                temperature=temperature,
+            ),
+        )
+
+        return self._extract_gemini_text(response) or ""
+
+    # ------------------------------------------------------------------
+    # Single-backend generation
+    # ------------------------------------------------------------------
 
     def _try_generate(
         self,

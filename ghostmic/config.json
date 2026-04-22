@@ -4,6 +4,7 @@
     "main_backend": "groq",
     "fallback_backend": "groq",
     "enable_fallback": false,
+    "two_stage_enabled": true,
     "expose_openai_provider": false,
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",

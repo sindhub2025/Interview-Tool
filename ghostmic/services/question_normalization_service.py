@@ -41,6 +41,11 @@ except ImportError:  # pragma: no cover - fallback for non-Qt environments
 
 
 def _resolve_backend(ai_config: dict) -> str:
+    # Two-stage mode: normalization always uses Groq for speed.
+    if bool(ai_config.get("two_stage_enabled", False)):
+        groq_key = str(ai_config.get("groq_api_key", "")).strip()
+        if groq_key:
+            return "groq"
     backend = str(ai_config.get("main_backend") or ai_config.get("backend") or "groq").strip().lower()
     expose_openai = bool(ai_config.get("expose_openai_provider", False))
     if backend == "gemini":
