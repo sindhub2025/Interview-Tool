@@ -51,6 +51,7 @@ LOCAL_REPEAT_WINDOW_SECONDS: float = 2.5
 LOCAL_REPEAT_MAX_CHARS: int = 48
 DEFAULT_MIN_SEGMENT_SECONDS: float = 0.45
 DEFAULT_MIN_SEGMENT_RMS: float = 140.0
+DEFAULT_MIN_SEGMENT_RMS_MIC: float = 70.0
 DEFAULT_TARGET_RMS: float = 2200.0
 DEFAULT_MAX_GAIN: float = 8.0
 DEFAULT_SILENCE_TRIM_THRESHOLD: int = 220
@@ -260,6 +261,9 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         self._min_segment_rms = float(
             self._remote_config.get("min_segment_rms", DEFAULT_MIN_SEGMENT_RMS)
         )
+        self._min_segment_rms_mic = float(
+            self._remote_config.get("min_segment_rms_mic", DEFAULT_MIN_SEGMENT_RMS_MIC)
+        )
         self._trim_silence = bool(self._remote_config.get("trim_silence", True))
         self._silence_trim_threshold = int(
             self._remote_config.get(
@@ -403,7 +407,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                     segment_timestamp=transcript_ts,
                 )
 
-            processed = self._prepare_local_audio(audio)
+            processed = self._prepare_local_audio(audio, source=source)
             if processed is None:
                 return None
 
@@ -763,10 +767,13 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
     def _normalize_remote_text(text: str) -> str:
         return re.sub(r"\s+", " ", text.strip().lower())
 
-    def _prepare_local_audio(self, audio: np.ndarray) -> Optional[np.ndarray]:
+    def _prepare_local_audio(self, audio: np.ndarray, source: str = "speaker") -> Optional[np.ndarray]:
         mono = np.asarray(audio, dtype=np.int16)
         if mono.size == 0:
             return None
+
+        source_name = str(source or "").strip().lower()
+        min_rms = self._min_segment_rms_mic if source_name == "user" else self._min_segment_rms
 
         min_samples = int(16_000 * max(0.2, self._min_segment_seconds))
         if mono.size < min_samples:
@@ -781,7 +788,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         centered -= float(np.mean(centered))
 
         rms = float(np.sqrt(np.mean(np.square(centered))))
-        if rms < self._min_segment_rms:
+        if rms < min_rms:
             return None
 
         gain = self._target_rms / max(rms, 1e-6)

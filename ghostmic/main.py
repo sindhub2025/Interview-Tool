@@ -243,6 +243,7 @@ def _default_config() -> dict:
             "use_context_prompt": False,
             "min_segment_seconds": 0.45,
             "min_segment_rms": 140.0,
+            "min_segment_rms_mic": 70.0,
             "trim_silence": True,
             "silence_trim_threshold": 220,
             "silence_trim_pad_seconds": 0.08,
@@ -1578,6 +1579,13 @@ class GhostMicApp:
             or getattr(self, "_mic_recording_active", False)
         )
 
+    def _is_mic_only_session(self) -> bool:
+        """Return True when only a mic-only recording session is active."""
+        return bool(
+            getattr(self, "_mic_recording_active", False)
+            and not getattr(self, "_recording_active", False)
+        )
+
     # ------------------------------------------------------------------
     # Mic-only recording session
     # ------------------------------------------------------------------
@@ -2556,6 +2564,41 @@ class GhostMicApp:
             if self._is_streaming_normalization_enabled():
                 self._reset_streaming_normalization_state(clear_ui=True)
 
+            started_with_cloud_fallback = False
+            if self._is_model_loader_running():
+                enabled_cloud, detail = self._try_enable_cloud_fast_start()
+                if enabled_cloud:
+                    started_with_cloud_fallback = True
+                    self._logger.info(
+                        "Mic-only started while local model loads; using cloud transcription (%s).",
+                        detail,
+                    )
+                    if self._window:
+                        self._window.controls.set_status(
+                            "Starting mic now with cloud transcription while local model loads…",
+                            "#f0883e",
+                        )
+                else:
+                    self._logger.info(
+                        "Mic-only start blocked: local model still loading and cloud fallback unavailable (%s).",
+                        detail,
+                    )
+                    self._mic_recording_active = False
+                    audio_cfg["capture_mic"] = False
+                    _save_config(self._config, self._config_path)
+                    if self._window:
+                        self._window.controls.set_mic_enabled(False)
+                        self._window.controls.set_status(
+                            "Model is still loading and cloud fallback is unavailable.",
+                            "#f0883e",
+                        )
+                        self._window.ai_panel.show_error(
+                            "Cannot start mic capture yet because local model is still loading and "
+                            f"cloud transcription fallback is unavailable. Details: {detail}"
+                        )
+                    return
+
+            self._mic_recording_active = True
             if not self._start_mic_only_capture():
                 self._logger.warning(
                     "Mic-only session blocked: transcription unavailable. last_error=%s",
@@ -2578,14 +2621,19 @@ class GhostMicApp:
                 return
 
             self._ensure_ai_thread()
-            self._mic_recording_active = True
             if self._is_streaming_normalization_enabled():
                 self._start_streaming_processing_loop()
             if self._window:
-                self._window.controls.set_status(
-                    "Mic recording active — listening…",
-                    "#3fb950",
-                )
+                if started_with_cloud_fallback:
+                    self._window.controls.set_status(
+                        "Mic recording active — cloud transcription active",
+                        "#f0883e",
+                    )
+                else:
+                    self._window.controls.set_status(
+                        "Mic recording active — listening…",
+                        "#3fb950",
+                    )
             self._logger.info("Mic-only recording session started.")
         else:
             # Stop the mic-only recording session
@@ -2887,30 +2935,39 @@ class GhostMicApp:
         source = str(getattr(normalized_segment, "source", "speaker") or "speaker").strip().lower() or "speaker"
         source_chunk_ids = list(getattr(normalized_segment, "source_chunk_ids", []) or [])
 
-        # Only register question-like segments for UI display and AI dispatch.
-        # Statements, greetings, filler, and other non-question text are kept
-        # as context only — they don't clutter the normalized segments panel.
+        # In mic-only mode, accept ALL substantial text (not just questions)
+        # so the user's speech is always processed and sent to AI.
+        # In normal recording mode, only question-like segments are promoted.
         from ghostmic.services.ai_trigger_service import is_question_like
         from ghostmic.utils.text_processing import ensure_question_format
 
-        if not is_question_like(normalized_text):
+        mic_only = self._is_mic_only_session()
+        text_is_question = is_question_like(normalized_text)
+
+        if not mic_only and not text_is_question:
             self._logger.debug(
                 "Normalized segment skipped (not question-like): %r",
                 normalized_text[:80],
             )
             return
 
-        # Minimum word count guard — rejects fragments like "Has more records than?"
+        # Minimum word count guard — lower threshold for mic-only mode
+        # so shorter spoken queries are accepted.
+        min_words = 3 if mic_only else 5
         word_count = len(normalized_text.split())
-        if word_count < 5:
+        if word_count < min_words:
             self._logger.debug(
-                "Normalized segment skipped (too short, %d words): %r",
+                "Normalized segment skipped (too short, %d words, min=%d): %r",
                 word_count,
+                min_words,
                 normalized_text[:80],
             )
             return
 
-        normalized_text = ensure_question_format(normalized_text)
+        # Only force question-mark formatting for text that actually
+        # looks like a question.  Statements keep their original ending.
+        if text_is_question:
+            normalized_text = ensure_question_format(normalized_text)
 
         # Always log to session context so the AI has full conversation awareness,
         # regardless of whether this segment is a question.
@@ -2944,12 +3001,12 @@ class GhostMicApp:
                     self._normalized_segment_lookup.pop(old_id, None)
 
         trigger_service = getattr(self, "_ai_trigger_service", None)
-        # Auto-promote ANY question-like segment during recording to the top
-        # Question area — not just the first one.  Each new question replaces
-        # the previous primary question and triggers a fresh AI response.
+        # Auto-promote during recording:
+        # - Mic-only mode: promote ALL segments (user's speech IS the input)
+        # - Normal recording: only promote question-like segments
         should_auto_promote = bool(
             self._is_any_recording_active()
-            and is_question_like(normalized_text)
+            and (mic_only or text_is_question)
         )
         # Keep the trigger service in sync so other subsystems know a question
         # has been dispatched.
@@ -2962,6 +3019,12 @@ class GhostMicApp:
                 setattr(normalized_segment, "text", normalized_text)
             except Exception:
                 pass
+            self._logger.info(
+                "Auto-promoting normalized segment to AI: mic_only=%s, question=%s, text=%r",
+                mic_only,
+                text_is_question,
+                normalized_text[:80],
+            )
             self._on_speaker_question_normalize_requested(
                 normalized_segment,
                 normalized_text,
@@ -3956,8 +4019,11 @@ class GhostMicApp:
                 )
 
             latest_speaker_text = ""
+            # Accept both "speaker" (system audio) and "user" (mic) sources
+            # so mic-only sessions get proper topic-shift / follow-up tracking.
+            question_sources = {"speaker", "user"}
             for seg in reversed(transcript_snapshot):
-                if getattr(seg, "source", "") == "speaker":
+                if getattr(seg, "source", "") in question_sources:
                     latest_speaker_text = str(getattr(seg, "text", "")).strip()
                     break
 

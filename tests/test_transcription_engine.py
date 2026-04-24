@@ -52,6 +52,22 @@ def test_prepare_local_audio_trims_and_boosts_valid_segment():
     assert processed_rms > original_rms
 
 
+def test_prepare_local_audio_allows_quieter_user_source_with_mic_threshold():
+    thread = _thread(
+        {
+            "min_segment_seconds": 0.3,
+            "min_segment_rms": 140.0,
+            "min_segment_rms_mic": 45.0,
+            "trim_silence": False,
+        }
+    )
+
+    quiet_signal = (np.sin(np.linspace(0, 80.0, 8_000)) * 70.0).astype(np.int16)
+
+    assert thread._prepare_local_audio(quiet_signal, source="speaker") is None
+    assert thread._prepare_local_audio(quiet_signal, source="user") is not None
+
+
 def test_should_drop_local_artifact_for_repeated_short_text():
     thread = _thread()
     first = thread._should_drop_local_artifact("Thanks", 0.95, "speaker")

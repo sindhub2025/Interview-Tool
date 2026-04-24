@@ -87,9 +87,18 @@ class _FakeControls:
         self.mic_enabled_calls.append(bool(enabled))
 
 
+class _FakeAIPanel:
+    def __init__(self) -> None:
+        self.errors = []
+
+    def show_error(self, message):
+        self.errors.append(str(message))
+
+
 class _FakeWindow:
     def __init__(self) -> None:
         self.controls = _FakeControls()
+        self.ai_panel = _FakeAIPanel()
 
 
 def _make_app(capture_mic: bool) -> GhostMicApp:
@@ -300,3 +309,72 @@ def test_startup_mic_state_skips_when_disabled(monkeypatch):
     app._sync_startup_mic_state()
 
     assert called == []
+
+
+def test_mic_only_toggle_uses_cloud_fast_start_while_model_loading(monkeypatch):
+    app = _make_app(capture_mic=False)
+    app._mic_recording_active = False
+    app._is_model_loader_running = lambda: True
+    app._try_enable_cloud_fast_start = lambda: (True, "groq/whisper-large-v3-turbo")
+    app._start_mic_only_capture = lambda: True
+    app._reset_auto_question_session_state = lambda *args, **kwargs: None
+    app._is_streaming_normalization_enabled = lambda: False
+    app._ensure_ai_thread = lambda: None
+
+    monkeypatch.setattr("ghostmic.main._save_config", lambda cfg, path: None)
+
+    app._on_mic_toggled(True)
+
+    assert app._config["audio"]["capture_mic"] is True
+    assert app._mic_recording_active is True
+    assert any(
+        "cloud transcription active" in status
+        for status, _color in app._window.controls.status_calls
+    )
+
+
+def test_mic_only_toggle_sets_active_before_capture_start(monkeypatch):
+    app = _make_app(capture_mic=False)
+    app._mic_recording_active = False
+    app._is_model_loader_running = lambda: False
+    app._reset_auto_question_session_state = lambda *args, **kwargs: None
+    app._is_streaming_normalization_enabled = lambda: False
+    app._ensure_ai_thread = lambda: None
+
+    observed_active_state = []
+
+    def _start_capture() -> bool:
+        observed_active_state.append(bool(app._mic_recording_active))
+        return True
+
+    app._start_mic_only_capture = _start_capture
+
+    monkeypatch.setattr("ghostmic.main._save_config", lambda cfg, path: None)
+
+    app._on_mic_toggled(True)
+
+    assert observed_active_state == [True]
+    assert app._mic_recording_active is True
+
+
+def test_mic_only_toggle_blocks_when_loader_running_and_cloud_unavailable(monkeypatch):
+    app = _make_app(capture_mic=False)
+    app._mic_recording_active = False
+    app._is_model_loader_running = lambda: True
+    app._try_enable_cloud_fast_start = lambda: (False, "no configured API key")
+    app._reset_auto_question_session_state = lambda *args, **kwargs: None
+    app._is_streaming_normalization_enabled = lambda: False
+
+    started = []
+    app._start_mic_only_capture = lambda: started.append("start") or True
+
+    monkeypatch.setattr("ghostmic.main._save_config", lambda cfg, path: None)
+
+    app._on_mic_toggled(True)
+
+    assert started == []
+    assert app._config["audio"]["capture_mic"] is False
+    assert app._mic_recording_active is False
+    assert app._window.controls.mic_enabled_calls == [False]
+    assert app._window.ai_panel.errors
+    assert "no configured API key" in app._window.ai_panel.errors[-1]

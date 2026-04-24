@@ -173,8 +173,9 @@ class NormalizerService:
         normalized = clean_text(text)
         if len(normalized) < self._min_segment_chars:
             return ""
-        # Minimum word count guard — rejects fragments like "Has more records than?"
-        if len(normalized.split()) < 5:
+        # Minimum word count guard — rejects very short fragments while still
+        # allowing concise mic-only queries like "What is SQL?"
+        if len(normalized.split()) < 3:
             return ""
         # Apply SQL term corrections synchronously (cheap, no API call).
         # This fixes common Whisper misrecognitions like "soda" → "COUNT()".
