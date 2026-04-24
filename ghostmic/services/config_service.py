@@ -30,7 +30,7 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ai.backend":              (str,   "groq",   lambda v: v in ("groq", "gemini", "openai")),
     "ai.main_backend":         (str,   "groq",   lambda v: v in ("groq", "gemini", "openai")),
     "ai.groq_api_key":         (str,   "",       None),
-    "ai.groq_model":           (str,   "llama-3.3-70b-versatile", None),
+    "ai.groq_model":           (str,   "llama-4-maverick-17b-128e-instruct", None),
     "ai.gemini_api_key":       (str,   "",       None),
     "ai.gemini_model":         (str,   "gemini-3-flash-preview", None),
     "ai.openai_api_key":       (str,   "",       None),

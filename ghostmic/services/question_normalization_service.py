@@ -32,6 +32,17 @@ NORMALIZE_SYSTEM_PROMPT = (
     "Do not answer any question. Return strict JSON only."
 )
 
+_DBMS_ACRONYM_RE = re.compile(r"\b(?:dbms|rdbms)\b", re.IGNORECASE)
+_BAD_RDBMS_FULL_EXPANSION_RE = re.compile(
+    r"\breal[-\s]*time\s+database\s+management\s+system(?:\s*\(\s*rtdbms\s*\))?",
+    re.IGNORECASE,
+)
+_BAD_RDBMS_SHORT_EXPANSION_RE = re.compile(
+    r"\breal[-\s]*time\s+dbms(?:\s*\(\s*rtdbms\s*\))?",
+    re.IGNORECASE,
+)
+_BAD_RDBMS_ACRONYM_RE = re.compile(r"\brtdbms\b", re.IGNORECASE)
+
 
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
@@ -194,6 +205,27 @@ def _sanitize_follow_up_questions(
     return cleaned[:follow_up_count]
 
 
+def _correct_database_acronym_expansions(normalized_text: str, source_text: str) -> str:
+    normalized = _normalize_whitespace(normalized_text)
+    source = _normalize_whitespace(source_text).lower()
+    if not normalized or "rdbms" not in source or "rtdbms" in source:
+        return normalized
+
+    corrected = _BAD_RDBMS_FULL_EXPANSION_RE.sub(
+        "Relational Database Management System (RDBMS)",
+        normalized,
+    )
+    corrected = _BAD_RDBMS_SHORT_EXPANSION_RE.sub(
+        "Relational Database Management System (RDBMS)",
+        corrected,
+    )
+    corrected = _BAD_RDBMS_ACRONYM_RE.sub(
+        "Relational Database Management System (RDBMS)",
+        corrected,
+    )
+    return corrected
+
+
 @dataclass(frozen=True)
 class QuestionNormalizationResult:
     normalized_question: str
@@ -207,9 +239,14 @@ def _parse_normalization_result(
 ) -> QuestionNormalizationResult:
     payload = _extract_json_payload(model_text)
     if payload is not None:
-        normalized = ensure_question_format(payload.get("normalized_question", ""))
-        if not normalized:
-            normalized = ensure_question_format(fallback_question)
+        normalized_source = str(payload.get("normalized_question", "") or "")
+        if not normalized_source.strip():
+            normalized_source = fallback_question
+        normalized = _correct_database_acronym_expansions(
+            normalized_source,
+            fallback_question,
+        )
+        normalized = ensure_question_format(normalized)
         follow_ups = _sanitize_follow_up_questions(
             payload.get("follow_up_questions", []),
             normalized,
@@ -219,9 +256,8 @@ def _parse_normalization_result(
             follow_up_questions=follow_ups,
         )
 
-    normalized = ensure_question_format(model_text)
-    if not normalized:
-        normalized = ensure_question_format(fallback_question)
+    normalized = _correct_database_acronym_expansions(model_text, fallback_question)
+    normalized = ensure_question_format(normalized)
     follow_ups = _sanitize_follow_up_questions([], normalized)
     return QuestionNormalizationResult(
         normalized_question=normalized,
@@ -232,6 +268,12 @@ def _parse_normalization_result(
 def _build_normalization_context_block(question_text: str, ai_config: dict) -> str:
     """Build a compact context block for transcript normalization prompts."""
     lines: List[str] = []
+
+    if _DBMS_ACRONYM_RE.search(question_text):
+        lines.append("Database acronym context:")
+        lines.append("- DBMS = Database Management System")
+        lines.append("- RDBMS = Relational Database Management System")
+        lines.append("- Preserve RDBMS as relational, not real-time.")
 
     session_context = _normalize_whitespace(ai_config.get("session_context", ""))
     if session_context:
@@ -302,7 +344,7 @@ def normalize_question_with_followups(
         api_key = str(ai_config.get("groq_api_key", "")).strip()
         if not api_key:
             raise ValueError("Groq API key not set. Add it in Settings -> AI.")
-        model = str(ai_config.get("groq_model", "llama-3.3-70b-versatile")).strip() or "llama-3.3-70b-versatile"
+        model = str(ai_config.get("groq_model", "llama-4-maverick-17b-128e-instruct")).strip() or "llama-4-maverick-17b-128e-instruct"
         try:
             from openai import OpenAI  # type: ignore[import]
         except ImportError as exc:

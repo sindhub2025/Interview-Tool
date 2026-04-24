@@ -1,5 +1,8 @@
 """Unit tests for AI context construction."""
 
+import threading
+
+import ghostmic.core.ai_engine as ai_engine_module
 from ghostmic.core.ai_engine import AIThread, DEFAULT_SYSTEM_PROMPT
 from ghostmic.core.transcription_engine import TranscriptSegment
 
@@ -412,3 +415,99 @@ def test_extract_gemini_text_from_candidate_parts_when_text_empty():
     response = type("Response", (), {"text": "", "candidates": [candidate]})()
 
     assert AIThread._extract_gemini_text(response) == "First line.\nSecond line."
+
+
+def test_two_stage_stress_interview_flow_prefers_fast_groq_then_gemini(monkeypatch):
+    """Burst interview prompts should use Groq first, then Gemini continuation."""
+    monkeypatch.setattr(ai_engine_module, "pyqtSignal", None)
+
+    thread = AIThread.__new__(AIThread)
+    thread._config = {
+        "backend": "groq",
+        "main_backend": "groq",
+        "fallback_backend": "gemini",
+        "enable_fallback": True,
+        "two_stage_enabled": True,
+        "groq_api_key": "groq-test-key",
+        "gemini_api_key": "gemini-test-key",
+        "temperature": 0.2,
+        "system_prompt": "Answer as a concise interview candidate.",
+    }
+    thread._stop_event = threading.Event()
+
+    call_order = []
+    delivered_initial = []
+    groq_calls = []
+    gemini_calls = []
+
+    def _on_ready(text):
+        delivered_initial.append(text)
+        call_order.append("ready")
+
+    thread._on_ready = _on_ready
+
+    def _run_groq_initial(context, system_prompt, temperature):
+        groq_calls.append(
+            {
+                "context": context,
+                "system_prompt": system_prompt,
+                "temperature": temperature,
+            }
+        )
+        call_order.append("groq")
+        return "Quick Groq answer."
+
+    def _run_gemini_continuation(
+        original_context,
+        original_system_prompt,
+        groq_response,
+        temperature,
+    ):
+        # Handoff should happen only after the quick Groq answer is emitted.
+        assert call_order[-1] == "ready"
+        gemini_calls.append(
+            {
+                "context": original_context,
+                "system_prompt": original_system_prompt,
+                "groq_response": groq_response,
+                "temperature": temperature,
+            }
+        )
+        call_order.append("gemini")
+        return "Gemini continuation with deeper detail."
+
+    def _unexpected_single_backend(*_args, **_kwargs):
+        raise AssertionError(
+            "Single-backend path should not run when two-stage mode is active."
+        )
+
+    monkeypatch.setattr(thread, "_run_groq_initial", _run_groq_initial)
+    monkeypatch.setattr(
+        thread,
+        "_run_gemini_continuation",
+        _run_gemini_continuation,
+    )
+    monkeypatch.setattr(thread, "_try_generate", _unexpected_single_backend)
+
+    interview_questions = [
+        (
+            "Interview question "
+            f"{idx}: How would you design retries and backoff for an ETL API?"
+        )
+        for idx in range(1, 31)
+    ]
+
+    for question in interview_questions:
+        thread._generate([_seg(question, "speaker")], is_new_topic=True)
+
+    assert len(groq_calls) == len(interview_questions)
+    assert len(gemini_calls) == len(interview_questions)
+    assert len(delivered_initial) == len(interview_questions)
+
+    assert all("interview question" in call["context"].lower() for call in groq_calls)
+
+    for idx in range(len(interview_questions)):
+        base = idx * 3
+        assert call_order[base] == "groq"
+        assert call_order[base + 1] == "ready"
+        assert call_order[base + 2] == "gemini"

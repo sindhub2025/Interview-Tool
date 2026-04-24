@@ -27,7 +27,7 @@
 ghostmic/
 ├── main.py                   # Entry point
 ├── requirements.txt
-├── config.json               # User settings
+├── config.json               # Bundled defaults template
 ├── core/
 │   ├── audio_buffer.py       # Thread-safe circular audio buffer
 │   ├── audio_capture.py      # WASAPI loopback + mic capture (QThread)
@@ -111,7 +111,12 @@ git push origin v1.0.0
 4. Click **OK** and press **⏺** (or `Ctrl+Shift+G`) to start recording.
 5. Optional: **Resume** tab → upload your resume (PDF/DOCX/TXT) to enable resume-aware answer correction.
 
-To re-enable OpenAI later, set `ai.expose_openai_provider` to `true` in `ghostmic/config.json`.
+To re-enable OpenAI later, set `ai.expose_openai_provider` to `true` in your user config file.
+
+Runtime settings, including API keys, are stored outside the repository config file:
+
+- Windows: `%APPDATA%\GhostMic\config.json`
+- Other platforms: `~/.ghostmic/config.json`
 
 ---
 

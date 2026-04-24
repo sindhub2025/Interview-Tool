@@ -52,6 +52,14 @@ class TestCleanText:
             == "how do you validate row counts between source and target tables?"
         )
 
+    def test_ensure_question_format_preserves_balanced_parenthetical_acronym(self):
+        assert (
+            ensure_question_format(
+                "What is the difference between DBMS and RDBMS (Relational Database Management System)."
+            )
+            == "What is the difference between DBMS and RDBMS (Relational Database Management System)?"
+        )
+
 
 class TestMergeSegments:
     def _seg(self, text, source="speaker", ts=None, confidence=1.0):

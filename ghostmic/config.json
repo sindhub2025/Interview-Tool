@@ -9,7 +9,7 @@
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",
     "groq_api_key": "",
-    "groq_model": "llama-3.3-70b-versatile",
+    "groq_model": "llama-4-maverick-17b-128e-instruct",
     "system_prompt": "You are a real-time interview/meeting assistant. You are helping the user respond to questions and participate in a conversation.\n\nBased on the conversation transcript provided, generate:\n1. A concise, natural-sounding suggested response to the last question/topic\n2. Key talking points the user should mention\n\nRules:\n- Keep responses concise (2-4 sentences max for the main response)\n- Sound natural and conversational, not robotic\n- If it's a technical question, provide accurate technical details\n- If context is unclear, provide the most likely helpful response\n- Format: Start with the direct response, then bullet points for key points\n- Do NOT include phrases like \"Based on the transcript\" or \"Here's a suggestion\"\n- Write in first person as if the user is speaking\n",
     "temperature": 0.7,
     "trigger_mode": "auto",
@@ -87,13 +87,13 @@
     "window_y": null,
     "always_on_top": true,
     "compact_mode": false,
-    "stealth_enabled": false,
+    "stealth_enabled": true,
     "docked": false,
     "dock_height": 56,
-    "pre_dock_x": 1095,
-    "pre_dock_y": 145,
-    "pre_dock_width": 420,
-    "pre_dock_height": 90
+    "pre_dock_x": 215,
+    "pre_dock_y": 30,
+    "pre_dock_width": 1200,
+    "pre_dock_height": 700
   },
   "hotkeys": {
     "toggle_recording": "ctrl+shift+g",

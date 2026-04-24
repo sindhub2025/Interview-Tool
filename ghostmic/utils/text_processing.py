@@ -87,9 +87,18 @@ def ensure_question_format(text: str) -> str:
     if not cleaned:
         return ""
 
-    cleaned = _QUESTION_END_RE.sub("", cleaned).strip()
+    cleaned = re.sub(r"[.?!\"']+\s*$", "", cleaned).strip()
     if not cleaned:
         return ""
+
+    # Preserve a balanced terminal parenthesis or bracket, which is common
+    # in acronym expansions such as "(RDBMS)".
+    while cleaned and cleaned[-1] in ")]":
+        closing = cleaned[-1]
+        opening = "(" if closing == ")" else "["
+        if cleaned[:-1].count(opening) > cleaned[:-1].count(closing):
+            break
+        cleaned = cleaned[:-1].rstrip()
 
     return f"{cleaned}?"
 

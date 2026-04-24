@@ -839,8 +839,8 @@ class AIThread(QThread):  # type: ignore[misc]
             raise ValueError("Groq API key not set for two-stage mode.")
 
         model = str(
-            self._config.get("groq_model", "llama-3.3-70b-versatile")
-        ).strip() or "llama-3.3-70b-versatile"
+            self._config.get("groq_model", "llama-4-maverick-17b-128e-instruct")
+        ).strip() or "llama-4-maverick-17b-128e-instruct"
 
         client = OpenAI(
             api_key=api_key,
@@ -1157,7 +1157,7 @@ class AIThread(QThread):  # type: ignore[misc]
 
         try:
             default_model = (
-                "llama-3.3-70b-versatile"
+                "llama-4-maverick-17b-128e-instruct"
                 if backend_name == "groq"
                 else "gpt-4o-mini"
             )
@@ -1576,7 +1576,7 @@ class AIThread(QThread):  # type: ignore[misc]
             raise ValueError("Groq API key not set")
 
         model = self._config.get(
-            "groq_model", "llama-3.3-70b-versatile"
+            "groq_model", "llama-4-maverick-17b-128e-instruct"
         )
         max_retries = 3
         retry_delay = 1.0

@@ -59,13 +59,15 @@ def _default_user_config_path() -> str:
     return os.path.join(os.path.expanduser("~"), ".ghostmic", "config.json")
 
 
+def _default_config_path() -> str:
+    """Return the writable runtime config path."""
+    return _default_user_config_path()
+
+
 # ── Config paths ──────────────────────────────────────────────────────
+# The bundled config is a template seed; runtime settings live in the user profile.
 BUNDLED_CONFIG_PATH = os.path.join(_HERE, "config.json")
-DEFAULT_CONFIG_PATH = (
-    _default_user_config_path()
-    if getattr(sys, "frozen", False)
-    else BUNDLED_CONFIG_PATH
-)
+DEFAULT_CONFIG_PATH = _default_config_path()
 
 DIAGNOSTIC_DIR = get_log_dir()
 STARTUP_TRACE_FILE = os.path.join(DIAGNOSTIC_DIR, "startup_trace.log")
@@ -174,7 +176,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
-        "--config", default=DEFAULT_CONFIG_PATH, help="Path to config.json"
+        "--config", default=_default_config_path(), help="Path to config.json"
     )
     parser.add_argument(
         "--minimized", action="store_true", help="Start minimised to tray"
@@ -200,7 +202,7 @@ def _default_config() -> dict:
             "openai_api_key": "",
             "openai_model": "gpt-5-mini",
             "groq_api_key": "",
-            "groq_model": "llama-3.1-70b-versatile",
+            "groq_model": "llama-4-maverick-17b-128e-instruct",
             "gemini_api_key": "",
             "gemini_model": "gemini-3-flash-preview",
             "system_prompt": DEFAULT_SYSTEM_PROMPT,
@@ -1037,7 +1039,17 @@ class GhostMicApp:
         )
 
     def _is_model_loader_running(self) -> bool:
-        return bool(self._model_loader_thread and self._model_loader_thread.is_alive())
+        loader = self._model_loader_thread or self._model_loader
+        if not loader:
+            return False
+        if hasattr(loader, "isRunning"):
+            try:
+                return bool(loader.isRunning())
+            except Exception:  # pylint: disable=broad-except
+                return False
+        if hasattr(loader, "is_alive"):
+            return bool(loader.is_alive())
+        return False
 
     def _preload_torch_runtime(self) -> None:
         """Import torch on the main thread before background loaders start."""
@@ -1064,18 +1076,19 @@ class GhostMicApp:
 
     def _start_model_loader(self) -> None:
         try:
-            # Start transcription thread but skip local Whisper model entirely.
-            from ghostmic.core.transcription_engine import TranscriptionThread
+            from ghostmic.core.transcription_engine import ModelLoader, TranscriptionThread
 
             tcfg = self._config.get("transcription", {})
+            ai_cfg = self._config.get("ai", {})
             self._model_ready = False
             self._model_error_message = None
 
-            # Create transcription thread which will use remote STT only.
+            # Create the transcription thread first so it can receive the model
+            # as soon as the background Whisper loader finishes.
             self._transcription_thread = TranscriptionThread(
                 language=tcfg.get("language", "en"),
                 beam_size=tcfg.get("beam_size", 5),
-                ai_config=self._config.get("ai", {}),
+                ai_config=ai_cfg,
                 remote_config=tcfg,
             )
             self._transcription_thread.transcription_ready.connect(
@@ -1084,39 +1097,79 @@ class GhostMicApp:
             self._transcription_thread.transcribing.connect(self._on_transcribing)
             self._thread_coordinator.register("transcription", self._transcription_thread)
 
-            # Attempt to enable cloud transcription immediately and mark ready.
-            enabled, detail = self._transcription_thread.enable_remote_fallback()
-            if enabled:
-                self._model_loader = None
-                self._model_loader_thread = None
-                self._model_ready = True
-                self._model_error_message = None
-                if not self._transcription_thread.isRunning():
-                    self._transcription_thread.start()
-                self._logger.info(
-                    "Cloud-only STT enabled at startup (%s).", detail
-                )
-                if self._window:
-                    self._window.controls.set_status(
-                        "Cloud transcription ready", "#f0883e"
-                    )
-                return
+            if not self._transcription_thread.isRunning():
+                self._transcription_thread.start()
 
-            # Remote STT not configured/available.
-            self._model_ready = False
-            self._model_error_message = detail
+            model_size = str(tcfg.get("model_size", "base.en")).strip() or "base.en"
+            compute_type = str(tcfg.get("compute_type", "int8")).strip() or "int8"
+            device = str(tcfg.get("device", "auto")).strip() or "auto"
+
+            model_loader = ModelLoader(
+                model_size=model_size,
+                compute_type=compute_type,
+                device=device,
+            )
             self._model_loader = None
-            self._model_loader_thread = None
-            self._logger.warning("Cloud transcription unavailable at startup: %s", detail)
+            self._model_loader_thread = model_loader
+            model_loader.progress.connect(self._on_model_loader_progress)
+            model_loader.model_ready.connect(self._on_model_loader_ready)
+            model_loader.model_error.connect(self._on_model_loader_error)
+            model_loader.start()
+
+            self._logger.info(
+                "Whisper model load started (model=%s, compute=%s, device=%s).",
+                model_size,
+                compute_type,
+                device,
+            )
             if self._window:
                 self._window.controls.set_status(
-                    "Cloud transcription unavailable. See AI panel/logs.", "#f85149"
+                    f"Loading Whisper model '{model_size}'…", "#f0883e"
                 )
 
         except Exception as exc:  # pylint: disable=broad-except
             self._model_ready = False
             self._model_error_message = str(exc)
-            self._logger.warning("Cloud STT startup failed: %s", exc)
+            self._model_loader = None
+            self._model_loader_thread = None
+            self._logger.warning("Whisper startup failed: %s", exc)
+
+    def _on_model_loader_progress(self, message: str) -> None:
+        text = str(message)
+        self._logger.info("Whisper model loader: %s", text)
+        if self._window:
+            self._window.controls.set_status(text, "#f0883e")
+
+    def _on_model_loader_ready(self) -> None:
+        loader = self._model_loader_thread
+        model = getattr(loader, "model", None) if loader else None
+        if model is None:
+            self._on_model_loader_error("Whisper model loader finished without a model.")
+            return
+
+        if self._transcription_thread:
+            self._transcription_thread.set_model(model)
+
+        self._model_loader = model
+        self._model_loader_thread = None
+        self._model_ready = True
+        self._model_error_message = None
+        self._logger.info("Whisper model ready.")
+        if self._window:
+            self._window.controls.set_status("Whisper model ready", "#3fb950")
+
+    def _on_model_loader_error(self, detail: str) -> None:
+        message = str(detail or "Whisper model failed to load")
+        self._model_ready = False
+        self._model_error_message = message
+        self._model_loader = None
+        self._model_loader_thread = None
+        self._logger.warning("Whisper model load failed: %s", message)
+        if self._window:
+            self._window.controls.set_status(
+                "Whisper model failed to load. See AI panel/logs.",
+                "#f85149",
+            )
 
     # ------------------------------------------------------------------
     # Audio threads

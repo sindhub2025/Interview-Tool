@@ -138,3 +138,67 @@ def test_normalize_question_with_followups_supports_gemini_backend(monkeypatch) 
     assert calls["api_key"] == "test-gemini-key"
     assert calls["model"] == "gemini-3-flash-preview"
     assert calls["config"].kwargs["temperature"] == 0.2
+
+
+def test_normalize_question_with_followups_corrects_rdbms_expansion(monkeypatch) -> None:
+    calls = {}
+
+    class FakeCompletions:
+        def create(self, *, model, messages, temperature, max_tokens, timeout, stream):
+            calls["model"] = model
+            calls["messages"] = messages
+            calls["temperature"] = temperature
+            calls["max_tokens"] = max_tokens
+            calls["timeout"] = timeout
+            calls["stream"] = stream
+            return pytypes.SimpleNamespace(
+                choices=[
+                    pytypes.SimpleNamespace(
+                        message=pytypes.SimpleNamespace(
+                            content=(
+                                "{"
+                                '"normalized_question":"What is the difference between a Database Management System and a Real-Time Database Management System (RTDBMS)?",'
+                                '"follow_up_questions":['
+                                '"Can you give a practical example?",'
+                                '"How does RDBMS differ from DBMS in architecture?",'
+                                '"What trade-offs matter when choosing one?"'
+                                "]"
+                                "}"
+                            )
+                        )
+                    )
+                ]
+            )
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self, *, api_key, base_url=None):
+            calls["api_key"] = api_key
+            calls["base_url"] = base_url
+            self.chat = FakeChat()
+
+    fake_openai = pytypes.ModuleType("openai")
+    fake_openai.OpenAI = FakeClient
+
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    result = normalize_question_with_followups(
+        "What is the difference between DBMS and RDBMS",
+        {
+            "groq_api_key": "test-groq-key",
+            "groq_model": "llama-4-maverick-17b-128e-instruct",
+        },
+    )
+
+    assert result.normalized_question == (
+        "What is the difference between a Database Management System and a Relational Database Management System (RDBMS)?"
+    )
+    assert len(result.follow_up_questions) == 3
+    assert calls["api_key"] == "test-groq-key"
+    assert calls["base_url"] == "https://api.groq.com/openai/v1"
+    assert "Database acronym context:" in "\n".join(
+        message["content"] for message in calls["messages"] if message["role"] == "user"
+    )

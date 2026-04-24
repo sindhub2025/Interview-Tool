@@ -215,24 +215,28 @@ class AIResponseCard(QFrame):
         self._text_edit.setHtml(render_response_html(self._text))
         layout.addWidget(self._text_edit)
 
-    def _render_text(self) -> None:
+    def _render_text(self, *, scroll_to_end: bool) -> None:
         self._text_edit.setHtml(render_response_html(self._text))
         cursor = self._text_edit.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.movePosition(
+            QTextCursor.MoveOperation.End
+            if scroll_to_end
+            else QTextCursor.MoveOperation.Start
+        )
         self._text_edit.setTextCursor(cursor)
         self._text_edit.ensureCursorVisible()
 
     def append_text(self, chunk: str) -> None:
         """Append a streaming chunk to the response."""
         self._text += chunk
-        self._render_text()
+        self._render_text(scroll_to_end=True)
 
     def set_text(self, text: str) -> None:
         from ghostmic.utils.logger import get_logger
 
         logger = get_logger(__name__)
         self._text = text
-        self._render_text()
+        self._render_text(scroll_to_end=False)
         self._text_edit.updateGeometry()
         logger.info(
             "AIResponseCard.set_text() called - set %d chars to QTextBrowser, new height=%d",
@@ -456,14 +460,20 @@ class AIResponsePanel(QWidget):
     def show_thinking(self, message: str = "Generating response...") -> None:
         """Show a loading indicator while the AI is processing."""
         self.activity_started.emit()
+        if self._active_card is not None or self._cards:
+            return
         if self._thinking_label is None:
             lbl = QLabel(message)
+            lbl.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
             lbl.setStyleSheet(
                 f"color: {TEXT_SECONDARY}; font-style: italic; padding: 8px;"
             )
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._thinking_label = lbl
-            self._responses_layout.addWidget(lbl, 1)
+            self._responses_layout.addWidget(lbl)
             self._scroll_to_bottom()
         else:
             self._thinking_label.setText(message)
