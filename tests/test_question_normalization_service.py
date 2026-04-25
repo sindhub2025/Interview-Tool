@@ -33,6 +33,23 @@ def test_extract_json_payload_parses_fenced_json_block() -> None:
     assert len(payload["follow_up_questions"]) == 3
 
 
+def test_parse_normalization_result_recovers_clipped_json_response() -> None:
+    result = _parse_normalization_result(
+        (
+            '{"normalized_question":"How do you test ETL pipelines?",'
+            '"follow_up_questions":["Can you share a production incident?",'
+        ),
+        fallback_question="how do you test etl pipelines",
+    )
+
+    assert result.normalized_question == "How do you test ETL pipelines?"
+    assert "normalized_question" not in result.normalized_question
+    assert "follow_up_questions" not in result.normalized_question
+    assert result.follow_up_questions[0] == "Can you share a production incident?"
+    assert len(result.follow_up_questions) == 3
+    assert all("follow_up_questions" not in item for item in result.follow_up_questions)
+
+
 def test_sanitize_follow_up_questions_deduplicates_and_fills_three_items() -> None:
     cleaned = _sanitize_follow_up_questions(
         [

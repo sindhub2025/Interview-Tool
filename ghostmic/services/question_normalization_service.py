@@ -116,6 +116,127 @@ def _normalize_whitespace(text: str) -> str:
     return " ".join(str(text or "").split()).strip()
 
 
+def _find_jsonish_field_value_start(text: str, key: str) -> Optional[int]:
+    match = re.search(rf"['\"]{re.escape(key)}['\"]\s*:", text)
+    if not match:
+        return None
+    index = match.end()
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index
+
+
+def _decode_jsonish_string(raw_value: str, quote: str) -> str:
+    if quote == '"':
+        try:
+            decoded = json.loads(f'"{raw_value}"')
+            return _normalize_whitespace(str(decoded))
+        except json.JSONDecodeError:
+            pass
+
+    decoded_chars: list[str] = []
+    index = 0
+    escape_map = {
+        '"': '"',
+        "'": "'",
+        "\\": "\\",
+        "/": "/",
+        "n": " ",
+        "r": " ",
+        "t": " ",
+    }
+    while index < len(raw_value):
+        char = raw_value[index]
+        if char != "\\" or index + 1 >= len(raw_value):
+            decoded_chars.append(char)
+            index += 1
+            continue
+
+        escaped = raw_value[index + 1]
+        if escaped == "u" and index + 5 < len(raw_value):
+            hex_value = raw_value[index + 2 : index + 6]
+            try:
+                decoded_chars.append(chr(int(hex_value, 16)))
+                index += 6
+                continue
+            except ValueError:
+                pass
+        decoded_chars.append(escape_map.get(escaped, escaped))
+        index += 2
+
+    return _normalize_whitespace("".join(decoded_chars))
+
+
+def _read_jsonish_quoted_string(text: str, quote_index: int) -> tuple[str, bool, int]:
+    quote = text[quote_index]
+    raw_chars: list[str] = []
+    index = quote_index + 1
+
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            if index + 1 < len(text):
+                raw_chars.append(char)
+                raw_chars.append(text[index + 1])
+                index += 2
+                continue
+            raw_chars.append(char)
+            index += 1
+            continue
+        if char == quote:
+            return _decode_jsonish_string("".join(raw_chars), quote), True, index + 1
+        raw_chars.append(char)
+        index += 1
+
+    return _decode_jsonish_string("".join(raw_chars), quote), False, index
+
+
+def _extract_jsonish_string_field(text: str, key: str) -> Optional[str]:
+    value_start = _find_jsonish_field_value_start(text, key)
+    if value_start is None or value_start >= len(text):
+        return None
+
+    quote = text[value_start]
+    if quote in {"'", '"'}:
+        value, _closed, _next_index = _read_jsonish_quoted_string(text, value_start)
+        return value or None
+
+    value_end = value_start
+    while value_end < len(text) and text[value_end] not in ",}\r\n":
+        value_end += 1
+    value = _normalize_whitespace(text[value_start:value_end].strip().strip("'\""))
+    return value or None
+
+
+def _extract_jsonish_string_array_field(text: str, key: str) -> List[str]:
+    value_start = _find_jsonish_field_value_start(text, key)
+    if value_start is None:
+        return []
+
+    array_start = text.find("[", value_start)
+    if array_start < 0:
+        return []
+
+    values: List[str] = []
+    index = array_start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "]":
+            break
+        if char not in {"'", '"'}:
+            index += 1
+            continue
+
+        value, closed, next_index = _read_jsonish_quoted_string(text, index)
+        if not closed:
+            break
+        if value:
+            values.append(value)
+        index = next_index
+
+    return values
+
+
 def _extract_json_payload(raw_text: str) -> Optional[dict]:
     text = str(raw_text or "").strip()
     if not text:
@@ -137,6 +258,18 @@ def _extract_json_payload(raw_text: str) -> Optional[dict]:
             continue
         if isinstance(payload, dict):
             return payload
+
+    recovered: dict[str, object] = {}
+    normalized_question = _extract_jsonish_string_field(text, "normalized_question")
+    if normalized_question:
+        recovered["normalized_question"] = normalized_question
+
+    follow_ups = _extract_jsonish_string_array_field(text, "follow_up_questions")
+    if follow_ups:
+        recovered["follow_up_questions"] = follow_ups
+
+    if recovered:
+        return recovered
 
     return None
 
@@ -390,7 +523,7 @@ def normalize_question_with_followups(
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.2,
-                    max_tokens=280,
+                    max_tokens=512,
                     timeout=timeout,
                     stream=False,
                 )
