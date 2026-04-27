@@ -45,6 +45,10 @@ from ghostmic.services.transcript_store import TranscriptStore
 from ghostmic.services.normalizer_service import NormalizerService
 from ghostmic.services.segment_manager import SegmentManager
 from ghostmic.services.ai_trigger_service import AITriggerService
+from ghostmic.utils.interview_profile import (
+    default_interview_profiles,
+    get_active_interview_profile,
+)
 
 # Logger is set up in _main() after parsing --debug, but we need it here
 # for module-level imports that may log warnings.
@@ -217,6 +221,9 @@ def _default_config() -> dict:
             "session_context": "",
             "resume_context_enabled": True,
             "sql_profile_enabled": False,
+            "interview_profile_enabled": False,
+            "active_interview_profile_id": "sql",
+            "interview_profiles": default_interview_profiles(),
             "resume_correction_threshold_high": 0.87,
             "resume_correction_threshold_medium": 0.74,
             "context_compaction_enabled": True,
@@ -333,6 +340,7 @@ def _load_config(path: str) -> dict:
             else:
                 cfg = _default_config()
 
+        cfg = _merge_defaults(cfg, _default_config())
         should_persist = not (not frozen and path == BUNDLED_CONFIG_PATH)
         if should_persist:
             try:
@@ -2787,6 +2795,9 @@ class GhostMicApp:
                 pause_boundary_seconds=pause_seconds,
                 soft_flush_seconds=soft_flush_seconds,
                 soft_flush_chunks=soft_flush_chunks,
+                active_profile=get_active_interview_profile(
+                    self._config.get("ai", {})
+                ),
             )
 
         if getattr(self, "_segment_manager", None) is None and self._normalizer_service is not None:

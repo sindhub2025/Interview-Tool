@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Sequence
+from typing import Optional, Sequence
 
 from ghostmic.services.transcript_store import TranscriptChunk
 from ghostmic.utils.text_processing import clean_text
@@ -63,11 +63,13 @@ class NormalizerService:
         soft_flush_seconds: float = 6.0,
         soft_flush_chunks: int = 5,
         min_segment_chars: int = 20,
+        active_profile: Optional[dict] = None,
     ) -> None:
         self._pause_boundary_seconds = max(0.30, float(pause_boundary_seconds))
         self._soft_flush_seconds = max(2.0, float(soft_flush_seconds))
         self._soft_flush_chunks = max(3, int(soft_flush_chunks))
         self._min_segment_chars = max(1, int(min_segment_chars))
+        self._active_profile = dict(active_profile or {}) if active_profile else None
 
 
     def build_candidates(
@@ -174,20 +176,26 @@ class NormalizerService:
         if len(normalized) < self._min_segment_chars:
             return ""
         # Minimum word count guard — rejects very short fragments while still
-        # allowing concise mic-only queries like "What is SQL?"
+        # allowing concise mic-only queries like "What is X?"
         if len(normalized.split()) < 3:
             return ""
-        # Apply SQL term corrections synchronously (cheap, no API call).
-        # This fixes common Whisper misrecognitions like "soda" → "COUNT()".
+        # Apply active-profile term corrections synchronously (cheap, no API call).
         try:
-            from ghostmic.utils.sql_context import apply_sql_corrections, is_sql_related_text
-            if is_sql_related_text(normalized):
-                corrected = apply_sql_corrections(normalized)
+            from ghostmic.utils.interview_profile import (
+                apply_profile_corrections,
+                is_profile_related_text,
+            )
+
+            if self._active_profile and is_profile_related_text(
+                normalized,
+                self._active_profile,
+            ):
+                corrected = apply_profile_corrections(normalized, self._active_profile)
                 corrected_text = str(corrected.get("text", "") or "").strip()
                 if corrected_text:
                     normalized = corrected_text
         except Exception:  # pylint: disable=broad-except
-            pass  # Never let SQL correction break the normalization pipeline
+            pass  # Never let profile correction break the normalization pipeline
         return normalized
 
     @staticmethod

@@ -26,6 +26,9 @@ def _base_config(*, stealth_enabled: bool = True) -> dict:
             "trigger_mode": "auto",
             "resume_context_enabled": True,
             "sql_profile_enabled": False,
+            "interview_profile_enabled": False,
+            "active_interview_profile_id": "sql",
+            "interview_profiles": [],
         },
         "audio": {
             "sample_rate": 16000,
@@ -119,5 +122,28 @@ def test_settings_dialog_saves_gemini_backend_and_key() -> None:
         assert emitted[0]["ai"]["main_backend"] == "gemini"
         assert emitted[0]["ai"]["gemini_api_key"] == "test-gemini-key"
         assert emitted[0]["ai"]["gemini_model"] == "gemini-3-flash-preview"
+    finally:
+        dialog.deleteLater()
+
+
+def test_settings_dialog_saves_active_interview_profile() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    dialog = SettingsDialog(_base_config())
+    try:
+        emitted: list[dict] = []
+        dialog.settings_saved.connect(emitted.append)
+
+        dialog._profile_enabled_check.setChecked(True)
+        dialog._profile_combo.setCurrentIndex(dialog._profile_combo.findData("sql"))
+        dialog._save()
+
+        assert emitted
+        ai = emitted[0]["ai"]
+        assert ai["interview_profile_enabled"] is True
+        assert ai["active_interview_profile_id"] == "sql"
+        assert ai["sql_profile_enabled"] is True
+        assert any(profile["id"] == "sql" for profile in ai["interview_profiles"])
     finally:
         dialog.deleteLater()

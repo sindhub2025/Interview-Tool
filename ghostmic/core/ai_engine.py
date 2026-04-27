@@ -30,10 +30,14 @@ from ghostmic.utils.resume_context import (
     build_resume_context_summary,
     is_resume_related_text,
 )
-from ghostmic.utils.sql_context import (
-    apply_sql_corrections,
-    build_sql_profile_summary,
-    is_sql_related_text,
+from ghostmic.utils.interview_profile import (
+    SQL_INTERVIEW_PROFILE,
+    apply_profile_corrections,
+    build_profile_summary,
+    build_profile_system_policy,
+    get_active_interview_profile,
+    is_profile_related_text,
+    is_sql_profile,
 )
 from ghostmic.utils.logger import get_logger
 
@@ -59,19 +63,18 @@ Assume the interview is for an experienced candidate:
 When the user needs a fuller answer, use this structure:
 - Start with a direct answer in 2-3 sentences.
 - Follow with exactly 5 bullet points covering the most important takeaways.
-- Finish with examples when they help, especially for SQL or Python questions.
-- Put SQL examples in fenced code blocks tagged `sql`.
-- Put Python examples in fenced code blocks tagged `python`.
-- Keep SQL and Python examples in separate fenced code blocks so they are easy to spot.
+- Finish with examples when they help, especially for the active interview profile or technology stack.
+- Put code, query, config, or command examples in fenced code blocks tagged with the right language when obvious.
+- Keep different languages or artifacts in separate fenced code blocks so they are easy to spot.
 
 For technical questions:
 - Start from the practical answer, not from first principles.
 - If it helps, include a short example, but only after the direct answer.
-- For SQL or Python questions, prefer a concise sample SQL query or Python \
-script that the user can adapt.
+- For profile-specific questions, prefer a concise practical example that the \
+user can adapt.
 
-If the user asks for a sample script, sample code, Python script, code \
-example, snippet, or SQL query:
+If the user asks for a sample script, sample code, code example, snippet, \
+query, command, or config:
 - Provide a short generic example in a fenced code block when the request does \
 not include enough specifics.
 - Keep the example realistic and easy to adapt.
@@ -620,7 +623,7 @@ class AIThread(QThread):  # type: ignore[misc]
         resume_context_enabled = bool(
             self._config.get("resume_context_enabled", True)
         )
-        sql_profile_enabled = bool(self._config.get("sql_profile_enabled", False))
+        active_profile = get_active_interview_profile(self._config)
         resume_profile_raw = self._config.get("resume_profile")
         resume_profile = (
             resume_profile_raw
@@ -664,7 +667,7 @@ class AIThread(QThread):  # type: ignore[misc]
             runtime_context_tail=runtime_context_tail,
             is_new_topic=is_new_topic,
             resume_profile=resume_profile,
-            sql_profile_enabled=sql_profile_enabled,
+            active_profile=active_profile,
             correction_high_threshold=correction_high_threshold,
             correction_medium_threshold=correction_medium_threshold,
         )
@@ -677,7 +680,7 @@ class AIThread(QThread):  # type: ignore[misc]
             self._config.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
             session_context,
             resume_profile=resume_profile,
-            sql_profile_enabled=sql_profile_enabled,
+            active_profile=active_profile,
         )
         temperature = float(self._config.get("temperature", 0.7))
         logger.info("AIThread: temperature=%.1f", temperature)
@@ -1939,12 +1942,17 @@ class AIThread(QThread):  # type: ignore[misc]
         is_new_topic: bool = False,
         resume_profile: Optional[Dict[str, Any]] = None,
         sql_profile_enabled: bool = False,
+        active_profile: Optional[Dict[str, Any]] = None,
         correction_high_threshold: float = RESUME_CORRECTION_HIGH_THRESHOLD,
         correction_medium_threshold: float = RESUME_CORRECTION_MEDIUM_THRESHOLD,
     ) -> str:
         """Format the most recent question-focused transcript block."""
         if not transcript:
             return ""
+
+        profile = active_profile
+        if profile is None and sql_profile_enabled:
+            profile = SQL_INTERVIEW_PROFILE
 
         last_speaker_index = -1
         speaker_block_start = -1
@@ -1995,25 +2003,32 @@ class AIThread(QThread):  # type: ignore[misc]
         joined_recent_text = " ".join(
             seg.text.lower() for seg in recent
         )
-        etl_context_active = any(
-            keyword in lower_session_context
-            or keyword in joined_recent_text
-            for keyword in ETL_CONTEXT_KEYWORDS
+        etl_context_active = bool(
+            profile
+            and is_sql_profile(profile)
+            and any(
+                keyword in lower_session_context
+                or keyword in joined_recent_text
+                for keyword in ETL_CONTEXT_KEYWORDS
+            )
         )
 
         segment_payloads: List[Dict[str, Any]] = []
         resume_related = False
-        sql_related = False
-        sql_summary_lines: List[str] = []
+        profile_related = False
+        profile_summary_lines: List[str] = []
         latest_speaker_text = " ".join(
             seg.text.strip()
             for seg in recent
             if seg.source == "speaker" and seg.text.strip()
         ).strip()
 
-        if sql_profile_enabled:
-            sql_related = is_sql_related_text(latest_speaker_text) or is_sql_related_text(session_context)
-            sql_summary_lines = build_sql_profile_summary()
+        if profile:
+            profile_related = (
+                is_profile_related_text(latest_speaker_text, profile)
+                or is_profile_related_text(session_context, profile)
+            )
+            profile_summary_lines = build_profile_summary(profile)
 
         # ---- Enhanced follow-up detection with confidence scoring ----
         if (
@@ -2123,40 +2138,46 @@ class AIThread(QThread):  # type: ignore[misc]
                 if high_matches or medium_matches:
                     resume_related = True
 
-            if sql_profile_enabled and sql_related and seg.source == "speaker":
+            if profile and profile_related and seg.source == "speaker":
                 try:
-                    sql_result = apply_sql_corrections(text)
+                    profile_result = apply_profile_corrections(text, profile)
                 except Exception as exc:
                     logger.exception(
-                        "AIThread: apply_sql_corrections failed: %s",
+                        "AIThread: apply_profile_corrections failed: %s",
                         exc,
                     )
-                    sql_result = {
+                    profile_result = {
                         "text": text,
                         "high_confidence": [],
                         "medium_confidence": [],
                     }
 
-                if isinstance(sql_result, dict):
-                    sql_text = str(sql_result.get("text", text))
-                    sql_matches = list(sql_result.get("high_confidence", []))
-                    if sql_matches and sql_text:
-                        text = sql_text
-                        sql_related = True
-                        if sql_summary_lines:
-                            for match in sql_matches[:2]:
+                if isinstance(profile_result, dict):
+                    profile_text = str(profile_result.get("text", text))
+                    profile_matches = list(profile_result.get("high_confidence", []))
+                    if profile_matches and profile_text:
+                        text = profile_text
+                        profile_related = True
+                        if profile_summary_lines:
+                            profile_name = str(profile.get("name", "Profile")).strip() or "Profile"
+                            correction_label = (
+                                "SQL Correction Applied"
+                                if is_sql_profile(profile)
+                                else f"{profile_name} Correction Applied"
+                            )
+                            for match in profile_matches[:2]:
                                 original = str(match.get("original", "")).strip()
                                 corrected = str(match.get("corrected", "")).strip()
                                 definition = str(match.get("definition", "")).strip()
                                 if original and corrected:
                                     lines = [
-                                        f'[SQL Correction Applied]: "{original}" -> "{corrected}"',
+                                        f'[{correction_label}]: "{original}" -> "{corrected}"',
                                     ]
                                     if definition:
                                         lines[0] += f" ({definition})"
                                     segment_payloads.append(
                                         {
-                                            "label": "SQL",
+                                            "label": profile_name,
                                             "text": lines[0],
                                             "high_matches": [],
                                             "medium_matches": [],
@@ -2208,17 +2229,21 @@ class AIThread(QThread):  # type: ignore[misc]
             for item in resume_summary_lines:
                 lines.append(f"- {item}")
 
-        if sql_profile_enabled and sql_summary_lines:
-            lines.append("[SQL Profile]:")
-            for item in sql_summary_lines:
+        if profile and profile_summary_lines:
+            profile_name = str(profile.get("name", "Interview")).strip() or "Interview"
+            if is_sql_profile(profile):
+                lines.append("[SQL Profile]:")
+            else:
+                lines.append(f"[Interview Profile: {profile_name}]:")
+            for item in profile_summary_lines:
                 lines.append(f"- {item}")
 
             lines.append(
                 "[Normalization Guidance]: When a transcript word or phrase "
                 "sounds like a canonical term from the supplied context, "
-                "normalize it before answering. Apply the same rule to SQL "
-                "terms and any other domain terms present in session context "
-                "or resume context."
+                "normalize it before answering. Apply the same rule to active "
+                "profile terms and any other domain terms present in session "
+                "context or resume context."
             )
 
         for payload in segment_payloads:
@@ -2362,15 +2387,19 @@ class AIThread(QThread):  # type: ignore[misc]
         session_context: str,
         resume_profile: Optional[Dict[str, Any]] = None,
         sql_profile_enabled: bool = False,
+        active_profile: Optional[Dict[str, Any]] = None,
     ) -> str:
         prompt = system_prompt
+        profile = active_profile
+        if profile is None and sql_profile_enabled:
+            profile = SQL_INTERVIEW_PROFILE
         if session_context:
             addendum = (
                 "\n\nSession context (role/background): "
                 f"{session_context}\n"
                 "Tailor your response to this context if relevant, but "
                 "do not force it into answers for general concepts "
-                "(e.g., general SQL or programming questions)."
+                "or unrelated profile topics."
             )
             prompt = f"{prompt}{addendum}"
 
@@ -2396,16 +2425,8 @@ class AIThread(QThread):  # type: ignore[misc]
             )
             prompt = f"{prompt}{resume_policy}"
 
-        if sql_profile_enabled:
-            sql_policy = (
-                "\n\nSQL profile usage policy:\n"
-                "- A SQL function glossary is available in the prompt context for SQL-related questions.\n"
-                "- When a transcript word sounds like a listed SQL function, normalize it to the canonical function name if that improves clarity.\n"
-                "- When you correct or explain a SQL function, include its definition briefly and directly.\n"
-                "- Use the same normalization approach for other context-backed terms when the surrounding prompt makes the intended term clear.\n"
-                "- If the question is not about SQL, do not force the glossary into the answer."
-            )
-            prompt = f"{prompt}{sql_policy}"
+        if profile:
+            prompt = f"{prompt}{build_profile_system_policy(profile)}"
 
         human_style_policy = (
             "\n\nResponse style guidance:\n"
@@ -2416,9 +2437,9 @@ class AIThread(QThread):  # type: ignore[misc]
             "- Focus on practical tradeoffs, decision criteria, implementation details, and risks.\n"
             "- Avoid long textbook definitions; keep it straight to the point.\n"
             "- When the user needs a full answer, use 2-3 sentences up front, then exactly 5 bullet points with the main takeaways.\n"
-            "- Put SQL examples in fenced code blocks tagged sql and Python examples in fenced code blocks tagged python.\n"
-            "- Keep SQL and Python examples in separate fenced code blocks so they stand out clearly.\n"
-            "- For SQL or Python questions, prefer a practical query or script the user can adapt quickly."
+            "- Put technical examples in fenced code blocks tagged with the right language when obvious.\n"
+            "- Keep different languages or artifacts in separate fenced code blocks so they stand out clearly.\n"
+            "- For profile-specific technical questions, prefer a practical example the user can adapt quickly."
         )
         prompt = f"{prompt}{human_style_policy}"
 
@@ -2433,7 +2454,7 @@ class AIThread(QThread):  # type: ignore[misc]
             "depth.\n"
             "  • 'example request' → provide a concrete, practical "
             "example. If the user asks for a sample script, sample code, "
-            "Python script, SQL query, code example, or snippet, return a "
+            "query, command, config, code example, or snippet, return a "
             "short generic example in a fenced code block when specifics are "
             "missing.\n"
             "  • 'clarification' → rephrase or simplify the previous "

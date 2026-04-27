@@ -14,6 +14,7 @@ import os
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
+from ghostmic.utils.interview_profile import default_interview_profiles
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,6 +46,9 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ai.max_tokens":           (int,   2048,     lambda v: 1 <= v <= 32768),
     "ai.resume_context_enabled": (bool, True, None),
     "ai.sql_profile_enabled":  (bool,  False,    None),
+    "ai.interview_profile_enabled": (bool, False, None),
+    "ai.active_interview_profile_id": (str, "sql", None),
+    "ai.interview_profiles": (list, default_interview_profiles(), lambda v: all(isinstance(item, dict) for item in v)),
     "ai.resume_correction_threshold_high": (float, 0.87, lambda v: 0.5 <= v <= 1.0),
     "ai.resume_correction_threshold_medium": (float, 0.74, lambda v: 0.4 <= v <= 1.0),
     # Audio

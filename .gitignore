@@ -37,6 +37,12 @@ Thumbs.db
 # Logs
 *.log
 startup-logs/
+.pytest_cache/
+config-test-*.json
+config-test-*/
+tmp-access-test/
+tmp-pytest/
+tmp-run-*/
 
 # Compiled assets
 *.qrc.py

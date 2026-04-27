@@ -2,7 +2,7 @@
 
 import json
 import os
-import tempfile
+import uuid
 
 import pytest
 
@@ -10,9 +10,16 @@ from ghostmic.services.config_service import ConfigService
 
 
 @pytest.fixture
-def tmp_config(tmp_path):
+def tmp_config():
     """Return a path to a temporary config file."""
-    return str(tmp_path / "config.json")
+    path = os.path.abspath(f"config-test-{uuid.uuid4().hex}.json")
+    try:
+        yield path
+    finally:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
 
 @pytest.fixture
@@ -27,6 +34,9 @@ def defaults():
             "trigger_mode": "auto",
             "resume_context_enabled": True,
             "sql_profile_enabled": False,
+            "interview_profile_enabled": False,
+            "active_interview_profile_id": "sql",
+            "interview_profiles": [],
         },
         "audio": {
             "sample_rate": 16000,

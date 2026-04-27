@@ -16,6 +16,7 @@ from ghostmic.services.screen_analysis_service import (
     SCREEN_ANALYSIS_TEMPERATURE,
     analyze_screenshot_with_gemini,
     analyze_screenshot_with_groq,
+    build_screen_analysis_prompt,
     encode_image_data_url,
     extract_groq_text,
     resolve_screen_analysis_provider,
@@ -77,9 +78,22 @@ def test_deep_analysis_prompt_extracts_tables_and_er() -> None:
     assert "primary key" in prompt or "pk" in prompt
     assert "foreign key" in prompt or "fk" in prompt
     assert "code" in prompt
-    assert "sql" in prompt
+    assert "queries" in prompt
     assert "content summary" in prompt
     assert "sample" in prompt
+
+
+def test_screen_analysis_prompt_includes_active_profile_context() -> None:
+    prompt = build_screen_analysis_prompt(
+        {
+            "interview_profile_enabled": True,
+            "active_interview_profile_id": "sql",
+        }
+    ).lower()
+
+    assert "active interview profile" in prompt
+    assert "profile: sql" in prompt
+    assert "row_number()" in prompt
 
 
 def test_max_completion_tokens_supports_detailed_output() -> None:

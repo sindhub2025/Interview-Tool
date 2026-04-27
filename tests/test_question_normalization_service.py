@@ -77,7 +77,7 @@ def test_parse_normalization_result_supports_plain_text_fallback() -> None:
     assert len(result.follow_up_questions) == 3
 
 
-def test_build_normalization_context_block_includes_resume_and_sql_context() -> None:
+def test_build_normalization_context_block_includes_resume_and_active_profile_context() -> None:
     context = _build_normalization_context_block(
         "Can you tell me about your experience using SQL window functions in ETL pipelines?",
         {
@@ -87,13 +87,14 @@ def test_build_normalization_context_block_includes_resume_and_sql_context() -> 
                 "companies": ["Acme"],
             },
             "resume_context_enabled": True,
-            "sql_profile_enabled": True,
+            "interview_profile_enabled": True,
+            "active_interview_profile_id": "sql",
         },
     )
 
     assert "Resume context:" in context
     assert "Skills: SQL, Python, ETL" in context
-    assert "SQL context:" in context
+    assert "SQL profile context:" in context
     assert "ROW_NUMBER()" in context
 
 
@@ -207,6 +208,8 @@ def test_normalize_question_with_followups_corrects_rdbms_expansion(monkeypatch)
         {
             "groq_api_key": "test-groq-key",
             "groq_model": "llama-4-maverick-17b-128e-instruct",
+            "interview_profile_enabled": True,
+            "active_interview_profile_id": "sql",
         },
     )
 

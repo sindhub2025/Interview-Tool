@@ -43,6 +43,7 @@ def test_build_context_includes_session_context_line():
     context = AIThread._build_context(
         transcript,
         session_context="ETL Tester with 8 years of Experience",
+        sql_profile_enabled=True,
     )
 
     assert "[Session Context]: ETL Tester with 8 years of Experience" in context
@@ -71,6 +72,7 @@ def test_build_context_normalizes_sort_table_in_etl_context():
     context = AIThread._build_context(
         transcript,
         session_context="ETL Tester with 8 years of Experience",
+        sql_profile_enabled=True,
     )
 
     assert "sort and target table" not in context.lower()
@@ -279,19 +281,18 @@ def test_build_system_prompt_includes_sql_policy_when_enabled():
     assert "same normalization approach for other context-backed terms" in prompt
 
 
-def test_default_system_prompt_mentions_sample_code_and_sql_queries():
+def test_default_system_prompt_mentions_generic_examples_and_profile_context():
     prompt = DEFAULT_SYSTEM_PROMPT.lower()
 
     assert "sample script" in prompt
     assert "sample code" in prompt
-    assert "sql query" in prompt
-    assert "python script" in prompt
+    assert "query" in prompt
+    assert "active interview profile" in prompt
     assert "generic example" in prompt
     assert "fenced code block" in prompt
     assert "2-3 sentences" in prompt
     assert "exactly 5 bullet points" in prompt
-    assert "tagged `sql`" in prompt
-    assert "tagged `python`" in prompt
+    assert "tagged with the right language" in prompt
     assert "experienced candidate" in prompt
     assert "absolute basics" in prompt
     assert "straight to the point" in prompt
@@ -304,7 +305,7 @@ def test_build_system_prompt_includes_generic_example_policy():
 
     assert "sample script" in lowered
     assert "sample code" in lowered
-    assert "sql query" in lowered
+    assert "query" in lowered
     assert "generic example" in lowered
     assert "fenced code block" in lowered
 
@@ -316,11 +317,10 @@ def test_build_system_prompt_includes_human_style_guidance():
 
     assert "helpful person" in lowered
     assert "answer the question directly first" in lowered
-    assert "sql or python questions" in lowered
+    assert "profile-specific technical questions" in lowered
     assert "2-3 sentences" in lowered
     assert "exactly 5 bullet points" in lowered
-    assert "tagged sql" in lowered
-    assert "tagged python" in lowered
+    assert "tagged with the right language" in lowered
     assert "experienced candidate" in lowered
     assert "absolute basics" in lowered
     assert "straight to the point" in lowered

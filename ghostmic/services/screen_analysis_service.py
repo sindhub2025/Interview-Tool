@@ -7,6 +7,10 @@ from typing import Any, Dict
 
 import requests
 
+from ghostmic.utils.interview_profile import (
+    build_profile_summary,
+    get_active_interview_profile,
+)
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -58,7 +62,7 @@ DEEP_ANALYSIS_SCREEN_PROMPT = (
     "  [TableA] --(1:N)--> [TableB] via column_name\n"
     "If only one table is found, describe likely relationships based on FK-like columns.\n\n"
     "## Code & Errors\n"
-    "Transcribe any visible code snippets, SQL queries, error messages, stack traces, "
+    "Transcribe any visible code snippets, queries, commands, error messages, stack traces, "
     "or log entries exactly as shown. Identify the programming language if possible.\n\n"
     "## Key Data Points\n"
     "List any important values, settings, configurations, form field values, "
@@ -68,10 +72,36 @@ DEEP_ANALYSIS_SCREEN_PROMPT = (
     "- Be extremely precise with table column names, values, and data — accuracy is critical\n"
     "- Do NOT skip or summarize table contents; transcribe them fully\n"
     "- If no tables are found, say 'No tables detected' and focus on other sections\n"
-    "- Your output will be used to answer SQL-related follow-up questions, "
-    "so table structure must be complete and exact\n"
+    "- Your output will be used to answer profile-related follow-up questions, "
+    "so visible structure and terminology must be complete and exact\n"
     "- Answers can be as long as needed — do not artificially shorten"
 )
+
+
+def build_screen_analysis_prompt(ai_config: dict) -> str:
+    """Return a screen-analysis prompt enriched with the active profile."""
+    prompt = DEEP_ANALYSIS_SCREEN_PROMPT
+    active_profile = get_active_interview_profile(ai_config)
+    if not active_profile:
+        return prompt
+
+    profile_name = str(active_profile.get("name", "Interview")).strip() or "Interview"
+    profile_lines = build_profile_summary(active_profile, max_items_per_section=8)
+    screen_focus = str(active_profile.get("screen_analysis_focus", "") or "").strip()
+
+    additions = [
+        "\n\n## Active Interview Profile",
+        f"Profile: {profile_name}",
+    ]
+    if screen_focus:
+        additions.append(screen_focus)
+    if profile_lines:
+        additions.append("Profile context:")
+        additions.extend(f"- {line}" for line in profile_lines)
+    additions.append(
+        "Use the active profile only to prioritize what matters; still transcribe visible content accurately."
+    )
+    return "\n".join([prompt, *additions])
 
 
 def capture_full_screen_png_bytes() -> tuple[bytes, Dict[str, int]]:
@@ -304,6 +334,7 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
             )
             timeout = float(self._ai_config.get("screen_analysis_timeout", 90.0))
             provider = resolve_screen_analysis_provider(self._ai_config)
+            prompt = build_screen_analysis_prompt(self._ai_config)
 
             if provider == "gemini":
                 result = analyze_screenshot_with_gemini(
@@ -312,7 +343,7 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
                     model=str(
                         self._ai_config.get("gemini_vision_model", GEMINI_VISION_MODEL)
                     ).strip() or GEMINI_VISION_MODEL,
-                    prompt=DEEP_ANALYSIS_SCREEN_PROMPT,
+                    prompt=prompt,
                     timeout=timeout,
                 )
             else:
@@ -322,7 +353,7 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
                     model=str(
                         self._ai_config.get("groq_vision_model", GROQ_VISION_MODEL)
                     ).strip() or GROQ_VISION_MODEL,
-                    prompt=DEEP_ANALYSIS_SCREEN_PROMPT,
+                    prompt=prompt,
                     timeout=timeout,
                 )
 

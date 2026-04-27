@@ -15,7 +15,12 @@ from ghostmic.utils.resume_context import (
     build_resume_context_summary,
     is_resume_related_text,
 )
-from ghostmic.utils.sql_context import build_sql_profile_summary, is_sql_related_text
+from ghostmic.utils.interview_profile import (
+    apply_profile_corrections,
+    build_profile_summary,
+    get_active_interview_profile,
+    is_sql_profile,
+)
 from ghostmic.utils.text_processing import ensure_question_format
 
 logger = get_logger(__name__)
@@ -369,15 +374,17 @@ def _parse_normalization_result(
     model_text: str,
     *,
     fallback_question: str,
+    active_profile: Optional[dict] = None,
 ) -> QuestionNormalizationResult:
     payload = _extract_json_payload(model_text)
     if payload is not None:
         normalized_source = str(payload.get("normalized_question", "") or "")
         if not normalized_source.strip():
             normalized_source = fallback_question
-        normalized = _correct_database_acronym_expansions(
+        normalized = _apply_profile_normalization(
             normalized_source,
             fallback_question,
+            active_profile,
         )
         normalized = ensure_question_format(normalized)
         follow_ups = _sanitize_follow_up_questions(
@@ -389,7 +396,11 @@ def _parse_normalization_result(
             follow_up_questions=follow_ups,
         )
 
-    normalized = _correct_database_acronym_expansions(model_text, fallback_question)
+    normalized = _apply_profile_normalization(
+        model_text,
+        fallback_question,
+        active_profile,
+    )
     normalized = ensure_question_format(normalized)
     follow_ups = _sanitize_follow_up_questions([], normalized)
     return QuestionNormalizationResult(
@@ -398,11 +409,38 @@ def _parse_normalization_result(
     )
 
 
+def _apply_profile_normalization(
+    normalized_text: str,
+    source_text: str,
+    active_profile: Optional[dict],
+) -> str:
+    normalized = _normalize_whitespace(normalized_text)
+    if not normalized or not active_profile:
+        return normalized
+
+    if is_sql_profile(active_profile):
+        normalized = _correct_database_acronym_expansions(
+            normalized,
+            source_text,
+        )
+
+    try:
+        correction_result = apply_profile_corrections(normalized, active_profile)
+    except Exception:  # pylint: disable=broad-except
+        return normalized
+
+    if not isinstance(correction_result, dict):
+        return normalized
+    corrected_text = _normalize_whitespace(correction_result.get("text", normalized))
+    return corrected_text or normalized
+
+
 def _build_normalization_context_block(question_text: str, ai_config: dict) -> str:
     """Build a compact context block for transcript normalization prompts."""
     lines: List[str] = []
+    active_profile = get_active_interview_profile(ai_config)
 
-    if _DBMS_ACRONYM_RE.search(question_text):
+    if active_profile and is_sql_profile(active_profile) and _DBMS_ACRONYM_RE.search(question_text):
         lines.append("Database acronym context:")
         lines.append("- DBMS = Database Management System")
         lines.append("- RDBMS = Relational Database Management System")
@@ -421,12 +459,12 @@ def _build_normalization_context_block(question_text: str, ai_config: dict) -> s
             lines.append("Resume context:")
             lines.extend(f"- {line}" for line in resume_lines)
 
-    sql_profile_enabled = bool(ai_config.get("sql_profile_enabled", False))
-    if sql_profile_enabled or is_sql_related_text(question_text) or is_sql_related_text(session_context):
-        sql_lines = build_sql_profile_summary(max_items_per_section=6)
-        if sql_lines:
-            lines.append("SQL context:")
-            lines.extend(f"- {line}" for line in sql_lines)
+    if active_profile:
+        profile_lines = build_profile_summary(active_profile, max_items_per_section=6)
+        if profile_lines:
+            profile_name = str(active_profile.get("name", "Interview")).strip() or "Interview"
+            lines.append(f"{profile_name} profile context:")
+            lines.extend(f"- {line}" for line in profile_lines)
 
     return "\n".join(lines).strip()
 
@@ -484,10 +522,11 @@ def normalize_question_with_followups(
             raise RuntimeError("openai package not installed. Run: pip install openai") from exc
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
 
+    active_profile = get_active_interview_profile(ai_config)
     context_block = _build_normalization_context_block(cleaned_question, ai_config)
     prompt_sections = [
         "Normalize the transcript below into a clear interview question.",
-        "Use the context only to resolve resume facts, SQL terminology, names, and technical shorthand.",
+        "Use the context only to resolve resume facts, active interview profile terminology, names, and technical shorthand.",
         "Preserve the original intent. Do not answer the question.",
         "Return strict JSON only with this exact schema: {\"normalized_question\":\"...\",\"follow_up_questions\":[\"...\",\"...\",\"...\"]}.",
         "Rules:",
@@ -532,6 +571,7 @@ def normalize_question_with_followups(
                 return _parse_normalization_result(
                     raw_result,
                     fallback_question=cleaned_question,
+                    active_profile=active_profile,
                 )
 
             raise RuntimeError("Normalization returned an empty response.")

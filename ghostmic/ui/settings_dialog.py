@@ -17,8 +17,10 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -30,6 +32,14 @@ from PyQt6.QtWidgets import (
 )
 
 from ghostmic.ui.styles import ACCENT_BLUE, MAIN_STYLE
+from ghostmic.utils.interview_profile import (
+    create_blank_interview_profile,
+    format_profile_glossary,
+    is_interview_profile_enabled,
+    normalize_interview_profiles,
+    parse_profile_glossary,
+    resolve_interview_profiles,
+)
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -70,6 +80,8 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self._config = config
         self._resume_status = dict(resume_status or {})
+        self._profiles = resolve_interview_profiles(self._config.get("ai", {}))
+        self._loading_profile_fields = False
         # Explicit busy flag for resume operations. Use this instead of
         # inspecting `_resume_message_label` text to determine busy state.
         self._resume_busy = False
@@ -98,6 +110,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._make_general_tab(), "General")
         tabs.addTab(self._make_audio_tab(), "Audio")
         tabs.addTab(self._make_ai_tab(), "AI")
+        tabs.addTab(self._make_profiles_tab(), "Profiles")
         tabs.addTab(self._make_appearance_tab(), "Appearance")
         tabs.addTab(self._make_resume_tab(), "Resume")
         tabs.addTab(self._make_about_tab(), "About")
@@ -339,15 +352,232 @@ class SettingsDialog(QDialog):
         self._resume_context_enabled.setChecked(True)
         form.addRow("Resume context:", self._resume_context_enabled)
 
-        self._sql_profile_enabled = QCheckBox(
-            "Use SQL function glossary for SQL-related questions"
-        )
-        self._sql_profile_enabled.setChecked(False)
-        form.addRow("SQL Profile:", self._sql_profile_enabled)
-
         return w
 
-    # ── Tab: Resume ───────────────────────────────────────────────────
+    # Tab: Profiles
+
+    def _make_profiles_tab(self) -> QWidget:
+        outer = QWidget()
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer_layout.addWidget(scroll)
+
+        w = QWidget()
+        scroll.setWidget(w)
+        layout = QVBoxLayout(w)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self._profile_enabled_check = QCheckBox("Enable active interview profile")
+        self._sql_profile_enabled = self._profile_enabled_check
+        form.addRow("Profile mode:", self._profile_enabled_check)
+
+        self._profile_combo = QComboBox()
+        self._refresh_profile_combo()
+        self._profile_combo.currentIndexChanged.connect(
+            lambda _index: self._load_selected_profile_fields()
+        )
+
+        profile_row = QWidget()
+        profile_row_layout = QHBoxLayout(profile_row)
+        profile_row_layout.setContentsMargins(0, 0, 0, 0)
+        profile_row_layout.addWidget(self._profile_combo)
+
+        self._profile_new_btn = QPushButton("New")
+        self._profile_new_btn.clicked.connect(self._on_new_profile_clicked)
+        profile_row_layout.addWidget(self._profile_new_btn)
+
+        self._profile_delete_btn = QPushButton("Delete")
+        self._profile_delete_btn.clicked.connect(self._on_delete_profile_clicked)
+        profile_row_layout.addWidget(self._profile_delete_btn)
+        form.addRow("Active profile:", profile_row)
+
+        self._profile_name_edit = QLineEdit()
+        form.addRow("Name:", self._profile_name_edit)
+
+        self._profile_description_edit = QLineEdit()
+        form.addRow("Description:", self._profile_description_edit)
+
+        self._profile_keywords_edit = QLineEdit()
+        self._profile_keywords_edit.setPlaceholderText(
+            "Comma-separated terms that identify this interview type"
+        )
+        form.addRow("Keywords:", self._profile_keywords_edit)
+
+        self._profile_context_edit = QTextEdit()
+        self._profile_context_edit.setFixedHeight(90)
+        self._profile_context_edit.setPlaceholderText(
+            "Interview context, role, tech stack, expected seniority, or project details"
+        )
+        form.addRow("Context:", self._profile_context_edit)
+
+        self._profile_glossary_edit = QTextEdit()
+        self._profile_glossary_edit.setFixedHeight(150)
+        self._profile_glossary_edit.setPlaceholderText(
+            "Section:\nTERM - definition | aliases: phrase one, phrase two"
+        )
+        form.addRow("Glossary:", self._profile_glossary_edit)
+
+        self._profile_guidance_edit = QTextEdit()
+        self._profile_guidance_edit.setFixedHeight(80)
+        self._profile_guidance_edit.setPlaceholderText(
+            "One response rule per line for this profile"
+        )
+        form.addRow("Answer guidance:", self._profile_guidance_edit)
+
+        self._profile_screen_focus_edit = QTextEdit()
+        self._profile_screen_focus_edit.setFixedHeight(80)
+        self._profile_screen_focus_edit.setPlaceholderText(
+            "What screen capture should prioritize for this profile"
+        )
+        form.addRow("Screen focus:", self._profile_screen_focus_edit)
+
+        for widget in (
+            self._profile_name_edit,
+            self._profile_description_edit,
+            self._profile_keywords_edit,
+        ):
+            widget.textChanged.connect(lambda _text: self._store_current_profile_fields())
+        for widget in (
+            self._profile_context_edit,
+            self._profile_glossary_edit,
+            self._profile_guidance_edit,
+            self._profile_screen_focus_edit,
+        ):
+            widget.textChanged.connect(self._store_current_profile_fields)
+
+        layout.addStretch()
+        self._load_selected_profile_fields()
+        return outer
+
+    def _split_profile_lines(self, text: str) -> list[str]:
+        return [
+            item.strip()
+            for item in str(text or "").splitlines()
+            if item.strip()
+        ]
+
+    def _split_profile_keywords(self, text: str) -> list[str]:
+        return [
+            item.strip()
+            for item in str(text or "").replace(";", "\n").replace(",", "\n").splitlines()
+            if item.strip()
+        ]
+
+    def _refresh_profile_combo(self, selected_id: str | None = None) -> None:
+        if not hasattr(self, "_profile_combo"):
+            return
+        current_id = selected_id or str(self._profile_combo.currentData() or "")
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.clear()
+        for profile in self._profiles:
+            name = str(profile.get("name", "Profile")).strip() or "Profile"
+            profile_id = str(profile.get("id", "")).strip()
+            self._profile_combo.addItem(name, profile_id)
+        if current_id:
+            idx = self._profile_combo.findData(current_id)
+            if idx >= 0:
+                self._profile_combo.setCurrentIndex(idx)
+        self._profile_combo.blockSignals(False)
+
+    def _selected_profile_index(self) -> int:
+        if not hasattr(self, "_profile_combo"):
+            return -1
+        profile_id = str(self._profile_combo.currentData() or "")
+        for index, profile in enumerate(self._profiles):
+            if str(profile.get("id", "")) == profile_id:
+                return index
+        return -1
+
+    def _load_selected_profile_fields(self) -> None:
+        if not hasattr(self, "_profile_name_edit"):
+            return
+        index = self._selected_profile_index()
+        if index < 0:
+            return
+        profile = self._profiles[index]
+        self._loading_profile_fields = True
+        try:
+            self._profile_name_edit.setText(str(profile.get("name", "")))
+            self._profile_description_edit.setText(str(profile.get("description", "")))
+            self._profile_keywords_edit.setText(
+                ", ".join(str(item) for item in profile.get("keywords", []))
+            )
+            self._profile_context_edit.setPlainText(str(profile.get("context", "")))
+            self._profile_glossary_edit.setPlainText(format_profile_glossary(profile))
+            self._profile_guidance_edit.setPlainText(
+                "\n".join(str(item) for item in profile.get("response_guidance", []))
+            )
+            self._profile_screen_focus_edit.setPlainText(
+                str(profile.get("screen_analysis_focus", ""))
+            )
+            can_delete = str(profile.get("id", "")) != "sql"
+            self._profile_delete_btn.setEnabled(can_delete)
+        finally:
+            self._loading_profile_fields = False
+
+    def _store_current_profile_fields(self) -> None:
+        if self._loading_profile_fields:
+            return
+        index = self._selected_profile_index()
+        if index < 0:
+            return
+
+        profile = dict(self._profiles[index])
+        original_id = str(profile.get("id", "")).strip() or "profile"
+        profile["name"] = self._profile_name_edit.text().strip() or "Profile"
+        profile["description"] = self._profile_description_edit.text().strip()
+        profile["keywords"] = self._split_profile_keywords(self._profile_keywords_edit.text())
+        profile["context"] = self._profile_context_edit.toPlainText().strip()
+        profile["sections"] = parse_profile_glossary(
+            self._profile_glossary_edit.toPlainText()
+        )
+        profile["response_guidance"] = self._split_profile_lines(
+            self._profile_guidance_edit.toPlainText()
+        )
+        profile["screen_analysis_focus"] = (
+            self._profile_screen_focus_edit.toPlainText().strip()
+        )
+        profile["id"] = original_id
+        self._profiles[index] = profile
+        self._refresh_profile_combo(original_id)
+
+    def _on_new_profile_clicked(self) -> None:
+        name, ok = QInputDialog.getText(self, "New Profile", "Profile name:")
+        if not ok:
+            return
+        profile = create_blank_interview_profile(name, self._profiles)
+        self._profiles.append(profile)
+        self._refresh_profile_combo(str(profile.get("id", "")))
+        self._load_selected_profile_fields()
+
+    def _on_delete_profile_clicked(self) -> None:
+        index = self._selected_profile_index()
+        if index < 0:
+            return
+        profile = self._profiles[index]
+        if str(profile.get("id", "")) == "sql":
+            QMessageBox.information(
+                self,
+                "Profile",
+                "The built-in SQL profile stays available.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete Profile",
+            f"Delete profile '{profile.get('name', 'Profile')}'?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        del self._profiles[index]
+        self._refresh_profile_combo("sql")
+        self._load_selected_profile_fields()
+
+    # Tab: Resume
 
     def _make_resume_tab(self) -> QWidget:
         w = QWidget()
@@ -545,7 +775,13 @@ class SettingsDialog(QDialog):
         )
         self._session_ctx.setText(ai.get("session_context", ""))
         self._resume_context_enabled.setChecked(bool(ai.get("resume_context_enabled", True)))
-        self._sql_profile_enabled.setChecked(bool(ai.get("sql_profile_enabled", False)))
+        if hasattr(self, "_profile_enabled_check"):
+            self._profile_enabled_check.setChecked(is_interview_profile_enabled(ai))
+            active_id = str(ai.get("active_interview_profile_id", "") or "")
+            if not active_id and bool(ai.get("sql_profile_enabled", False)):
+                active_id = "sql"
+            self._refresh_profile_combo(active_id or "sql")
+            self._load_selected_profile_fields()
 
         # Appearance
         self._opacity_slider.setValue(int(ui.get("opacity", 0.95) * 100))
@@ -610,7 +846,13 @@ class SettingsDialog(QDialog):
         cfg["ai"]["system_prompt"] = self._system_prompt.toPlainText()
         cfg["ai"]["session_context"] = self._session_ctx.text()
         cfg["ai"]["resume_context_enabled"] = self._resume_context_enabled.isChecked()
-        cfg["ai"]["sql_profile_enabled"] = self._sql_profile_enabled.isChecked()
+        self._store_current_profile_fields()
+        active_profile_id = str(self._profile_combo.currentData() or "sql")
+        profile_enabled = bool(self._profile_enabled_check.isChecked())
+        cfg["ai"]["interview_profile_enabled"] = profile_enabled
+        cfg["ai"]["active_interview_profile_id"] = active_profile_id
+        cfg["ai"]["interview_profiles"] = normalize_interview_profiles(self._profiles)
+        cfg["ai"]["sql_profile_enabled"] = profile_enabled and active_profile_id == "sql"
 
         # Appearance / UI
         cfg.setdefault("ui", {})
