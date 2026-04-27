@@ -399,95 +399,44 @@ def test_build_system_prompt_includes_resume_policy_when_profile_available():
     assert "source of truth" in prompt
 
 
-def test_resolve_active_backend_accepts_gemini_when_openai_hidden():
+def test_resolve_active_backend_maps_gemini_to_groq_when_openai_hidden():
     thread = AIThread.__new__(AIThread)
     thread._config = {"expose_openai_provider": False}
 
-    assert thread._resolve_active_backend("gemini") == "gemini"
+    assert thread._resolve_active_backend("gemini") == "groq"
     assert thread._resolve_active_backend("openai") == "groq"
 
 
-def test_extract_gemini_text_from_candidate_parts_when_text_empty():
-    part1 = type("Part", (), {"text": "First line."})()
-    part2 = type("Part", (), {"text": "Second line."})()
-    content = type("Content", (), {"parts": [part1, part2]})()
-    candidate = type("Candidate", (), {"content": content})()
-    response = type("Response", (), {"text": "", "candidates": [candidate]})()
-
-    assert AIThread._extract_gemini_text(response) == "First line.\nSecond line."
-
-
-def test_two_stage_stress_interview_flow_prefers_fast_groq_then_gemini(monkeypatch):
-    """Burst interview prompts should use Groq first, then Gemini continuation."""
+def test_stress_interview_flow_uses_groq_single_backend(monkeypatch):
+    """Burst interview prompts should remain on the Groq single-backend path."""
     monkeypatch.setattr(ai_engine_module, "pyqtSignal", None)
 
     thread = AIThread.__new__(AIThread)
     thread._config = {
         "backend": "groq",
         "main_backend": "groq",
-        "fallback_backend": "gemini",
-        "enable_fallback": True,
-        "two_stage_enabled": True,
+        "fallback_backend": "groq",
+        "enable_fallback": False,
         "groq_api_key": "groq-test-key",
-        "gemini_api_key": "gemini-test-key",
         "temperature": 0.2,
         "system_prompt": "Answer as a concise interview candidate.",
     }
     thread._stop_event = threading.Event()
 
-    call_order = []
-    delivered_initial = []
-    groq_calls = []
-    gemini_calls = []
+    generate_calls = []
 
-    def _on_ready(text):
-        delivered_initial.append(text)
-        call_order.append("ready")
-
-    thread._on_ready = _on_ready
-
-    def _run_groq_initial(context, system_prompt, temperature):
-        groq_calls.append(
+    def _try_generate(backend, context, system_prompt, temperature):
+        generate_calls.append(
             {
+                "backend": backend,
                 "context": context,
                 "system_prompt": system_prompt,
                 "temperature": temperature,
             }
         )
-        call_order.append("groq")
-        return "Quick Groq answer."
+        return True
 
-    def _run_gemini_continuation(
-        original_context,
-        original_system_prompt,
-        groq_response,
-        temperature,
-    ):
-        # Handoff should happen only after the quick Groq answer is emitted.
-        assert call_order[-1] == "ready"
-        gemini_calls.append(
-            {
-                "context": original_context,
-                "system_prompt": original_system_prompt,
-                "groq_response": groq_response,
-                "temperature": temperature,
-            }
-        )
-        call_order.append("gemini")
-        return "Gemini continuation with deeper detail."
-
-    def _unexpected_single_backend(*_args, **_kwargs):
-        raise AssertionError(
-            "Single-backend path should not run when two-stage mode is active."
-        )
-
-    monkeypatch.setattr(thread, "_run_groq_initial", _run_groq_initial)
-    monkeypatch.setattr(
-        thread,
-        "_run_gemini_continuation",
-        _run_gemini_continuation,
-    )
-    monkeypatch.setattr(thread, "_try_generate", _unexpected_single_backend)
+    monkeypatch.setattr(thread, "_try_generate", _try_generate)
 
     interview_questions = [
         (
@@ -500,14 +449,6 @@ def test_two_stage_stress_interview_flow_prefers_fast_groq_then_gemini(monkeypat
     for question in interview_questions:
         thread._generate([_seg(question, "speaker")], is_new_topic=True)
 
-    assert len(groq_calls) == len(interview_questions)
-    assert len(gemini_calls) == len(interview_questions)
-    assert len(delivered_initial) == len(interview_questions)
-
-    assert all("interview question" in call["context"].lower() for call in groq_calls)
-
-    for idx in range(len(interview_questions)):
-        base = idx * 3
-        assert call_order[base] == "groq"
-        assert call_order[base + 1] == "ready"
-        assert call_order[base + 2] == "gemini"
+    assert len(generate_calls) == len(interview_questions)
+    assert all(call["backend"] == "groq" for call in generate_calls)
+    assert all("interview question" in call["context"].lower() for call in generate_calls)

@@ -87,7 +87,7 @@ def test_show_thinking_keeps_answer_card_full_height() -> None:
     card = panel._cards[-1]
     height_before = card.height()
 
-    panel.show_thinking("Completing with Gemini…")
+    panel.show_thinking("Finalizing response…")
 
     QTest.qWait(50)
     for _ in range(10):

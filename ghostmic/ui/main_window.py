@@ -767,8 +767,10 @@ class MainWindow(QMainWindow):
 
             if not text:
                 continue
-            if status == "pending":
-                text = ensure_question_format(text)
+            if status == "sent":
+                continue
+
+            text = ensure_question_format(text)
 
             canonical_text = text.rstrip(".?!").lower()
             dedupe_key = segment_id or canonical_text
@@ -789,17 +791,12 @@ class MainWindow(QMainWindow):
         for index, label in enumerate(self._queued_question_labels):
             button = self._queued_question_send_buttons[index]
             if index < len(rows):
-                _, text, status = rows[index]
+                _, text, _status = rows[index]
                 label.setText(text)
                 label.parentWidget().show()
-                if status == "sent":
-                    button.setEnabled(False)
-                    button.setText("Sent")
-                    button.setStyleSheet(QUEUED_SEND_BUTTON_SENT_STYLE)
-                else:
-                    button.setEnabled(True)
-                    button.setText("Send to AI")
-                    button.setStyleSheet(QUEUED_SEND_BUTTON_STYLE)
+                button.setEnabled(True)
+                button.setText("Send to AI")
+                button.setStyleSheet(QUEUED_SEND_BUTTON_STYLE)
             else:
                 label.setText("")
                 label.parentWidget().hide()

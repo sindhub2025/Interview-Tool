@@ -197,14 +197,11 @@ def _default_config() -> dict:
             "main_backend": "groq",
             "fallback_backend": "groq",
             "enable_fallback": False,
-            "two_stage_enabled": True,
             "expose_openai_provider": False,
             "openai_api_key": "",
             "openai_model": "gpt-5-mini",
             "groq_api_key": "",
             "groq_model": "llama-4-maverick-17b-128e-instruct",
-            "gemini_api_key": "",
-            "gemini_model": "gemini-3-flash-preview",
             "system_prompt": DEFAULT_SYSTEM_PROMPT,
             "temperature": 0.7,
             "trigger_mode": "auto",
@@ -351,6 +348,10 @@ def _load_config(path: str) -> dict:
     if isinstance(ai_cfg, dict):
         ai_cfg.pop("ollama_model", None)
         ai_cfg.pop("ollama_url", None)
+        ai_cfg.pop("gemini_api_key", None)
+        ai_cfg.pop("gemini_model", None)
+        ai_cfg.pop("gemini_vision_model", None)
+        ai_cfg.pop("two_stage_enabled", None)
         expose_openai = bool(ai_cfg.get("expose_openai_provider", False))
         if ai_cfg.get("backend") == "ollama":
             ai_cfg["backend"] = "openai" if expose_openai else "groq"
@@ -361,7 +362,7 @@ def _load_config(path: str) -> dict:
                 return value
             return default
 
-        allowed = {"groq", "gemini"}
+        allowed = {"groq"}
         if expose_openai:
             allowed.add("openai")
 
@@ -1711,13 +1712,6 @@ class GhostMicApp:
             self._ai_thread.ai_error.connect(
                 lambda msg: self._window.ai_panel.show_error(msg) if self._window else None
             )
-            # Two-stage Groq → Gemini continuation signals
-            self._ai_thread.ai_continuation_thinking.connect(
-                self._on_ai_continuation_thinking
-            )
-            self._ai_thread.ai_continuation_ready.connect(
-                self._on_ai_continuation_ready
-            )
             self._thread_coordinator.register("ai", self._ai_thread)
             self._ai_thread.start()
         except ImportError as exc:
@@ -2197,55 +2191,13 @@ class GhostMicApp:
         with self._transcript_lock:
             self._last_ai_response_text = full_text
             self._ai_context_history.clear()
-        two_stage = bool(self._config.get("ai", {}).get("two_stage_enabled", True))
         if self._window:
             self._window.ai_panel.finish_response(full_text)
-            if two_stage:
-                self._window.controls.set_status(
-                    "✓ Initial response (Groq) — completing with Gemini…", "#58a6ff"
-                )
-            else:
-                self._window.controls.set_status("✓ Response ready", "#3fb950")
+            self._window.controls.set_status("✓ Response ready", "#3fb950")
             self._logger.info("AI response displayed successfully (%d chars).", len(full_text))
         # Fix 5: Kick off AI normalization for the next pending streaming segment
         # so subsequent questions get cleaned up while the user reads the response.
         self._auto_send_next_pending_segment()
-
-    def _on_ai_continuation_thinking(self) -> None:
-        """Show a subtle indicator while Gemini completes the response."""
-        if self._window:
-            self._window.ai_panel.show_thinking("Completing with Gemini…")
-            self._window.controls.set_status(
-                "Completing with Gemini…", "#58a6ff"
-            )
-
-    def _on_ai_continuation_ready(self, continuation_text: str) -> None:
-        """Append Gemini's continuation to the existing Groq response."""
-        self._logger.info(
-            "_on_ai_continuation_ready called with %d chars",
-            len(continuation_text),
-        )
-        # Update the stored response with the combined text.
-        with self._transcript_lock:
-            combined = self._last_ai_response_text
-            if combined:
-                combined = f"{combined}\n\n{continuation_text}"
-            else:
-                combined = continuation_text
-            self._last_ai_response_text = combined
-        self._session_context_store.append_ai_response(
-            f"[Gemini continuation] {continuation_text}"
-        )
-        if self._window:
-            self._window.ai_panel.append_continuation(continuation_text)
-            self._window.controls.set_status(
-                "✓ Full response ready (Groq + Gemini)", "#3fb950"
-            )
-            self._logger.info(
-                "Gemini continuation appended (%d chars, combined %d chars).",
-                len(continuation_text),
-                len(combined),
-            )
 
 
     def _on_screen_analysis_requested(self) -> None:
@@ -2262,9 +2214,8 @@ class GhostMicApp:
         )
 
         provider = resolve_screen_analysis_provider(ai_cfg)
-        provider_label = "Gemini" if provider == "gemini" else "Groq"
-        key_field = "gemini_api_key" if provider == "gemini" else "groq_api_key"
-        api_key = str(ai_cfg.get(key_field, "")).strip()
+        provider_label = "Groq"
+        api_key = str(ai_cfg.get("groq_api_key", "")).strip()
         if not api_key:
             self._window.ai_panel.show_error(
                 f"Add your {provider_label} API key in Settings before using screen analysis.",

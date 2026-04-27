@@ -245,6 +245,32 @@ def test_pending_normalized_segments_render_as_questions() -> None:
     )
 
 
+def test_sent_normalized_segments_are_hidden_from_queue() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window.set_normalized_segments(
+        [
+            {
+                "segment_id": "segment-1",
+                "normalized_text": "How do you validate data quality in production",
+                "status": "sent",
+            }
+        ]
+    )
+    for _ in range(5):
+        app.processEvents()
+
+    assert window._queued_normalized_questions == []
+    assert window._queued_question_labels[0].text() == ""
+    assert not window._queued_question_labels[0].parentWidget().isVisible()
+
+
 def test_pending_normalized_segments_keep_latest_three() -> None:
     app = _qt_app()
     assert app is not None

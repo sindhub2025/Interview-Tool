@@ -52,15 +52,8 @@ except ImportError:  # pragma: no cover - fallback for non-Qt environments
 
 
 def _resolve_backend(ai_config: dict) -> str:
-    # Two-stage mode: normalization always uses Groq for speed.
-    if bool(ai_config.get("two_stage_enabled", False)):
-        groq_key = str(ai_config.get("groq_api_key", "")).strip()
-        if groq_key:
-            return "groq"
     backend = str(ai_config.get("main_backend") or ai_config.get("backend") or "groq").strip().lower()
     expose_openai = bool(ai_config.get("expose_openai_provider", False))
-    if backend == "gemini":
-        return "gemini"
     if backend == "openai" and expose_openai:
         return "openai"
     return "groq"
@@ -87,27 +80,6 @@ def _extract_response_text(response) -> str:
                 if text:
                     pieces.append(text)
         return " ".join(pieces).strip()
-
-    return ""
-
-
-def _extract_gemini_text(response) -> str:
-    text = str(getattr(response, "text", "") or "").strip()
-    if text:
-        return text
-
-    candidates = getattr(response, "candidates", None) or []
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        parts = getattr(content, "parts", None) or []
-        chunks: list[str] = []
-        for part in parts:
-            part_text = str(getattr(part, "text", "") or "").strip()
-            if part_text:
-                chunks.append(part_text)
-        merged = "\n".join(chunks).strip()
-        if merged:
-            return merged
 
     return ""
 
@@ -450,20 +422,7 @@ def normalize_question_with_followups(
         ai_config.get("question_normalization_timeout", DEFAULT_TIMEOUT_SECONDS)
     )
 
-    if backend == "gemini":
-        api_key = str(ai_config.get("gemini_api_key", "")).strip()
-        if not api_key:
-            raise ValueError("Gemini API key not set. Add it in Settings -> AI.")
-        model = str(ai_config.get("gemini_model", "gemini-3-flash-preview")).strip() or "gemini-3-flash-preview"
-        try:
-            from google import genai  # type: ignore[import]
-            from google.genai import types as genai_types  # type: ignore[import]
-        except ImportError as exc:
-            raise RuntimeError("google-genai package not installed. Run: pip install google-genai") from exc
-
-        client = genai.Client(api_key=api_key)
-
-    elif backend == "openai":
+    if backend == "openai":
         api_key = str(ai_config.get("openai_api_key", "")).strip()
         if not api_key:
             raise ValueError("OpenAI API key not set. Add it in Settings -> AI.")
@@ -505,29 +464,18 @@ def normalize_question_with_followups(
 
     for attempt in range(retries):
         try:
-            if backend == "gemini":
-                response = client.models.generate_content(
-                    model=model,
-                    contents=user_prompt,
-                    config=genai_types.GenerateContentConfig(
-                        system_instruction=NORMALIZE_SYSTEM_PROMPT,
-                        temperature=0.2,
-                    ),
-                )
-                raw_result = _extract_gemini_text(response)
-            else:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": NORMALIZE_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.2,
-                    max_tokens=512,
-                    timeout=timeout,
-                    stream=False,
-                )
-                raw_result = _extract_response_text(response)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": NORMALIZE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=512,
+                timeout=timeout,
+                stream=False,
+            )
+            raw_result = _extract_response_text(response)
             if raw_result:
                 return _parse_normalization_result(
                     raw_result,

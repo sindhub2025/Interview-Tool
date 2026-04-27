@@ -27,12 +27,10 @@ SchemaEntry = Tuple[Type, Any, Optional[Validator]]
 # Full schema — dotted key path → (type, default, validator | None)
 CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     # AI
-    "ai.backend":              (str,   "groq",   lambda v: v in ("groq", "gemini", "openai")),
-    "ai.main_backend":         (str,   "groq",   lambda v: v in ("groq", "gemini", "openai")),
+    "ai.backend":              (str,   "groq",   lambda v: v in ("groq", "openai")),
+    "ai.main_backend":         (str,   "groq",   lambda v: v in ("groq", "openai")),
     "ai.groq_api_key":         (str,   "",       None),
     "ai.groq_model":           (str,   "llama-4-maverick-17b-128e-instruct", None),
-    "ai.gemini_api_key":       (str,   "",       None),
-    "ai.gemini_model":         (str,   "gemini-3-flash-preview", None),
     "ai.openai_api_key":       (str,   "",       None),
     "ai.openai_model":         (str,   "gpt-5-mini", None),
     "ai.temperature":          (float, 0.7,      lambda v: 0.0 <= v <= 2.0),
@@ -94,7 +92,7 @@ def redact_api_keys_for_disk(config: Dict[str, Any]) -> Dict[str, Any]:
     redacted = copy.deepcopy(config)
     ai_section = redacted.get("ai")
     if isinstance(ai_section, dict):
-        for key in ("groq_api_key", "gemini_api_key", "openai_api_key"):
+        for key in ("groq_api_key", "openai_api_key"):
             ai_section[key] = ""
     return redacted
 

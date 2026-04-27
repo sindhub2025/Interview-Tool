@@ -89,18 +89,18 @@ def test_settings_dialog_saves_stealth_checkbox_state() -> None:
         dialog.deleteLater()
 
 
-def test_settings_dialog_includes_gemini_backend_option() -> None:
+def test_settings_dialog_excludes_gemini_backend_option() -> None:
     app = _qt_app()
     assert app is not None
 
     dialog = SettingsDialog(_base_config())
     try:
-        assert dialog._backend_combo.findText("gemini") >= 0
+        assert dialog._backend_combo.findText("gemini") == -1
     finally:
         dialog.deleteLater()
 
 
-def test_settings_dialog_saves_gemini_backend_and_key() -> None:
+def test_settings_dialog_saves_groq_backend_and_key() -> None:
     app = _qt_app()
     assert app is not None
 
@@ -109,15 +109,15 @@ def test_settings_dialog_saves_gemini_backend_and_key() -> None:
         emitted: list[dict] = []
         dialog.settings_saved.connect(emitted.append)
 
-        dialog._backend_combo.setCurrentText("gemini")
-        dialog._gemini_api_key_edit.setText("test-gemini-key")
-        dialog._gemini_model_combo.setCurrentText("gemini-3-flash-preview")
+        dialog._backend_combo.setCurrentText("groq")
+        dialog._groq_api_key_edit.setText("test-groq-key")
+        dialog._groq_model_combo.setCurrentText("llama-3.3-70b-versatile")
         dialog._save()
 
         assert emitted
-        assert emitted[0]["ai"]["backend"] == "gemini"
-        assert emitted[0]["ai"]["main_backend"] == "gemini"
-        assert emitted[0]["ai"]["gemini_api_key"] == "test-gemini-key"
-        assert emitted[0]["ai"]["gemini_model"] == "gemini-3-flash-preview"
+        assert emitted[0]["ai"]["backend"] == "groq"
+        assert emitted[0]["ai"]["main_backend"] == "groq"
+        assert emitted[0]["ai"]["groq_api_key"] == "test-groq-key"
+        assert emitted[0]["ai"]["groq_model"] == "llama-3.3-70b-versatile"
     finally:
         dialog.deleteLater()

@@ -88,7 +88,6 @@ class TestConfigServiceLoadSave:
             "ai",
             {
                 "groq_api_key": "live-groq-key",
-                "gemini_api_key": "live-gemini-key",
                 "openai_api_key": "live-openai-key",
             },
         )
@@ -99,7 +98,6 @@ class TestConfigServiceLoadSave:
             data = json.load(f)
 
         assert data["ai"]["groq_api_key"] == "live-groq-key"
-        assert data["ai"]["gemini_api_key"] == "live-gemini-key"
         assert data["ai"]["openai_api_key"] == "live-openai-key"
         assert svc.get("ai.groq_api_key") == "live-groq-key"
 
@@ -143,13 +141,13 @@ class TestConfigServiceValidation:
         cfg = svc.load()
         assert cfg["ai"]["trigger_mode"] == "auto"
 
-    def test_backend_accepts_gemini_value(self, tmp_config, defaults):
+    def test_backend_rejects_gemini_value(self, tmp_config, defaults):
         with open(tmp_config, "w") as f:
             json.dump({"ai": {"backend": "gemini", "main_backend": "gemini"}}, f)
         svc = ConfigService(tmp_config, defaults)
         cfg = svc.load()
-        assert cfg["ai"]["backend"] == "gemini"
-        assert cfg["ai"]["main_backend"] == "gemini"
+        assert cfg["ai"]["backend"] == "groq"
+        assert cfg["ai"]["main_backend"] == "groq"
 
     def test_invalid_dock_height_resets_to_default(self, tmp_config, defaults):
         with open(tmp_config, "w") as f:

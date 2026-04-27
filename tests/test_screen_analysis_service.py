@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import sys
-import types as pytypes
-
 import requests
 
 from ghostmic.services.screen_analysis_service import (
     DEFAULT_SCREEN_PROMPT,
     DEEP_ANALYSIS_SCREEN_PROMPT,
-    GEMINI_VISION_MODEL,
     GROQ_VISION_MODEL,
     SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS,
     SCREEN_ANALYSIS_TEMPERATURE,
-    analyze_screenshot_with_gemini,
     analyze_screenshot_with_groq,
     encode_image_data_url,
     extract_groq_text,
@@ -86,73 +81,11 @@ def test_max_completion_tokens_supports_detailed_output() -> None:
     assert SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS >= 4096
 
 
-def test_resolve_screen_analysis_provider_prefers_gemini_when_selected() -> None:
-    assert resolve_screen_analysis_provider({"main_backend": "gemini"}) == "gemini"
+def test_resolve_screen_analysis_provider_is_groq_only() -> None:
+    assert resolve_screen_analysis_provider({"main_backend": "gemini"}) == "groq"
     assert resolve_screen_analysis_provider({"main_backend": "groq"}) == "groq"
     # Non-multimodal fallback stays on Groq path.
     assert resolve_screen_analysis_provider({"main_backend": "openai"}) == "groq"
-
-
-def test_analyze_screenshot_with_gemini_builds_expected_payload(monkeypatch) -> None:
-    calls = {}
-
-    class FakeGenerateContentConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    class FakePart:
-        @staticmethod
-        def from_bytes(*, data, mime_type):
-            calls["part_data"] = data
-            calls["part_mime"] = mime_type
-            return {
-                "data": data,
-                "mime_type": mime_type,
-            }
-
-    class FakeModels:
-        def generate_content(self, *, model, contents, config):
-            calls["model"] = model
-            calls["contents"] = contents
-            calls["config"] = config
-            return pytypes.SimpleNamespace(text="Gemini found a SQL error dialog.")
-
-    class FakeClient:
-        def __init__(self, *, api_key):
-            calls["api_key"] = api_key
-            self.models = FakeModels()
-
-    fake_types = pytypes.ModuleType("google.genai.types")
-    fake_types.Part = FakePart
-    fake_types.GenerateContentConfig = FakeGenerateContentConfig
-
-    fake_genai = pytypes.ModuleType("google.genai")
-    fake_genai.Client = FakeClient
-    fake_genai.types = fake_types
-
-    fake_google = pytypes.ModuleType("google")
-    fake_google.genai = fake_genai
-
-    monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
-    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
-
-    result = analyze_screenshot_with_gemini(
-        b"fake-image-bytes",
-        "test-gemini-key",
-    )
-
-    assert result == "Gemini found a SQL error dialog."
-    assert calls["api_key"] == "test-gemini-key"
-    assert calls["model"] == GEMINI_VISION_MODEL
-    assert calls["part_data"] == b"fake-image-bytes"
-    assert calls["part_mime"] == "image/png"
-    assert calls["contents"][1] == DEEP_ANALYSIS_SCREEN_PROMPT
-    assert calls["config"].kwargs["temperature"] == SCREEN_ANALYSIS_TEMPERATURE
-    assert (
-        calls["config"].kwargs["max_output_tokens"]
-        == SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS
-    )
 
 
 def test_analyze_screenshot_with_groq_builds_expected_payload(monkeypatch) -> None:

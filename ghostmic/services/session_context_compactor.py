@@ -209,28 +209,12 @@ class SessionContextCompactor:
 
         if requested_backend in ("", "groq"):
             return "groq"
-        if requested_backend == "gemini":
-            return "gemini"
         if requested_backend == "openai":
             return "openai" if expose_openai else "groq"
         return "groq"
 
     def _request_compaction(self, source_text: str, config: Dict[str, Any]) -> str:
         backend = self._resolve_active_backend(config)
-
-        if backend == "gemini":
-            api_key = str(config.get("gemini_api_key", "")).strip()
-            if not api_key:
-                raise ValueError("Gemini API key not configured for context compaction.")
-            model = str(config.get("gemini_model", "gemini-3-flash-preview")).strip() or "gemini-3-flash-preview"
-
-            try:
-                from google import genai  # type: ignore[import]
-            except ImportError as exc:
-                raise RuntimeError("google-genai package not installed") from exc
-
-            client = genai.Client(api_key=api_key)
-            return self._request_with_gemini(client, model, source_text, config)
 
         if backend == "openai":
             api_key = str(config.get("openai_api_key", "")).strip()
@@ -250,49 +234,6 @@ class SessionContextCompactor:
 
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
         return self._request_with_client(client, model, source_text, config)
-
-    @staticmethod
-    def _extract_gemini_text(response: Any) -> str:
-        text = str(getattr(response, "text", "") or "").strip()
-        if text:
-            return text
-
-        candidates = getattr(response, "candidates", None) or []
-        for candidate in candidates:
-            content = getattr(candidate, "content", None)
-            parts = getattr(content, "parts", None) or []
-            chunks: list[str] = []
-            for part in parts:
-                part_text = str(getattr(part, "text", "") or "").strip()
-                if part_text:
-                    chunks.append(part_text)
-            merged = "\n".join(chunks).strip()
-            if merged:
-                return merged
-
-        return ""
-
-    def _request_with_gemini(self, client, model: str, source_text: str, config: Dict[str, Any]) -> str:
-        try:
-            from google.genai import types  # type: ignore[import]
-        except ImportError as exc:
-            raise RuntimeError("google-genai package not installed") from exc
-
-        response = client.models.generate_content(
-            model=model,
-            contents=(
-                "Recent session event log to compact:\n"
-                f"{source_text}\n\n"
-                "Rewrite this into a clean context snapshot now."
-            ),
-            config=types.GenerateContentConfig(
-                system_instruction=COMPACTION_SYSTEM_PROMPT,
-                temperature=self._safe_float(config.get("context_compaction_temperature", DEFAULT_TEMPERATURE), DEFAULT_TEMPERATURE),
-                max_output_tokens=int(config.get("context_compaction_max_tokens", DEFAULT_MAX_COMPLETION_TOKENS) or DEFAULT_MAX_COMPLETION_TOKENS),
-            ),
-        )
-
-        return self._extract_gemini_text(response)
 
     def _request_with_client(self, client, model: str, source_text: str, config: Dict[str, Any]) -> str:
         response = client.chat.completions.create(

@@ -501,9 +501,8 @@ class AIResponsePanel(QWidget):
     def append_continuation(self, continuation_text: str) -> None:
         """Append continuation text to the most recent response card.
 
-        Used by the two-stage Groq→Gemini pipeline: Groq's initial
-        response is already displayed, and this method seamlessly
-        appends Gemini's completion to the same card.
+        Used when a response is delivered in multiple chunks and the latest
+        chunk should be merged into the existing response card.
         """
         self._remove_thinking()
         if not self._cards:

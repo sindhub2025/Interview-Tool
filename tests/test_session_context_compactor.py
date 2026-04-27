@@ -1,8 +1,5 @@
 """Unit tests for periodic session context compaction."""
 
-import sys
-import types as pytypes
-
 from ghostmic.services.session_context_compactor import SessionContextCompactor
 from ghostmic.services.session_context_store import SessionContextStore
 
@@ -141,62 +138,7 @@ def test_compactor_full_refresh_after_five_incremental_sends(tmp_path, monkeypat
     assert "Delta event 6" in calls[-1]
 
 
-def test_resolve_active_backend_supports_gemini() -> None:
+def test_resolve_active_backend_maps_gemini_to_groq() -> None:
     assert SessionContextCompactor._resolve_active_backend(
         {"main_backend": "gemini"}
-    ) == "gemini"
-
-
-def test_request_compaction_uses_gemini_backend(tmp_path, monkeypatch):
-    store = SessionContextStore(base_dir=str(tmp_path))
-    compactor = SessionContextCompactor(
-        store,
-        {
-            "main_backend": "gemini",
-            "gemini_api_key": "test-gemini-key",
-            "gemini_model": "gemini-3-flash-preview",
-            "context_compaction_temperature": 0.25,
-        },
-    )
-
-    calls = {}
-
-    class FakeGenerateContentConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    class FakeModels:
-        def generate_content(self, *, model, contents, config):
-            calls["model"] = model
-            calls["contents"] = contents
-            calls["config"] = config
-            return pytypes.SimpleNamespace(text="Current Focus: Gemini compaction")
-
-    class FakeClient:
-        def __init__(self, *, api_key):
-            calls["api_key"] = api_key
-            self.models = FakeModels()
-
-    fake_types = pytypes.ModuleType("google.genai.types")
-    fake_types.GenerateContentConfig = FakeGenerateContentConfig
-
-    fake_genai = pytypes.ModuleType("google.genai")
-    fake_genai.Client = FakeClient
-    fake_genai.types = fake_types
-
-    fake_google = pytypes.ModuleType("google")
-    fake_google.genai = fake_genai
-
-    monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
-    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
-
-    result = compactor._request_compaction(
-        "[12:00:00] Transcript: Explain ETL retries",
-        compactor._get_config_snapshot(),
-    )
-
-    assert result == "Current Focus: Gemini compaction"
-    assert calls["api_key"] == "test-gemini-key"
-    assert calls["model"] == "gemini-3-flash-preview"
-    assert calls["config"].kwargs["temperature"] == 0.25
+    ) == "groq"
