@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from ghostmic.domain import TranscriptSegment
 from ghostmic.services.ai_trigger_service import AITriggerService
+from ghostmic.services.question_extraction_service import QuestionExtractionService
 from ghostmic.main import (
     GhostMicApp,
     INITIAL_RECORDING_QUESTION_NORMALIZATION_DELAY_MS,
@@ -74,6 +75,8 @@ def _app_for_auto(trigger_mode: str = "auto") -> GhostMicApp:
     app._queued_normalized_questions = []
     app._normalized_segment_items = []
     app._normalized_segment_lookup = {}
+    app._question_extraction_service = QuestionExtractionService()
+    app._recent_extracted_question_keys = []
     app._logger = _NoopLogger()
     app._window = None
     return app
@@ -96,6 +99,8 @@ def _app_for_normalization_callbacks() -> GhostMicApp:
     app._queued_normalized_questions = []
     app._normalized_segment_items = []
     app._normalized_segment_lookup = {}
+    app._question_extraction_service = QuestionExtractionService()
+    app._recent_extracted_question_keys = []
     app._generate_ai_response = lambda force_follow_up=False: None
     app._prime_ai_context_with_question = lambda segment, question: None
     return app
@@ -121,6 +126,25 @@ def test_auto_speaker_candidate_text_uses_min_word_and_char_thresholds():
 
     assert app._is_auto_speaker_candidate_text("Thanks") is False
     assert app._is_auto_speaker_candidate_text("Can you explain your ETL testing approach?") is True
+
+
+def test_transcription_ready_force_flushes_completed_streaming_segment():
+    app = _app_for_auto("auto")
+    app._config["transcription"] = {"streaming_normalization_enabled": True}
+    app._valid_session_ids = {7}
+    segment = TranscriptSegment(
+        text="Can you explain your ETL testing approach",
+        source="speaker",
+        timestamp=10.0,
+        session_id=7,
+    )
+    calls = []
+    app._append_transcript_segment = lambda seg, require_recording: True
+    app._process_streaming_transcript_chunks = lambda **kwargs: calls.append(kwargs)
+
+    app._on_transcription_ready(segment)
+
+    assert calls == [{"force_flush": True}]
 
 
 def test_auto_speaker_silence_elapsed_invokes_normalization_with_auto_send():
@@ -360,6 +384,69 @@ def test_register_normalized_segment_routes_auto_send_through_normalization_work
     assert captured[0][1] == app._normalized_segment_items[0]["text"]
     assert captured[0][2]["auto_send_after"] is True
     assert getattr(captured[0][0], "text") == app._normalized_segment_items[0]["text"]
+
+
+def test_register_normalized_segment_extracts_question_from_long_preamble():
+    app = _app_for_normalization_callbacks()
+    app._recording_active = False
+
+    normalized_segment = SimpleNamespace(
+        segment_id="segment-1",
+        normalized_text=(
+            "Okay Jaime, before we get into the technical part, you mentioned "
+            "that you worked on a migration from Hive to Snowflake. There were "
+            "probably a few problems during that process, right? And when you "
+            "were validating the migrated data, can you explain how you actually "
+            "handled reconciliation?"
+        ),
+        source="speaker",
+        source_chunk_ids=["c1", "c2", "c3"],
+    )
+
+    app._register_normalized_segment(normalized_segment)
+
+    assert len(app._normalized_segment_items) == 1
+    item = app._normalized_segment_items[0]
+    assert item["raw_question"] == (
+        "When you were validating the migrated data, can you explain how you actually handled reconciliation?"
+    )
+    assert item["text"] == item["raw_question"]
+    assert item["source_chunk_ids"] == ["c1", "c2", "c3"]
+    assert app._session_context_store.events[0]["kind"] == "extracted_question"
+
+
+def test_register_normalized_segment_rejects_preamble_confirmation_question():
+    app = _app_for_normalization_callbacks()
+    app._recording_active = False
+
+    normalized_segment = SimpleNamespace(
+        segment_id="segment-1",
+        normalized_text="You worked with Snowflake and Hive, right?",
+        source="speaker",
+        source_chunk_ids=["c1"],
+    )
+
+    app._register_normalized_segment(normalized_segment)
+
+    assert app._normalized_segment_items == []
+    assert app._session_context_store.events == []
+
+
+def test_register_normalized_segment_deduplicates_same_extracted_question():
+    app = _app_for_normalization_callbacks()
+    app._recording_active = False
+
+    for index in range(2):
+        app._register_normalized_segment(
+            SimpleNamespace(
+                segment_id=f"segment-{index}",
+                normalized_text="Can you explain how you validate migrated data?",
+                source="speaker",
+                source_chunk_ids=[f"c{index}"],
+            )
+        )
+
+    assert len(app._normalized_segment_items) == 1
 
 
 def test_register_normalized_segment_keeps_latest_three():

@@ -69,7 +69,7 @@
     "patience": 1.2,
     "repetition_penalty": 1.05,
     "streaming_normalization_enabled": true,
-    "streaming_processing_interval_ms": 3500,
+    "streaming_processing_interval_ms": 1500,
     "streaming_buffer_seconds": 30.0,
     "streaming_buffer_max_chunks": 260,
     "streaming_pause_boundary_seconds": 1.15,

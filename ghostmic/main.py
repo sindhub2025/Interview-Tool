@@ -47,6 +47,7 @@ from ghostmic.services.transcript_store import TranscriptStore
 from ghostmic.services.normalizer_service import NormalizerService
 from ghostmic.services.segment_manager import SegmentManager
 from ghostmic.services.ai_trigger_service import AITriggerService
+from ghostmic.services.question_extraction_service import QuestionExtractionService
 
 # Logger is set up in _main() after parsing --debug, but we need it here
 # for module-level imports that may log warnings.
@@ -515,8 +516,10 @@ class GhostMicApp:
         self._normalizer_service: NormalizerService | None = None
         self._segment_manager: SegmentManager | None = None
         self._ai_trigger_service: AITriggerService | None = None
+        self._question_extraction_service: QuestionExtractionService | None = None
         self._normalized_segment_items: list[dict] = []
         self._normalized_segment_lookup: dict[str, dict] = {}
+        self._recent_extracted_question_keys: list[str] = []
         # Queue of (segment_id, raw_text) tuples awaiting background AI normalization.
         self._pending_normalization_queue: list[tuple[str, str]] = []
 
@@ -1581,6 +1584,15 @@ class GhostMicApp:
             self._logger.warning("record.failed: transcription backend is not ready")
             return False
 
+        # Never open a replacement device while a previous capture thread is
+        # still alive after a timed-out shutdown.
+        for name in ("sys_audio", "mic", "vad"):
+            if self._thread_coordinator.is_alive(name):
+                self._logger.warning(
+                    "record.failed: previous %s capture thread is still stopping", name
+                )
+                return False
+
         # Recreate threads each time (QThread cannot restart after finishing)
         if not self._create_audio_threads(session_id):
             self._logger.warning("record.failed: audio threads could not be created")
@@ -1595,20 +1607,34 @@ class GhostMicApp:
         self._logger.info("record.audio_started")
         return True
 
-    def _stop_audio_capture(self) -> None:
+    def _stop_audio_capture(self) -> bool:
         if self._transcription_thread:
             self._transcription_thread.stop_accepting_segments()
+        stopped_cleanly = True
         for name in ("sys_audio", "mic"):
-            self._thread_coordinator.stop_one(name, timeout_ms=2000)
-        self._thread_coordinator.stop_one("vad", timeout_ms=2000)
+            stopped_cleanly = (
+                self._thread_coordinator.stop_one(name, timeout_ms=2000)
+                and stopped_cleanly
+            )
+        stopped_cleanly = (
+            self._thread_coordinator.stop_one("vad", timeout_ms=2000)
+            and stopped_cleanly
+        )
         if self._transcription_thread:
             self._transcription_thread.drain(timeout_seconds=3.0)
+
+        if not stopped_cleanly:
+            self._logger.error(
+                "record.stop_failed: capture thread did not stop; refusing replacement start"
+            )
+            return False
 
         # Release references so fresh threads are created on next recording
         self._sys_audio_thread = None
         self._mic_thread = None
         self._vad_thread = None
         self._logger.info("record.stopped")
+        return True
 
     def _is_any_recording_active(self) -> bool:
         """Return True if either the Record session or mic-only session is active."""
@@ -1880,6 +1906,17 @@ class GhostMicApp:
         return bool(dcfg.get("enabled", True))
 
     def _on_record_toggled(self, recording: bool) -> None:
+        if not self._recording_lock.acquire(blocking=False):
+            self._logger.warning(
+                "record.request_ignored: another recording transition is in progress"
+            )
+            return
+        try:
+            self._on_record_toggled_unlocked(recording)
+        finally:
+            self._recording_lock.release()
+
+    def _on_record_toggled_unlocked(self, recording: bool) -> None:
         self._logger.info("record.requested: active=%s", recording)
         if recording:
             # If mic-only session is active, stop it before starting full recording
@@ -1966,7 +2003,7 @@ class GhostMicApp:
                 self._tray.set_recording(True)
         else:
             if self._is_streaming_normalization_enabled():
-                self._stop_streaming_processing_loop(flush=True)
+                self._stop_streaming_processing_loop(flush=False)
             session_id = self._recording_session_id
             self._recording_active = False
             self._valid_session_ids.add(session_id)
@@ -1976,6 +2013,8 @@ class GhostMicApp:
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
             self._stop_audio_capture()
+            if self._is_streaming_normalization_enabled():
+                self._process_streaming_transcript_chunks(force_flush=True)
             if self._transcription_thread:
                 self._transcription_thread.clear_pending_segments()
             self._invalidate_recording_session(session_id)
@@ -2029,7 +2068,9 @@ class GhostMicApp:
                 getattr(segment, "session_id", None),
             )
             return
-        self._append_transcript_segment(segment, require_recording=True)
+        accepted = self._append_transcript_segment(segment, require_recording=True)
+        if accepted and self._is_streaming_normalization_enabled():
+            self._process_streaming_transcript_chunks(force_flush=True)
 
     def _should_merge_speaker_segments(self, previous, incoming) -> bool:
         """Return True when *incoming* should continue the previous question line."""
@@ -2852,11 +2893,15 @@ class GhostMicApp:
 
         if getattr(self, "_ai_trigger_service", None) is None:
             self._ai_trigger_service = AITriggerService()
+        if getattr(self, "_question_extraction_service", None) is None:
+            self._question_extraction_service = QuestionExtractionService()
 
         if not hasattr(self, "_normalized_segment_items"):
             self._normalized_segment_items = []
         if not hasattr(self, "_normalized_segment_lookup"):
             self._normalized_segment_lookup = {}
+        if not hasattr(self, "_recent_extracted_question_keys"):
+            self._recent_extracted_question_keys = []
         if not hasattr(self, "_pending_normalization_queue"):
             self._pending_normalization_queue = []
 
@@ -2920,6 +2965,9 @@ class GhostMicApp:
         trigger_service = getattr(self, "_ai_trigger_service", None)
         if trigger_service is not None:
             trigger_service.reset()
+        if not hasattr(self, "_recent_extracted_question_keys"):
+            self._recent_extracted_question_keys = []
+        self._recent_extracted_question_keys.clear()
 
         self._normalized_segment_items.clear()
         self._normalized_segment_lookup.clear()
@@ -2980,8 +3028,6 @@ class GhostMicApp:
         segment_id = str(getattr(normalized_segment, "segment_id", "")).strip()
         if not segment_id:
             return
-        if segment_id in self._normalized_segment_lookup:
-            return
 
         normalized_text = str(getattr(normalized_segment, "normalized_text", "")).strip()
         if not normalized_text:
@@ -2997,11 +3043,92 @@ class GhostMicApp:
         from ghostmic.utils.text_processing import ensure_question_format
 
         mic_only = self._is_mic_only_session()
-        text_is_question = is_question_like(normalized_text)
+        extractor = getattr(self, "_question_extraction_service", None)
+        if extractor is None:
+            extractor = QuestionExtractionService()
+            self._question_extraction_service = extractor
 
-        if not mic_only and not text_is_question:
+        extracted_questions = []
+        if mic_only:
+            extracted_questions = []
+        else:
+            extracted_questions = [
+                item
+                for item in extractor.extract_from_text(
+                    normalized_text,
+                    source=source,
+                    source_chunk_ids=source_chunk_ids,
+                )
+                if bool(getattr(item, "has_question", False))
+            ]
+
+        if not mic_only and not extracted_questions:
+            classification = extractor.classify(normalized_text)
             self._logger.debug(
-                "Normalized segment skipped (not question-like): %r",
+                "Streaming segment skipped by question extractor: class=%s text=%r",
+                classification,
+                normalized_text[:100],
+            )
+            return
+
+        candidate_texts = [normalized_text] if mic_only else [
+            str(getattr(item, "raw_question", "")).strip()
+            for item in extracted_questions
+            if str(getattr(item, "raw_question", "")).strip()
+        ]
+
+        for index, candidate_text in enumerate(candidate_texts):
+            self._register_extracted_question_candidate(
+                normalized_segment,
+                segment_id=segment_id if index == 0 else f"{segment_id}-q{index + 1}",
+                raw_text=candidate_text,
+                source=source,
+                source_chunk_ids=source_chunk_ids,
+                mic_only=mic_only,
+                is_question=is_question_like(candidate_text),
+                extraction=(
+                    extracted_questions[index]
+                    if not mic_only and index < len(extracted_questions)
+                    else None
+                ),
+            )
+
+    def _register_extracted_question_candidate(
+        self,
+        normalized_segment,
+        *,
+        segment_id: str,
+        raw_text: str,
+        source: str,
+        source_chunk_ids: List[str],
+        mic_only: bool,
+        is_question: bool,
+        extraction=None,
+    ) -> None:
+        if segment_id in self._normalized_segment_lookup:
+            return
+
+        normalized_text = str(raw_text or "").strip()
+        if not normalized_text:
+            return
+
+        from ghostmic.utils.text_processing import ensure_question_format
+
+        question_key = self._canonical_question_key(normalized_text)
+        if question_key:
+            if not hasattr(self, "_recent_extracted_question_keys"):
+                self._recent_extracted_question_keys = []
+            recent = self._recent_extracted_question_keys
+            if question_key in recent:
+                self._logger.debug(
+                    "Extracted question skipped as duplicate: %r",
+                    normalized_text[:100],
+                )
+                return
+
+        if not mic_only and not is_question:
+            self._logger.debug(
+                "Extracted segment skipped (not question-like): %r",
                 normalized_text[:80],
             )
             return
@@ -3012,7 +3139,7 @@ class GhostMicApp:
         word_count = len(normalized_text.split())
         if word_count < min_words:
             self._logger.debug(
-                "Normalized segment skipped (too short, %d words, min=%d): %r",
+                "Extracted segment skipped (too short, %d words, min=%d): %r",
                 word_count,
                 min_words,
                 normalized_text[:80],
@@ -3021,24 +3148,31 @@ class GhostMicApp:
 
         # Only force question-mark formatting for text that actually
         # looks like a question.  Statements keep their original ending.
-        if text_is_question:
+        raw_question = normalized_text
+        if is_question:
             normalized_text = ensure_question_format(normalized_text)
 
         # Always log to session context so the AI has full conversation awareness,
         # regardless of whether this segment is a question.
         self._session_context_store.append_event(
-            "normalized_segment",
+            "extracted_question" if is_question else "normalized_segment",
             normalized_text,
             source=source,
             metadata={
                 "segment_id": segment_id,
                 "source_chunk_ids": source_chunk_ids,
+                "raw_question": raw_question,
+                "confidence": float(getattr(extraction, "confidence", 1.0) or 1.0),
+                "classification": str(getattr(extraction, "classification", "")),
             },
         )
 
         item = {
             "segment_id": segment_id,
             "text": normalized_text,
+            "raw_question": raw_question,
+            "confidence": float(getattr(extraction, "confidence", 1.0) or 1.0),
+            "classification": str(getattr(extraction, "classification", "")),
             "status": "pending",
             "source": source,
             "source_chunk_ids": source_chunk_ids,
@@ -3055,13 +3189,19 @@ class GhostMicApp:
                 if old_id:
                     self._normalized_segment_lookup.pop(old_id, None)
 
+        if question_key:
+            if not hasattr(self, "_recent_extracted_question_keys"):
+                self._recent_extracted_question_keys = []
+            self._recent_extracted_question_keys.append(question_key)
+            del self._recent_extracted_question_keys[:-150]
+
         trigger_service = getattr(self, "_ai_trigger_service", None)
         # Auto-promote during recording:
         # - Mic-only mode: promote ALL segments (user's speech IS the input)
         # - Normal recording: only promote question-like segments
         should_auto_promote = bool(
             self._is_any_recording_active()
-            and (mic_only or text_is_question)
+            and (mic_only or is_question)
         )
         # Keep the trigger service in sync so other subsystems know a question
         # has been dispatched.
@@ -3075,10 +3215,10 @@ class GhostMicApp:
             except Exception:
                 pass
             self._logger.info(
-                "Auto-promoting normalized segment to AI: mic_only=%s, question=%s, text=%r",
+                "Auto-promoting extracted question to AI: mic_only=%s, question=%s, raw=%r",
                 mic_only,
-                text_is_question,
-                normalized_text[:80],
+                is_question,
+                raw_question[:80],
             )
             self._on_speaker_question_normalize_requested(
                 normalized_segment,

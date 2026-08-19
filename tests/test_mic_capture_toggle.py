@@ -29,13 +29,20 @@ class _FakeCoordinator:
     def __init__(self) -> None:
         self.registered = []
         self.stopped = []
+        self.threads = {}
+        self.stop_result = True
 
     def register(self, name, thread) -> None:
         self.registered.append(name)
+        self.threads[name] = thread
 
     def stop_one(self, name, timeout_ms=3000):  # noqa: ARG002
         self.stopped.append(name)
-        return True
+        return self.stop_result
+
+    def is_alive(self, name):
+        thread = self.threads.get(name)
+        return bool(thread and thread.isRunning())
 
 
 class _FakeAudioBuffer:
@@ -155,6 +162,32 @@ def test_create_audio_threads_includes_mic_when_enabled(monkeypatch):
     assert app._create_audio_threads() is True
     assert isinstance(app._mic_thread, _FakeCaptureThread)
     assert app._thread_coordinator.registered == ["vad", "sys_audio", "mic"]
+
+
+def test_start_audio_capture_blocks_when_previous_thread_is_alive(monkeypatch):
+    app = _make_app(capture_mic=False)
+    app._is_transcription_ready = lambda: True
+    old_thread = _FakeCaptureThread(_FakeAudioBuffer())
+    old_thread.start()
+    app._thread_coordinator.register("sys_audio", old_thread)
+    created = []
+    app._create_audio_threads = lambda session_id=None: created.append(session_id) or True
+
+    assert app._start_audio_capture(session_id=4) is False
+    assert created == []
+
+
+def test_stop_audio_capture_keeps_references_when_thread_does_not_stop():
+    app = _make_app(capture_mic=False)
+    app._transcription_thread = None
+    app._thread_coordinator.stop_result = False
+    old_thread = _FakeCaptureThread(_FakeAudioBuffer())
+    old_thread.start()
+    app._sys_audio_thread = old_thread
+    app._thread_coordinator.register("sys_audio", old_thread)
+
+    assert app._stop_audio_capture() is False
+    assert app._sys_audio_thread is old_thread
 
 
 def test_loopback_discovery_uses_module_wasapi_constant():
