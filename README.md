@@ -103,6 +103,16 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
+For a clean local build, remove only the generated `build/` and `dist/` folders,
+then run:
+
+```bash
+python -m PyInstaller --noconfirm --clean InterviewTool.spec
+```
+
+The packaged application logs `BUILD_SOURCE_SIGNATURE`, the effective local
+transcription VAD setting, and resolved VAD asset paths in `startup-logs/`.
+
 ### First-time setup
 
 1. Open **Settings** (gear icon or `⚙` in the overlay).

@@ -81,6 +81,10 @@ def test_max_completion_tokens_supports_detailed_output() -> None:
     assert SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS >= 4096
 
 
+def test_screen_analysis_uses_qwen_vision_model() -> None:
+    assert GROQ_VISION_MODEL == "qwen/qwen3.6-27b"
+
+
 def test_resolve_screen_analysis_provider_is_groq_only() -> None:
     assert resolve_screen_analysis_provider({"main_backend": "gemini"}) == "groq"
     assert resolve_screen_analysis_provider({"main_backend": "groq"}) == "groq"

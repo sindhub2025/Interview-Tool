@@ -1,6 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
+import hashlib
+from pathlib import Path
+
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+)
+
+
+def _source_signature() -> str:
+    digest = hashlib.sha256()
+    root = Path.cwd()
+    paths = sorted((root / "ghostmic").rglob("*.py")) + [root / "InterviewTool.spec"]
+    for path in paths:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+signature_path = Path("build") / "InterviewTool.source_signature"
+signature_path.parent.mkdir(parents=True, exist_ok=True)
+signature_path.write_text(_source_signature(), encoding="ascii")
 
 
 hiddenimports = [
@@ -34,7 +58,28 @@ binaries += collect_dynamic_libs("av")
 datas = [
     ("ghostmic/assets", "ghostmic/assets"),
     ("ghostmic/config.json", "ghostmic"),
+    (str(signature_path), "ghostmic"),
 ]
+datas += collect_data_files(
+    "faster_whisper",
+    includes=["assets/*.onnx"],
+)
+
+try:
+    import torch
+
+    cached_vad_model = (
+        Path(torch.hub.get_dir())
+        / "snakers4_silero-vad_master"
+        / "src"
+        / "silero_vad"
+        / "data"
+        / "silero_vad.jit"
+    )
+    if cached_vad_model.is_file():
+        datas.append((str(cached_vad_model), "ghostmic/assets"))
+except Exception:
+    pass
 
 
 a = Analysis(

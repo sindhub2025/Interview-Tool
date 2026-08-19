@@ -2,7 +2,10 @@
 
 import numpy as np
 
-from ghostmic.core.transcription_engine import TranscriptionThread
+from ghostmic.core.transcription_engine import (
+    TranscriptionThread,
+    resolve_faster_whisper_vad_asset,
+)
 
 
 def _thread(remote_cfg=None):
@@ -90,6 +93,7 @@ class _FakeWhisperSegment:
 
 class _FakeWhisperModel:
     def transcribe(self, audio_float, **kwargs):  # noqa: ARG002
+        assert kwargs["vad_filter"] is False
         return [_FakeWhisperSegment("Can you explain your ETL test strategy?")], {}
 
 
@@ -103,3 +107,23 @@ def test_transcribe_uses_segment_enqueue_timestamp():
 
     assert result is not None
     assert result.timestamp == queued_at
+
+
+def test_queued_segment_retains_recording_session_id():
+    thread = _thread()
+    audio = np.ones(16_000, dtype=np.int16)
+
+    thread.push_segment(audio, "speaker", session_id=17)
+
+    queued_audio, source, queued_at, session_id = thread._queue.get_nowait()
+    assert queued_audio is audio
+    assert source == "speaker"
+    assert queued_at > 0
+    assert session_id == 17
+
+
+def test_faster_whisper_vad_asset_resolves_from_package():
+    path, available = resolve_faster_whisper_vad_asset()
+
+    assert path.endswith("faster_whisper\\assets\\silero_vad_v6.onnx")
+    assert available is True

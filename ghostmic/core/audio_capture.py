@@ -84,7 +84,7 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
         try:
             device_index = self._device_index
             if device_index is None:
-                device_index = self._find_loopback_device(p)
+                device_index = self._find_loopback_device(p, pyaudio)
 
             if device_index is None:
                 logger.error("No WASAPI loopback device found.")
@@ -126,7 +126,7 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
             p.terminate()
             logger.info("SystemAudioCapture: stopped.")
 
-    def _find_loopback_device(self, p) -> Optional[int]:
+    def _find_loopback_device(self, p, pyaudio=None) -> Optional[int]:
         """Return the index of the default WASAPI loopback device."""
         # pyaudiowpatch may expose a direct helper for this.
         if hasattr(p, "get_default_wasapi_loopback"):
@@ -139,8 +139,16 @@ class SystemAudioCaptureThread(QThread):  # type: ignore[misc]
             except Exception:  # pylint: disable=broad-except
                 pass
 
+        # paWASAPI is a module constant in pyaudiowpatch, not an attribute of
+        # the PyAudio instance. Using the instance here raises AttributeError
+        # and previously made valid loopback devices look unavailable.
+        wasapi_type = getattr(pyaudio, "paWASAPI", None)
+        if wasapi_type is None:
+            logger.warning("pyaudiowpatch does not expose the WASAPI host type.")
+            return None
+
         try:
-            wasapi_info = p.get_host_api_info_by_type(p.paWASAPI)  # type: ignore[attr-defined]
+            wasapi_info = p.get_host_api_info_by_type(wasapi_type)
         except Exception:  # pylint: disable=broad-except
             logger.warning("WASAPI not available on this system.")
             return None

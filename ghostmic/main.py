@@ -11,12 +11,14 @@ from __future__ import annotations
 import argparse
 import atexit
 import faulthandler
+import hashlib
 import json
 import os
 import platform
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 # ── Ensure the project root is on sys.path ────────────────────────────
@@ -75,6 +77,24 @@ FAULT_TRACE_FILE = os.path.join(DIAGNOSTIC_DIR, "python_faulthandler.log")
 
 _startup_trace_lock = threading.Lock()
 _fault_trace_stream = None
+
+
+def get_build_source_signature() -> str:
+    """Return the deterministic source signature embedded by PyInstaller."""
+    bundled_path = os.path.join(_HERE, "InterviewTool.source_signature")
+    try:
+        with open(bundled_path, "r", encoding="ascii") as fh:
+            return fh.read().strip()
+    except OSError:
+        digest = hashlib.sha256()
+        root = Path(_ROOT)
+        paths = sorted((root / "ghostmic").rglob("*.py")) + [root / "InterviewTool.spec"]
+        for path in paths:
+            digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()[:16]
 
 
 def _write_startup_trace(event: str, **fields: object) -> None:
@@ -466,6 +486,8 @@ class GhostMicApp:
         self._last_transcription_drop_log = 0.0
         self._recording_active = False
         self._mic_recording_active = False
+        self._recording_session_id = 0
+        self._valid_session_ids: set[int] = set()
         self._recording_lock = threading.Lock()
         self._dictation_hotkey_guard_until = 0.0
         self._startup_api_worker = None
@@ -1487,7 +1509,7 @@ class GhostMicApp:
                 "#f0883e",
             )
 
-    def _create_audio_threads(self) -> bool:
+    def _create_audio_threads(self, session_id: int | None = None) -> bool:
         """Create fresh audio capture and VAD threads for a new recording.
 
         QThread cannot be restarted after finishing, so we recreate
@@ -1511,8 +1533,14 @@ class GhostMicApp:
             self._cancel_pending_mic_recovery()
             self._mic_device_fallback_attempted = False
 
+            active_session_id = session_id if session_id is not None else getattr(
+                self, "_recording_session_id", 0
+            )
             self._vad_thread = VADThread(self._buffer)
-            self._vad_thread.speech_segment_ready.connect(self._on_speech_segment)
+            if hasattr(self._vad_thread, "_on_segment"):
+                self._vad_thread._on_segment = lambda audio, source: self._on_speech_segment(
+                    audio, source, active_session_id
+                )
             self._thread_coordinator.register("vad", self._vad_thread)
 
             self._sys_audio_thread = SystemAudioCaptureThread(
@@ -1547,12 +1575,15 @@ class GhostMicApp:
             self._logger.warning("Audio libraries not available: %s", exc)
             return False
 
-    def _start_audio_capture(self) -> bool:
+    def _start_audio_capture(self, session_id: int | None = None) -> bool:
+        self._logger.info("record.starting")
         if not self._is_transcription_ready():
+            self._logger.warning("record.failed: transcription backend is not ready")
             return False
 
         # Recreate threads each time (QThread cannot restart after finishing)
-        if not self._create_audio_threads():
+        if not self._create_audio_threads(session_id):
+            self._logger.warning("record.failed: audio threads could not be created")
             return False
 
         if self._vad_thread:
@@ -1561,23 +1592,49 @@ class GhostMicApp:
             self._sys_audio_thread.start()
         if self._mic_thread:
             self._mic_thread.start()
+        self._logger.info("record.audio_started")
         return True
 
     def _stop_audio_capture(self) -> None:
+        if self._transcription_thread:
+            self._transcription_thread.stop_accepting_segments()
         for name in ("sys_audio", "mic"):
             self._thread_coordinator.stop_one(name, timeout_ms=2000)
         self._thread_coordinator.stop_one("vad", timeout_ms=2000)
+        if self._transcription_thread:
+            self._transcription_thread.drain(timeout_seconds=3.0)
 
         # Release references so fresh threads are created on next recording
         self._sys_audio_thread = None
         self._mic_thread = None
         self._vad_thread = None
+        self._logger.info("record.stopped")
 
     def _is_any_recording_active(self) -> bool:
         """Return True if either the Record session or mic-only session is active."""
         return bool(
             getattr(self, "_recording_active", False)
             or getattr(self, "_mic_recording_active", False)
+        )
+
+    def _begin_recording_session(self) -> int:
+        """Create the identity used to route one Record/Mic capture session."""
+        self._recording_session_id = getattr(self, "_recording_session_id", 0) + 1
+        session_id = self._recording_session_id
+        self._valid_session_ids = {session_id}
+        transcription_thread = getattr(self, "_transcription_thread", None)
+        if transcription_thread:
+            transcription_thread.resume_accepting_segments()
+        self._logger.info("record.session_started: id=%d", session_id)
+        return session_id
+
+    def _invalidate_recording_session(self, session_id: int) -> None:
+        self._valid_session_ids.discard(session_id)
+        self._logger.info("record.session_invalidated: id=%d", session_id)
+
+    def _is_session_result_valid(self, session_id: int | None) -> bool:
+        return session_id is not None and session_id in getattr(
+            self, "_valid_session_ids", set()
         )
 
     def _is_mic_only_session(self) -> bool:
@@ -1591,7 +1648,7 @@ class GhostMicApp:
     # Mic-only recording session
     # ------------------------------------------------------------------
 
-    def _create_mic_only_audio_threads(self) -> bool:
+    def _create_mic_only_audio_threads(self, session_id: int | None = None) -> bool:
         """Create VAD + mic capture threads for a mic-only recording session.
 
         Unlike _create_audio_threads(), this skips system audio capture
@@ -1612,8 +1669,14 @@ class GhostMicApp:
             self._cancel_pending_mic_recovery()
             self._mic_device_fallback_attempted = False
 
+            active_session_id = session_id if session_id is not None else getattr(
+                self, "_recording_session_id", 0
+            )
             self._vad_thread = VADThread(self._buffer)
-            self._vad_thread.speech_segment_ready.connect(self._on_speech_segment)
+            if hasattr(self._vad_thread, "_on_segment"):
+                self._vad_thread._on_segment = lambda audio, source: self._on_speech_segment(
+                    audio, source, active_session_id
+                )
             self._thread_coordinator.register("vad", self._vad_thread)
 
             # No system audio thread for mic-only mode
@@ -1637,12 +1700,12 @@ class GhostMicApp:
             self._logger.warning("Audio libraries not available for mic-only: %s", exc)
             return False
 
-    def _start_mic_only_capture(self) -> bool:
+    def _start_mic_only_capture(self, session_id: int | None = None) -> bool:
         """Start a mic-only recording session with full transcription pipeline."""
         if not self._is_transcription_ready():
             return False
 
-        if not self._create_mic_only_audio_threads():
+        if not self._create_mic_only_audio_threads(session_id):
             return False
 
         if self._vad_thread:
@@ -1653,8 +1716,12 @@ class GhostMicApp:
 
     def _stop_mic_only_capture(self) -> None:
         """Stop the mic-only recording session."""
+        if self._transcription_thread:
+            self._transcription_thread.stop_accepting_segments()
         self._thread_coordinator.stop_one("mic", timeout_ms=2000)
         self._thread_coordinator.stop_one("vad", timeout_ms=2000)
+        if self._transcription_thread:
+            self._transcription_thread.drain(timeout_seconds=3.0)
 
         self._sys_audio_thread = None
         self._mic_thread = None
@@ -1813,6 +1880,7 @@ class GhostMicApp:
         return bool(dcfg.get("enabled", True))
 
     def _on_record_toggled(self, recording: bool) -> None:
+        self._logger.info("record.requested: active=%s", recording)
         if recording:
             # If mic-only session is active, stop it before starting full recording
             if self._mic_recording_active:
@@ -1820,17 +1888,15 @@ class GhostMicApp:
                 if self._is_streaming_normalization_enabled():
                     self._stop_streaming_processing_loop(flush=True)
                 self._mic_recording_active = False
+                previous_session_id = self._recording_session_id
                 self._stop_mic_only_capture()
-                if self._window:
-                    self._window.controls.set_mic_enabled(False)
-                audio_cfg = self._config.setdefault("audio", {})
-                audio_cfg["capture_mic"] = False
-                _save_config(self._config, self._config_path)
+                self._invalidate_recording_session(previous_session_id)
 
             self._reset_auto_question_session_state()
             if self._is_streaming_normalization_enabled():
                 self._reset_streaming_normalization_state(clear_ui=True)
             started_with_cloud_fallback = False
+            session_id = self._begin_recording_session()
             if self._is_model_loader_running():
                 enabled, detail = self._try_enable_cloud_fast_start()
                 if enabled:
@@ -1870,6 +1936,7 @@ class GhostMicApp:
                     self._model_error_message,
                 )
                 self._recording_active = False
+                self._invalidate_recording_session(session_id)
                 if self._window:
                     self._window.controls.set_recording(False)
                     self._window.controls.set_status(
@@ -1887,6 +1954,7 @@ class GhostMicApp:
 
             self._ensure_ai_thread()
             self._recording_active = True
+            self._logger.info("record.active")
             if self._is_streaming_normalization_enabled():
                 self._start_streaming_processing_loop()
             if started_with_cloud_fallback and self._window:
@@ -1899,7 +1967,9 @@ class GhostMicApp:
         else:
             if self._is_streaming_normalization_enabled():
                 self._stop_streaming_processing_loop(flush=True)
+            session_id = self._recording_session_id
             self._recording_active = False
+            self._valid_session_ids.add(session_id)
             self._cancel_pending_mic_recovery()
             self._reset_auto_question_session_state(clear_ui=False)
             self._auto_speaker_silence_generation += 1
@@ -1908,6 +1978,7 @@ class GhostMicApp:
             self._stop_audio_capture()
             if self._transcription_thread:
                 self._transcription_thread.clear_pending_segments()
+            self._invalidate_recording_session(session_id)
             if self._ai_thread:
                 self._ai_thread.clear_pending_requests()
             with self._transcript_lock:
@@ -1915,7 +1986,17 @@ class GhostMicApp:
             if self._tray:
                 self._tray.set_recording(False)
 
-    def _on_speech_segment(self, audio, source: str) -> None:
+    def _on_speech_segment(
+        self,
+        audio,
+        source: str,
+        session_id: int | None = None,
+    ) -> None:
+        if not self._is_session_result_valid(session_id):
+            self._logger.debug(
+                "Dropping speech segment from stale session id=%s.", session_id
+            )
+            return
         if not self._transcription_thread:
             now = time.time()
             if now - self._last_transcription_drop_log >= 5.0:
@@ -1934,7 +2015,7 @@ class GhostMicApp:
                 self._last_transcription_drop_log = now
             return
 
-        self._transcription_thread.push_segment(audio, source)
+        self._transcription_thread.push_segment(audio, source, session_id=session_id)
 
     def _on_transcribing(self, source: str) -> None:
         if self._window:
@@ -1942,6 +2023,12 @@ class GhostMicApp:
             self._window.controls.set_status("Transcribing…", "#58a6ff")
 
     def _on_transcription_ready(self, segment) -> None:
+        if not self._is_session_result_valid(getattr(segment, "session_id", None)):
+            self._logger.debug(
+                "Ignoring transcription from stale session id=%s.",
+                getattr(segment, "session_id", None),
+            )
+            return
         self._append_transcript_segment(segment, require_recording=True)
 
     def _should_merge_speaker_segments(self, previous, incoming) -> bool:
@@ -2026,10 +2113,17 @@ class GhostMicApp:
         return False
 
     def _append_transcript_segment(self, segment, require_recording: bool) -> bool:
-        if require_recording and not self._is_any_recording_active():
+        segment_session_id = getattr(segment, "session_id", None)
+        session_valid = self._is_session_result_valid(segment_session_id)
+        # Keep direct, untagged internal callers compatible; asynchronous
+        # VAD/transcription callbacks always carry a session ID.
+        if segment_session_id is None:
+            session_valid = self._is_any_recording_active()
+        if require_recording and not session_valid:
             self._logger.debug(
-                "Ignoring transcription while recording is off (source=%s).",
+                "Ignoring transcription from invalid session (source=%s, id=%s).",
                 getattr(segment, "source", "unknown"),
+                segment_session_id,
             )
             return False
 
@@ -2464,6 +2558,7 @@ class GhostMicApp:
 
     def _on_mic_toggled(self, enabled: bool) -> None:
         enabled = bool(enabled)
+        self._logger.info("mic.requested: enabled=%s", enabled)
         audio_cfg = self._config.setdefault("audio", {})
 
         self._cancel_pending_mic_recovery()
@@ -2549,13 +2644,16 @@ class GhostMicApp:
                         )
                     return
 
+            session_id = self._begin_recording_session()
             self._mic_recording_active = True
             if not self._start_mic_only_capture():
+                self._logger.warning("record.failed: mic audio capture could not start")
                 self._logger.warning(
                     "Mic-only session blocked: transcription unavailable. last_error=%s",
                     self._model_error_message,
                 )
                 self._mic_recording_active = False
+                self._invalidate_recording_session(session_id)
                 audio_cfg["capture_mic"] = False
                 _save_config(self._config, self._config_path)
                 if self._window:
@@ -2586,6 +2684,8 @@ class GhostMicApp:
                         "#3fb950",
                     )
             self._logger.info("Mic-only recording session started.")
+            self._logger.info("record.audio_started")
+            self._logger.info("record.active")
         else:
             # Stop the mic-only recording session
             if not self._mic_recording_active:
@@ -2593,7 +2693,9 @@ class GhostMicApp:
 
             if self._is_streaming_normalization_enabled():
                 self._stop_streaming_processing_loop(flush=True)
+            session_id = self._recording_session_id
             self._mic_recording_active = False
+            self._valid_session_ids.add(session_id)
             self._cancel_pending_mic_recovery()
             self._reset_auto_question_session_state(clear_ui=False)
             self._auto_speaker_silence_generation += 1
@@ -2602,6 +2704,7 @@ class GhostMicApp:
             self._stop_mic_only_capture()
             if self._transcription_thread:
                 self._transcription_thread.clear_pending_segments()
+            self._invalidate_recording_session(session_id)
             if self._ai_thread:
                 self._ai_thread.clear_pending_requests()
             with self._transcript_lock:
@@ -2609,6 +2712,7 @@ class GhostMicApp:
             if self._window:
                 self._window.controls.set_status("Mic stopped", "#58a6ff")
             self._logger.info("Mic-only recording session stopped.")
+            self._logger.info("record.stopped")
 
     def _is_stealth_enabled(self) -> bool:
         return bool(self._config.get("ui", {}).get("stealth_enabled", True))
@@ -4278,9 +4382,11 @@ def main() -> None:
         pid=os.getpid(),
         executable=sys.executable,
         frozen=getattr(sys, "frozen", False),
+        build_source_signature=get_build_source_signature(),
         argv=" ".join(sys.argv),
         config=args.config,
     )
+    logger.info("BUILD_SOURCE_SIGNATURE=%s", get_build_source_signature())
 
     logger.info(
         "Diagnostics paths: app_log=%s startup_trace=%s faulthandler=%s",

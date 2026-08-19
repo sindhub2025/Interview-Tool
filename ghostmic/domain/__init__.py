@@ -20,3 +20,4 @@ class TranscriptSegment:
     source: str                 # "speaker" or "user"
     timestamp: float = field(default_factory=time.time)
     confidence: float = 1.0
+    session_id: int | None = None

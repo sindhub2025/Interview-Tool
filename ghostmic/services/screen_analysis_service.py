@@ -11,7 +11,7 @@ from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 SCREEN_ANALYSIS_TEMPERATURE = 0.1
 SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS = 4096

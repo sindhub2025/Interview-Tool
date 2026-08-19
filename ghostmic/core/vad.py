@@ -8,7 +8,11 @@ transcription, including local pre-roll padding from the VAD timeline.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import queue
+import sys
 import threading
 import time
 from typing import Callable, Optional, Tuple
@@ -45,6 +49,36 @@ MAX_PENDING_SAMPLES: int = 1_024    # max carry-over samples (2 × VAD_WINDOW_SI
 BYPASS_SEGMENT_SECONDS: float = 2.0
 BYPASS_MAX_BUFFER_SECONDS: float = 8.0
 BYPASS_MIN_RMS: float = 120.0
+
+
+def resolve_silero_vad_model_asset() -> Tuple[str, bool]:
+    """Resolve the bundled or development-cache JIT VAD model."""
+    candidates = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidates.append(os.path.join(sys._MEIPASS, "ghostmic", "assets", "silero_vad.jit"))
+    candidates.append(
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "silero_vad.jit")
+    )
+    try:
+        import torch  # type: ignore[import]
+
+        candidates.append(
+            os.path.join(
+                torch.hub.get_dir(),
+                "snakers4_silero-vad_master",
+                "src",
+                "silero_vad",
+                "data",
+                "silero_vad.jit",
+            )
+        )
+    except Exception:
+        pass
+
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.R_OK):
+            return path, True
+    return candidates[0] if candidates else "", False
 
 
 class VADState:
@@ -122,10 +156,12 @@ class VADThread(QThread):  # type: ignore[misc]
             "user": self._make_bypass_state(),
         }
 
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() or not self._queue.empty():
             try:
                 data, source = self._queue.get(timeout=0.1)
             except queue.Empty:
+                if self._stop_event.is_set():
+                    break
                 continue
 
             if self._bypass_vad:
@@ -136,6 +172,15 @@ class VADThread(QThread):  # type: ignore[misc]
                 continue
 
             self._process_chunk(data, source, states[source])
+
+        for source, state in states.items():
+            if state["speech_buffer"]:
+                self._flush_segment(state, source)
+        for source, state in bypass_states.items():
+            if state["buffer"]:
+                audio = np.concatenate(state["buffer"]).astype(np.int16)
+                if audio.size:
+                    self._emit(audio, source)
 
         logger.info("VADThread: stopped.")
 
@@ -197,12 +242,25 @@ class VADThread(QThread):  # type: ignore[misc]
                 import torch  # type: ignore[import]
 
                 logger.info("VADThread: loading Silero VAD model …")
-                model, utils = torch.hub.load(
-                    "snakers4/silero-vad",
-                    "silero_vad",
-                    force_reload=False,
-                    trust_repo=True,
+                asset_path, asset_available = resolve_silero_vad_model_asset()
+                logger.info(
+                    "Silero VAD asset: exists=%s path=%s",
+                    str(asset_available).lower(),
+                    asset_path,
                 )
+                if asset_available:
+                    model = torch.jit.load(asset_path, map_location="cpu")
+                    model.eval()
+                    utils = (None, None, None, None, None)
+                else:
+                    null_stream = _NullStream()
+                    with _temporary_stdio(null_stream):
+                        model, utils = torch.hub.load(
+                            "snakers4/silero-vad",
+                            "silero_vad",
+                            force_reload=False,
+                            trust_repo=True,
+                        )
                 cls._shared_model = model
                 cls._shared_torch = torch
                 (
@@ -388,7 +446,8 @@ class VADThread(QThread):  # type: ignore[misc]
     def _process_bypass_chunk(self, chunk: np.ndarray, source: str, state: Optional[dict]) -> None:
         """Coarse fallback segmentation when Silero VAD is unavailable.
 
-        Prevents per-chunk pass-through from flooding cloud STT endpoints.
+        Emits conservative fixed windows so a VAD initialization failure does
+        not discard quiet speech. The transcription stage filters true silence.
         """
         if state is None:
             return
@@ -409,10 +468,6 @@ class VADThread(QThread):  # type: ignore[misc]
         state["buffer"] = []
         state["samples"] = 0
 
-        if self._is_low_energy(audio):
-            logger.debug("VAD[%s]: bypass segment dropped due to low energy", source)
-            return
-
         self._emit(audio, source)
 
     @staticmethod
@@ -421,3 +476,26 @@ class VADThread(QThread):  # type: ignore[misc]
             return True
         rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float32)))))
         return rms < BYPASS_MIN_RMS
+
+
+class _NullStream(io.TextIOBase):
+    """Minimal stream for libraries that write progress in windowed builds."""
+
+    def write(self, text: str) -> int:  # noqa: ARG002
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+
+@contextlib.contextmanager
+def _temporary_stdio(stream):
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    if old_stdout is None:
+        sys.stdout = stream
+    if old_stderr is None:
+        sys.stderr = stream
+    try:
+        yield
+    finally:
+        sys.stdout, sys.stderr = old_stdout, old_stderr

@@ -1,0 +1,6 @@
+{
+  "audio": {
+    "sample_rate": 16000,
+    "capture_mic": true
+  }
+}

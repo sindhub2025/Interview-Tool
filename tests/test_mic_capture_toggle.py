@@ -157,6 +157,32 @@ def test_create_audio_threads_includes_mic_when_enabled(monkeypatch):
     assert app._thread_coordinator.registered == ["vad", "sys_audio", "mic"]
 
 
+def test_loopback_discovery_uses_module_wasapi_constant():
+    from ghostmic.core.audio_capture import SystemAudioCaptureThread
+
+    class _FakePyAudio:
+        def get_host_api_info_by_type(self, host_type):
+            assert host_type == 42
+            return {"defaultOutputDevice": 3}
+
+        def get_device_info_by_index(self, index):
+            devices = {
+                3: {"name": "Speaker"},
+                10: {"isLoopbackDevice": True, "index": 10, "name": "Speaker [Loopback]"},
+            }
+            return devices.get(index, {})
+
+        def get_device_count(self):
+            return 11
+
+    class _FakePyAudioModule:
+        paWASAPI = 42
+
+    thread = SystemAudioCaptureThread.__new__(SystemAudioCaptureThread)
+
+    assert thread._find_loopback_device(_FakePyAudio(), _FakePyAudioModule) == 10
+
+
 def test_mic_capture_toggle_default_is_false_when_missing():
     app = GhostMicApp.__new__(GhostMicApp)
     app._config = {"audio": {}}

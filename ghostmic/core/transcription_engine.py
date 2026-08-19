@@ -8,6 +8,7 @@ pipeline, and emits TranscriptSegment results.
 from __future__ import annotations
 
 import io
+import os
 import queue
 import random
 import re
@@ -36,6 +37,25 @@ except ImportError:
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def resolve_faster_whisper_vad_asset() -> tuple[str, bool]:
+    """Resolve the bundled faster-whisper VAD asset without assuming _MEIPASS."""
+    try:
+        import faster_whisper  # type: ignore[import]
+
+        package_dir = os.path.dirname(os.path.abspath(faster_whisper.__file__))
+        asset_path = os.path.join(package_dir, "assets", "silero_vad_v6.onnx")
+        return asset_path, bool(os.path.isfile(asset_path) and os.access(asset_path, os.R_OK))
+    except Exception:  # pylint: disable=broad-except
+        return "", False
+
+
+def log_faster_whisper_vad_asset() -> bool:
+    """Log a concise packaged-runtime diagnostic for the faster-whisper asset."""
+    path, available = resolve_faster_whisper_vad_asset()
+    logger.info("faster-whisper VAD asset: exists=%s path=%s", str(available).lower(), path)
+    return available
 
 TRANSCRIPTION_QUEUE_MAXSIZE: int = 24
 MAX_PENDING_SEGMENT_AGE_SECONDS: float = 8.0
@@ -90,6 +110,7 @@ class ModelLoader(QThread):  # type: ignore[misc]
 
     def run(self) -> None:
         try:
+            logger.info("local_transcription_vad_filter=false")
             self._emit_progress(f"Loading Whisper model '{self.model_size}' …")
             from faster_whisper import WhisperModel  # type: ignore[import]
 
@@ -105,6 +126,7 @@ class ModelLoader(QThread):  # type: ignore[misc]
                         device=device,
                         compute_type=compute_type,
                     )
+                    log_faster_whisper_vad_asset()
                     self._emit_progress("Whisper model ready.")
                     if pyqtSignal is not None:
                         self.model_ready.emit()  # type: ignore[attr-defined]
@@ -237,7 +259,8 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         self._remote_config = remote_config or {}
         self._on_result = on_result
         self._stop_event = threading.Event()
-        self._queue: "queue.Queue[Tuple[np.ndarray, str, float]]" = queue.Queue(
+        self._accepting_segments = True
+        self._queue: "queue.Queue[Tuple[np.ndarray, str, float, int | None]]" = queue.Queue(
             maxsize=TRANSCRIPTION_QUEUE_MAXSIZE
         )
         self._remote_transcription_enabled = False
@@ -294,6 +317,23 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
     def stop(self) -> None:
         self._stop_event.set()
 
+    def stop_accepting_segments(self) -> None:
+        """Prevent new audio from entering while queued work drains."""
+        self._accepting_segments = False
+
+    def resume_accepting_segments(self) -> None:
+        """Allow audio segments for a newly started recording session."""
+        self._accepting_segments = True
+
+    def drain(self, timeout_seconds: float = 3.0) -> bool:
+        """Wait briefly for queued and in-flight transcription to finish."""
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while time.monotonic() < deadline:
+            if self._queue.empty() and not getattr(self, "_transcribing", False):
+                return True
+            time.sleep(0.01)
+        return self._queue.empty() and not getattr(self, "_transcribing", False)
+
     def has_model(self) -> bool:
         return self._model is not None
 
@@ -321,9 +361,20 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             and not self._stop_event.is_set()
         )
 
-    def push_segment(self, audio: np.ndarray, source: str) -> None:
+    def push_segment(
+        self,
+        audio: np.ndarray,
+        source: str,
+        session_id: int | None = None,
+    ) -> None:
         """Enqueue an audio segment for transcription."""
-        item = (audio, source, time.time())
+        if not self._accepting_segments:
+            logger.debug(
+                "TranscriptionThread: rejecting new segment while stopping (%s).",
+                source,
+            )
+            return
+        item = (audio, source, time.time(), session_id)
         try:
             self._queue.put_nowait(item)
             return
@@ -357,10 +408,11 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
 
     def run(self) -> None:
         self._stop_event.clear()
+        self._accepting_segments = True
         logger.info("TranscriptionThread: started.")
         while not self._stop_event.is_set():
             try:
-                audio, source, enqueued_at = self._queue.get(timeout=0.2)
+                audio, source, enqueued_at, session_id = self._queue.get(timeout=0.2)
             except queue.Empty:
                 continue
 
@@ -382,12 +434,17 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             if pyqtSignal is not None:
                 self.transcribing.emit(source)  # type: ignore[attr-defined]
 
-            segment = self._transcribe(audio, source, segment_timestamp=enqueued_at)
-            if segment:
-                if self._on_result:
-                    self._on_result(segment)
-                if pyqtSignal is not None:
-                    self.transcription_ready.emit(segment)  # type: ignore[attr-defined]
+            self._transcribing = True
+            try:
+                segment = self._transcribe(audio, source, segment_timestamp=enqueued_at)
+                if segment:
+                    segment.session_id = session_id
+                    if self._on_result:
+                        self._on_result(segment)
+                    if pyqtSignal is not None:
+                        self.transcription_ready.emit(segment)  # type: ignore[attr-defined]
+            finally:
+                self._transcribing = False
 
         logger.info("TranscriptionThread: stopped.")
 
@@ -431,7 +488,8 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 "repetition_penalty": float(
                     self._remote_config.get("repetition_penalty", 1.05)
                 ),
-                "vad_filter": True,
+                # VADThread already segments audio and preserves pre-roll.
+                "vad_filter": False,
                 "condition_on_previous_text": False,
             }
             if self._use_context_prompt:

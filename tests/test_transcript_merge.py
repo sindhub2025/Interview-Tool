@@ -114,3 +114,25 @@ def test_append_merge_updates_timestamp_for_next_pause_gap_check():
     assert app._append_transcript_segment(third, require_recording=True) is True
     assert len(app._transcript_history) == 1
     assert "when source data arrives late?" in app._transcript_history[0].text.lower()
+
+
+def test_same_session_result_is_accepted_during_shutdown_drain():
+    app = _app_for_append()
+    app._recording_active = False
+    app._valid_session_ids = {4}
+    segment = TranscriptSegment(
+        text="Final sentence", source="speaker", timestamp=15.0, session_id=4
+    )
+
+    assert app._append_transcript_segment(segment, require_recording=True) is True
+
+
+def test_previous_session_result_is_rejected_after_restart():
+    app = _app_for_append()
+    app._valid_session_ids = {8}
+    stale = TranscriptSegment(
+        text="Stale sentence", source="speaker", timestamp=15.0, session_id=7
+    )
+
+    assert app._append_transcript_segment(stale, require_recording=True) is False
+    assert app._transcript_history == []
