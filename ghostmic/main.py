@@ -201,7 +201,7 @@ def _default_config() -> dict:
             "openai_api_key": "",
             "openai_model": "gpt-5-mini",
             "groq_api_key": "",
-            "groq_model": "llama-4-maverick-17b-128e-instruct",
+            "groq_model": "openai/gpt-oss-120b",
             "system_prompt": DEFAULT_SYSTEM_PROMPT,
             "temperature": 0.7,
             "trigger_mode": "auto",

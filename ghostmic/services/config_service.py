@@ -24,13 +24,19 @@ Validator = Callable[[Any], bool]
 # Schema entries: (expected_type, default_value, optional_validator)
 SchemaEntry = Tuple[Type, Any, Optional[Validator]]
 
+SUPPORTED_GROQ_MODELS = (
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
+)
+
 # Full schema — dotted key path → (type, default, validator | None)
 CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     # AI
     "ai.backend":              (str,   "groq",   lambda v: v in ("groq", "openai")),
     "ai.main_backend":         (str,   "groq",   lambda v: v in ("groq", "openai")),
     "ai.groq_api_key":         (str,   "",       None),
-    "ai.groq_model":           (str,   "llama-4-maverick-17b-128e-instruct", None),
+    "ai.groq_model":           (str,   "openai/gpt-oss-120b", lambda v: v in SUPPORTED_GROQ_MODELS),
     "ai.openai_api_key":       (str,   "",       None),
     "ai.openai_model":         (str,   "gpt-5-mini", None),
     "ai.temperature":          (float, 0.7,      lambda v: 0.0 <= v <= 2.0),

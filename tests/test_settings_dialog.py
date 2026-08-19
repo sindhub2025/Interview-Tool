@@ -100,6 +100,24 @@ def test_settings_dialog_excludes_gemini_backend_option() -> None:
         dialog.deleteLater()
 
 
+def test_settings_dialog_exposes_only_supported_groq_models() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    dialog = SettingsDialog(_base_config())
+    try:
+        assert [
+            dialog._groq_model_combo.itemText(index)
+            for index in range(dialog._groq_model_combo.count())
+        ] == [
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.6-27b",
+        ]
+    finally:
+        dialog.deleteLater()
+
+
 def test_settings_dialog_saves_groq_backend_and_key() -> None:
     app = _qt_app()
     assert app is not None
@@ -111,13 +129,13 @@ def test_settings_dialog_saves_groq_backend_and_key() -> None:
 
         dialog._backend_combo.setCurrentText("groq")
         dialog._groq_api_key_edit.setText("test-groq-key")
-        dialog._groq_model_combo.setCurrentText("llama-3.3-70b-versatile")
+        dialog._groq_model_combo.setCurrentText("openai/gpt-oss-120b")
         dialog._save()
 
         assert emitted
         assert emitted[0]["ai"]["backend"] == "groq"
         assert emitted[0]["ai"]["main_backend"] == "groq"
         assert emitted[0]["ai"]["groq_api_key"] == "test-groq-key"
-        assert emitted[0]["ai"]["groq_model"] == "llama-3.3-70b-versatile"
+        assert emitted[0]["ai"]["groq_model"] == "openai/gpt-oss-120b"
     finally:
         dialog.deleteLater()

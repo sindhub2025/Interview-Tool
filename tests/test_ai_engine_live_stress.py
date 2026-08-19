@@ -51,7 +51,7 @@ def test_live_groq_stress_generates_responses(monkeypatch):
         "fallback_backend": "groq",
         "enable_fallback": False,
         "groq_api_key": groq_key,
-        "groq_model": os.getenv("GROQ_MODEL", "llama-4-maverick-17b-128e-instruct"),
+        "groq_model": os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
         "temperature": 0.2,
         "stream_timeout": 45.0,
     }

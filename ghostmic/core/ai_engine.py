@@ -876,7 +876,7 @@ class AIThread(QThread):  # type: ignore[misc]
 
         try:
             default_model = (
-                "llama-4-maverick-17b-128e-instruct"
+                "openai/gpt-oss-120b"
                 if backend_name == "groq"
                 else "gpt-4o-mini"
             )
@@ -1103,7 +1103,7 @@ class AIThread(QThread):  # type: ignore[misc]
             raise ValueError("Groq API key not set")
 
         model = self._config.get(
-            "groq_model", "llama-4-maverick-17b-128e-instruct"
+            "groq_model", "openai/gpt-oss-120b"
         )
         max_retries = 3
         retry_delay = 1.0

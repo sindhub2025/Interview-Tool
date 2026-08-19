@@ -229,7 +229,7 @@ class SessionContextCompactor:
         api_key = str(config.get("groq_api_key", "")).strip()
         if not api_key:
             raise ValueError("Groq API key not configured for context compaction.")
-        model = str(config.get("groq_model", "llama-4-maverick-17b-128e-instruct")).strip() or "llama-4-maverick-17b-128e-instruct"
+        model = str(config.get("groq_model", "openai/gpt-oss-120b")).strip() or "openai/gpt-oss-120b"
         from openai import OpenAI  # type: ignore[import]
 
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")

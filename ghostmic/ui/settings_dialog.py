@@ -267,11 +267,9 @@ class SettingsDialog(QDialog):
         self._groq_model_combo = QComboBox()
         self._groq_model_combo.addItems(
             [
-                "llama-4-maverick-17b-128e-instruct",
-                "llama-3.3-70b-versatile",
-                "llama-3.1-70b-versatile",
-                "llama-3.1-8b-instant",
-                "mixtral-8x7b-32768",
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.6-27b",
             ]
         )
         form.addRow("Groq model:", self._groq_model_combo)
@@ -492,7 +490,7 @@ class SettingsDialog(QDialog):
             self._openai_model_combo.setCurrentIndex(openai_model_idx)
 
         self._groq_api_key_edit.setText(ai.get("groq_api_key", ""))
-        gm = ai.get("groq_model", "llama-4-maverick-17b-128e-instruct")
+        gm = ai.get("groq_model", "openai/gpt-oss-120b")
         gm_idx = self._groq_model_combo.findText(gm)
         if gm_idx >= 0:
             self._groq_model_combo.setCurrentIndex(gm_idx)

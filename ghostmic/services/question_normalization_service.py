@@ -436,7 +436,7 @@ def normalize_question_with_followups(
         api_key = str(ai_config.get("groq_api_key", "")).strip()
         if not api_key:
             raise ValueError("Groq API key not set. Add it in Settings -> AI.")
-        model = str(ai_config.get("groq_model", "llama-4-maverick-17b-128e-instruct")).strip() or "llama-4-maverick-17b-128e-instruct"
+        model = str(ai_config.get("groq_model", "openai/gpt-oss-120b")).strip() or "openai/gpt-oss-120b"
         try:
             from openai import OpenAI  # type: ignore[import]
         except ImportError as exc:

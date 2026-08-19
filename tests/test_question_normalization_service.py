@@ -151,7 +151,7 @@ def test_normalize_question_with_followups_corrects_rdbms_expansion(monkeypatch)
         "What is the difference between DBMS and RDBMS",
         {
             "groq_api_key": "test-groq-key",
-            "groq_model": "llama-4-maverick-17b-128e-instruct",
+            "groq_model": "openai/gpt-oss-120b",
         },
     )
 
