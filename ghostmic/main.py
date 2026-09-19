@@ -223,6 +223,7 @@ def _default_config() -> dict:
             "openai_model": "gpt-5-mini",
             "groq_api_key": "",
             "groq_model": "openai/gpt-oss-120b",
+            "groq_vision_model": "qwen/qwen3.8-27b",
             "system_prompt": DEFAULT_SYSTEM_PROMPT,
             "temperature": 0.7,
             "trigger_mode": "auto",
@@ -234,7 +235,6 @@ def _default_config() -> dict:
             "context_segments": 10,
             "session_context": "",
             "resume_context_enabled": True,
-            "sql_profile_enabled": False,
             "resume_correction_threshold_high": 0.87,
             "resume_correction_threshold_medium": 0.74,
             "context_compaction_enabled": True,
@@ -1035,7 +1035,7 @@ class GhostMicApp:
     def _setup_system_tray(self, app) -> None:
         from ghostmic.ui.system_tray import SystemTrayIcon
 
-        self._tray = SystemTrayIcon()
+        self._tray = SystemTrayIcon(visible=not self._is_stealth_enabled())
         self._tray.show_hide_requested.connect(self._toggle_window)
         self._tray.dock_toggle_requested.connect(self._toggle_dock_window)
         self._tray.stealth_toggled.connect(self._on_stealth_toggled)
@@ -2456,14 +2456,23 @@ class GhostMicApp:
             )
             dlg.settings_saved.connect(self._on_settings_saved)
             dlg.resume_upload_requested.connect(
-                lambda file_path, dialog=dlg: self._on_resume_upload_requested(file_path, dialog)
+                lambda file_path, profile_context, dialog=dlg: self._on_resume_upload_requested(
+                    file_path,
+                    profile_context,
+                    dialog,
+                )
             )
             dlg.resume_remove_requested.connect(
                 lambda dialog=dlg: self._on_resume_remove_requested(dialog)
             )
             dlg.exec()
 
-    def _on_resume_upload_requested(self, file_path: str, dialog=None) -> None:
+    def _on_resume_upload_requested(
+        self,
+        file_path: str,
+        profile_context: dict | None = None,
+        dialog=None,
+    ) -> None:
         # Run resume ingestion on a background thread to avoid freezing the UI.
         if dialog and hasattr(dialog, "set_resume_busy"):
             dialog.set_resume_busy(True, "Processing resume…")
@@ -2476,20 +2485,39 @@ class GhostMicApp:
         class ResumeIngestWorker(QThread):
             finished = pyqtSignal(object, str)
 
-            def __init__(self, resume_service: ResumeService, file_path: str, parent=None) -> None:
+            def __init__(
+                self,
+                resume_service: ResumeService,
+                file_path: str,
+                context: dict,
+                ai_config: dict,
+                parent=None,
+            ) -> None:
                 super().__init__(parent)
                 self._resume_service = resume_service
                 self._file_path = file_path
+                self._context = dict(context or {})
+                self._ai_config = dict(ai_config or {})
 
             def run(self) -> None:
                 try:
-                    status = self._resume_service.ingest_resume(self._file_path)
+                    status = self._resume_service.ingest_resume(
+                        self._file_path,
+                        profile_context=self._context,
+                        ai_config=self._ai_config,
+                    )
                     self.finished.emit(status, "")
                 except Exception as exc:  # pylint: disable=broad-except
                     self.finished.emit({}, str(exc))
 
         worker_parent = dialog if dialog is not None else None
-        worker = ResumeIngestWorker(self._resume_service, file_path, parent=worker_parent)
+        worker = ResumeIngestWorker(
+            self._resume_service,
+            file_path,
+            profile_context or {},
+            self._config.get("ai", {}),
+            parent=worker_parent,
+        )
         self._resume_upload_worker = worker
 
         def _on_ingest_finished(status: object, error: str) -> None:

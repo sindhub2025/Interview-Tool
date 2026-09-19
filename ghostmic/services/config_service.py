@@ -27,6 +27,7 @@ SchemaEntry = Tuple[Type, Any, Optional[Validator]]
 SUPPORTED_GROQ_MODELS = (
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
     "qwen/qwen3.6-27b",
 )
 
@@ -37,6 +38,7 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ai.main_backend":         (str,   "groq",   lambda v: v in ("groq", "openai")),
     "ai.groq_api_key":         (str,   "",       None),
     "ai.groq_model":           (str,   "openai/gpt-oss-120b", lambda v: v in SUPPORTED_GROQ_MODELS),
+    "ai.groq_vision_model":    (str,   "qwen/qwen3.8-27b", lambda v: v in ("qwen/qwen3.8-27b", "qwen/qwen3.6-27b")),
     "ai.openai_api_key":       (str,   "",       None),
     "ai.openai_model":         (str,   "gpt-5-mini", None),
     "ai.temperature":          (float, 0.7,      lambda v: 0.0 <= v <= 2.0),
@@ -48,7 +50,6 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ai.auto_speaker_retrigger_cooldown_seconds": (float, 5.0, lambda v: 0.5 <= v <= 30.0),
     "ai.max_tokens":           (int,   2048,     lambda v: 1 <= v <= 32768),
     "ai.resume_context_enabled": (bool, True, None),
-    "ai.sql_profile_enabled":  (bool,  False,    None),
     "ai.resume_correction_threshold_high": (float, 0.87, lambda v: 0.5 <= v <= 1.0),
     "ai.resume_correction_threshold_medium": (float, 0.74, lambda v: 0.4 <= v <= 1.0),
     # Audio

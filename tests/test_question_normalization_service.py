@@ -78,31 +78,41 @@ def test_parse_normalization_result_supports_plain_text_fallback() -> None:
     assert len(result.follow_up_questions) == 3
 
 
-def test_build_normalization_context_block_includes_resume_and_sql_context() -> None:
+def test_build_normalization_context_block_includes_active_profile_context() -> None:
     context = _build_normalization_context_block(
-        "Can you tell me about your experience using SQL window functions in ETL pipelines?",
+        "Can you tell me about your experience using count in ETL pipelines?",
         {
             "resume_profile": {
                 "summary": "Data engineer with SQL and Python experience.",
                 "skills": ["SQL", "Python", "ETL"],
                 "companies": ["Acme"],
+                "interview": {
+                    "person_name": "Jane Doe",
+                    "target_role": "Senior Data Engineer",
+                    "experience": "7 years",
+                },
+                "normalization": {
+                    "canonical_terms": ["COUNT()", "ETL"],
+                    "aliases": {"COUNT()": ["count"]},
+                    "role_keywords": ["data quality"],
+                },
             },
             "resume_context_enabled": True,
-            "sql_profile_enabled": True,
         },
     )
 
-    assert "Resume context:" in context
+    assert "Active profile normalization context:" in context
+    assert "Canonical terms: COUNT(), ETL" in context
+    assert "Likely mishearings: COUNT(): count" in context
+    assert "Active profile resume context:" in context
     assert "Skills: SQL, Python, ETL" in context
-    assert "SQL context:" in context
-    assert "ROW_NUMBER()" in context
 
 
 def test_resolve_backend_maps_gemini_to_groq() -> None:
     assert _resolve_backend({"main_backend": "gemini"}) == "groq"
 
 
-def test_normalize_question_with_followups_corrects_rdbms_expansion(monkeypatch) -> None:
+def test_normalize_question_with_followups_includes_active_profile_context(monkeypatch) -> None:
     calls = {}
 
     class FakeCompletions:
@@ -119,7 +129,7 @@ def test_normalize_question_with_followups_corrects_rdbms_expansion(monkeypatch)
                         message=pytypes.SimpleNamespace(
                             content=(
                                 "{"
-                                '"normalized_question":"What is the difference between a Database Management System and a Real-Time Database Management System (RTDBMS)?",'
+                                '"normalized_question":"What is the difference between a Database Management System and a Relational Database Management System (RDBMS)?",'
                                 '"follow_up_questions":['
                                 '"Can you give a practical example?",'
                                 '"How does RDBMS differ from DBMS in architecture?",'
@@ -152,6 +162,12 @@ def test_normalize_question_with_followups_corrects_rdbms_expansion(monkeypatch)
         {
             "groq_api_key": "test-groq-key",
             "groq_model": "openai/gpt-oss-120b",
+            "resume_profile": {
+                "normalization": {
+                    "canonical_terms": ["RDBMS"],
+                    "aliases": {"RDBMS": ["real time database management system"]},
+                },
+            },
         },
     )
 
@@ -161,6 +177,6 @@ def test_normalize_question_with_followups_corrects_rdbms_expansion(monkeypatch)
     assert len(result.follow_up_questions) == 3
     assert calls["api_key"] == "test-groq-key"
     assert calls["base_url"] == "https://api.groq.com/openai/v1"
-    assert "Database acronym context:" in "\n".join(
+    assert "Active profile normalization context:" in "\n".join(
         message["content"] for message in calls["messages"] if message["role"] == "user"
     )

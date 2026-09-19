@@ -301,12 +301,18 @@ class ResumeStatus:
 
     has_resume: bool
     source_file_name: str
+    person_name: str
+    target_role: str
+    experience: str
+    profile_key: str
+    profile_enrichment_source: str
     uploaded_at: float
     updated_at: float
     skills_count: int
     companies_count: int
     projects_count: int
     certifications_count: int
+    normalization_terms_count: int
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -356,29 +362,52 @@ class ResumeService:
             return ResumeStatus(
                 has_resume=False,
                 source_file_name="",
+                person_name="",
+                target_role="",
+                experience="",
+                profile_key="",
+                profile_enrichment_source="",
                 uploaded_at=0.0,
                 updated_at=0.0,
                 skills_count=0,
                 companies_count=0,
                 projects_count=0,
                 certifications_count=0,
+                normalization_terms_count=0,
             ).to_dict()
 
         meta = profile.get("meta", {}) if isinstance(profile, dict) else {}
+        interview = profile.get("interview", {}) if isinstance(profile.get("interview"), dict) else {}
+        normalization = (
+            profile.get("normalization", {})
+            if isinstance(profile.get("normalization"), dict)
+            else {}
+        )
         status = ResumeStatus(
             has_resume=True,
             source_file_name=str(meta.get("source_file_name", "")),
+            person_name=str(interview.get("person_name", "")),
+            target_role=str(interview.get("target_role", "")),
+            experience=str(interview.get("experience", "")),
+            profile_key=str(interview.get("profile_key", "")),
+            profile_enrichment_source=str(normalization.get("source", "")),
             uploaded_at=float(meta.get("uploaded_at", 0.0) or 0.0),
             updated_at=float(meta.get("updated_at", 0.0) or 0.0),
             skills_count=len(profile.get("skills", []) or []),
             companies_count=len(profile.get("companies", []) or []),
             projects_count=len(profile.get("projects", []) or []),
             certifications_count=len(profile.get("certifications", []) or []),
+            normalization_terms_count=len(normalization.get("canonical_terms", []) or []),
         )
         return status.to_dict()
 
-    def ingest_resume(self, file_path: str) -> Dict[str, Any]:
-        """Validate, extract, structure, and persist an uploaded resume."""
+    def ingest_resume(
+        self,
+        file_path: str,
+        profile_context: Optional[Dict[str, Any]] = None,
+        ai_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Validate, extract, structure, enrich, and persist an uploaded resume."""
         source_path = os.path.abspath(file_path)
         if not os.path.isfile(source_path):
             raise ValueError("Resume file does not exist.")
@@ -412,6 +441,8 @@ class ResumeService:
                 source_file_name=os.path.basename(source_path),
                 stored_file_name=stored_name,
             )
+            self._apply_interview_profile_context(profile, profile_context)
+            self._apply_profile_enrichment(profile, normalized_text, ai_config)
 
             self._write_profile(profile)
             self._write_raw_text(normalized_text)
@@ -622,6 +653,307 @@ class ResumeService:
             "aliases": aliases,
         }
         return profile
+
+    def _apply_interview_profile_context(
+        self,
+        profile: Dict[str, Any],
+        profile_context: Optional[Dict[str, Any]],
+    ) -> None:
+        context = profile_context if isinstance(profile_context, dict) else {}
+        identity = profile.get("identity", {}) if isinstance(profile.get("identity"), dict) else {}
+
+        person_name = str(context.get("person_name", "")).strip()
+        if not person_name:
+            person_name = str(identity.get("full_name", "")).strip()
+        target_role = str(context.get("target_role", "")).strip()
+        experience = str(context.get("experience", "")).strip()
+
+        if person_name:
+            identity["full_name"] = person_name
+            profile["identity"] = identity
+
+        profile_key = self._profile_key(person_name, target_role)
+        profile["interview"] = {
+            "person_name": person_name,
+            "target_role": target_role,
+            "experience": experience,
+            "profile_key": profile_key,
+        }
+
+    def _apply_profile_enrichment(
+        self,
+        profile: Dict[str, Any],
+        normalized_text: str,
+        ai_config: Optional[Dict[str, Any]],
+    ) -> None:
+        enrichment = self._build_local_normalization_profile(profile)
+        enrichment["source"] = "local"
+
+        try:
+            ai_enrichment = self._generate_profile_enrichment_with_ai(
+                profile,
+                normalized_text,
+                ai_config or {},
+            )
+            if ai_enrichment:
+                enrichment = self._merge_normalization_profiles(
+                    enrichment,
+                    ai_enrichment,
+                )
+                enrichment["source"] = "ai"
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "ResumeService: AI profile enrichment failed; using local profile: %s",
+                exc,
+            )
+            enrichment["source"] = "local"
+            enrichment["error"] = str(exc)
+
+        enrichment["updated_at"] = time.time()
+        profile["normalization"] = enrichment
+        self._merge_profile_aliases(profile, enrichment)
+
+    def _build_local_normalization_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        interview = profile.get("interview", {}) if isinstance(profile.get("interview"), dict) else {}
+        seed_terms: List[str] = []
+        for key in ("person_name", "target_role"):
+            value = str(interview.get(key, "")).strip()
+            if value:
+                seed_terms.append(value)
+        for key in (
+            "companies",
+            "job_titles",
+            "skills",
+            "tools",
+            "technologies",
+            "projects",
+            "certifications",
+            "keywords",
+        ):
+            values = profile.get(key, [])
+            if isinstance(values, list):
+                seed_terms.extend(str(value).strip() for value in values if str(value).strip())
+
+        canonical_terms = self._dedupe(seed_terms)[:80]
+        aliases = self._build_aliases(canonical_terms)
+        target_role = str(interview.get("target_role", "")).strip()
+        role_keywords = self._dedupe(
+            [target_role] + list(profile.get("skills", []) or []) + list(profile.get("keywords", []) or [])
+        )[:30]
+
+        resume_knowledge = []
+        for fact in profile.get("notable_facts", []) or []:
+            text = str(fact).strip()
+            if text:
+                resume_knowledge.append(text)
+            if len(resume_knowledge) >= 8:
+                break
+
+        answer_context = []
+        experience = str(interview.get("experience", "")).strip()
+        if target_role:
+            answer_context.append(f"Target answers toward a {target_role} interview.")
+        if experience:
+            answer_context.append(f"Represent the candidate as having {experience} experience.")
+
+        return {
+            "canonical_terms": canonical_terms,
+            "aliases": aliases,
+            "role_keywords": role_keywords,
+            "resume_knowledge": resume_knowledge,
+            "answer_context": answer_context,
+        }
+
+    def _generate_profile_enrichment_with_ai(
+        self,
+        profile: Dict[str, Any],
+        normalized_text: str,
+        ai_config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        backend = str(ai_config.get("main_backend") or ai_config.get("backend") or "groq").strip().lower()
+        expose_openai = bool(ai_config.get("expose_openai_provider", False))
+        if backend == "openai" and expose_openai:
+            api_key = str(ai_config.get("openai_api_key", "")).strip()
+            model = str(ai_config.get("openai_model", "gpt-5-mini")).strip() or "gpt-5-mini"
+            base_url = None
+        else:
+            api_key = str(ai_config.get("groq_api_key", "")).strip()
+            model = str(ai_config.get("groq_model", "openai/gpt-oss-120b")).strip() or "openai/gpt-oss-120b"
+            base_url = "https://api.groq.com/openai/v1"
+
+        if not api_key:
+            return None
+
+        try:
+            from openai import OpenAI  # type: ignore[import]
+        except ImportError as exc:
+            raise RuntimeError("openai package not installed. Run: pip install openai") from exc
+
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        client = OpenAI(**client_kwargs)
+
+        interview = profile.get("interview", {}) if isinstance(profile.get("interview"), dict) else {}
+        existing_terms = self._build_local_normalization_profile(profile)
+        resume_excerpt = normalized_text[:12000]
+        prompt = (
+            "Create an active interview profile from this resume and target role. "
+            "Return strict JSON only with keys canonical_terms, aliases, role_keywords, "
+            "resume_knowledge, answer_context. canonical_terms should contain exact names, "
+            "technologies, tools, projects, companies, acronyms, and domain terms likely to be "
+            "misheard by speech-to-text. aliases must map canonical terms to likely incorrect "
+            "transcriptions or spoken variants. Keep all facts grounded in the resume.\n\n"
+            f"Person name: {interview.get('person_name', '')}\n"
+            f"Target role: {interview.get('target_role', '')}\n"
+            f"Experience: {interview.get('experience', '')}\n"
+            f"Existing extracted terms: {json.dumps(existing_terms, ensure_ascii=True)}\n\n"
+            f"Resume text:\n{resume_excerpt}"
+        )
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract grounded interview personalization and transcript "
+                        "normalization data. Do not invent experience or employers."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=1200,
+            timeout=float(ai_config.get("profile_enrichment_timeout", 30.0)),
+            stream=False,
+        )
+        text = self._extract_response_text(response)
+        payload = self._extract_json_payload(text)
+        if not payload:
+            return None
+        return self._sanitize_normalization_profile(payload)
+
+    @staticmethod
+    def _extract_response_text(response: Any) -> str:
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            return ""
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "") if message is not None else ""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            return " ".join(str(item.get("text", "")) for item in content if isinstance(item, dict)).strip()
+        return ""
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return None
+        candidates = [cleaned]
+        match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", cleaned, flags=re.IGNORECASE)
+        if match:
+            candidates.append(match.group(1).strip())
+        brace_match = re.search(r"\{[\s\S]*\}", cleaned)
+        if brace_match:
+            candidates.append(brace_match.group(0).strip())
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    def _sanitize_normalization_profile(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        canonical_terms = self._dedupe(self._string_list(payload.get("canonical_terms")))[:100]
+        role_keywords = self._dedupe(self._string_list(payload.get("role_keywords")))[:50]
+        resume_knowledge = self._dedupe(self._string_list(payload.get("resume_knowledge")))[:16]
+        answer_context = self._dedupe(self._string_list(payload.get("answer_context")))[:8]
+
+        aliases: Dict[str, List[str]] = {}
+        raw_aliases = payload.get("aliases", {})
+        if isinstance(raw_aliases, dict):
+            for canonical, values in raw_aliases.items():
+                canonical_clean = str(canonical).strip()
+                if not canonical_clean:
+                    continue
+                alias_values = self._dedupe(self._string_list(values))[:8]
+                if alias_values:
+                    aliases[canonical_clean] = alias_values
+
+        return {
+            "canonical_terms": canonical_terms,
+            "aliases": aliases,
+            "role_keywords": role_keywords,
+            "resume_knowledge": resume_knowledge,
+            "answer_context": answer_context,
+        }
+
+    def _merge_normalization_profiles(
+        self,
+        base: Dict[str, Any],
+        extra: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        merged = {
+            "canonical_terms": self._dedupe(
+                self._string_list(extra.get("canonical_terms"))
+                + self._string_list(base.get("canonical_terms"))
+            )[:120],
+            "role_keywords": self._dedupe(
+                self._string_list(extra.get("role_keywords"))
+                + self._string_list(base.get("role_keywords"))
+            )[:60],
+            "resume_knowledge": self._dedupe(
+                self._string_list(extra.get("resume_knowledge"))
+                + self._string_list(base.get("resume_knowledge"))
+            )[:20],
+            "answer_context": self._dedupe(
+                self._string_list(extra.get("answer_context"))
+                + self._string_list(base.get("answer_context"))
+            )[:10],
+            "aliases": dict(base.get("aliases", {}) if isinstance(base.get("aliases"), dict) else {}),
+        }
+        for canonical, values in (extra.get("aliases", {}) if isinstance(extra.get("aliases"), dict) else {}).items():
+            canonical_clean = str(canonical).strip()
+            if not canonical_clean:
+                continue
+            existing = merged["aliases"].get(canonical_clean, [])
+            merged["aliases"][canonical_clean] = self._dedupe(existing + self._string_list(values))[:10]
+        return merged
+
+    def _merge_profile_aliases(
+        self,
+        profile: Dict[str, Any],
+        normalization: Dict[str, Any],
+    ) -> None:
+        aliases = profile.get("aliases", {}) if isinstance(profile.get("aliases"), dict) else {}
+        generated = normalization.get("aliases", {}) if isinstance(normalization.get("aliases"), dict) else {}
+        for canonical, values in generated.items():
+            canonical_clean = str(canonical).strip()
+            if not canonical_clean:
+                continue
+            aliases[canonical_clean] = self._dedupe(
+                self._string_list(aliases.get(canonical_clean)) + self._string_list(values)
+            )[:10]
+        profile["aliases"] = aliases
+
+    @staticmethod
+    def _string_list(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @staticmethod
+    def _profile_key(person_name: str, target_role: str) -> str:
+        raw = " ".join(part for part in (person_name, target_role) if part).strip()
+        if not raw:
+            raw = "active-profile"
+        key = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+        return key or "active-profile"
 
     def _split_sections(self, lines: Sequence[str]) -> Dict[str, List[str]]:
         sections: Dict[str, List[str]] = {"general": []}

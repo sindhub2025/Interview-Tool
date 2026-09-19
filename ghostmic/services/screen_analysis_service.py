@@ -11,10 +11,11 @@ from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
+GROQ_VISION_MODEL = "qwen/qwen3.8-27b"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 SCREEN_ANALYSIS_TEMPERATURE = 0.1
 SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS = 4096
+GROQ_IMAGE_SIZE_LIMIT_BYTES = 20_000_000
 
 # Legacy short-form prompt (kept for backward compatibility)
 DEFAULT_SCREEN_PROMPT = (
@@ -136,9 +137,9 @@ def analyze_screenshot_with_groq(
     """Send a screenshot to Groq vision and return the assistant response text."""
     if not api_key:
         raise ValueError("Groq API key is required for screen analysis.")
-    if len(image_bytes) > 3_900_000:
+    if len(image_bytes) > GROQ_IMAGE_SIZE_LIMIT_BYTES:
         raise RuntimeError(
-            "Screenshot is too large for Groq's base64 image limit. "
+            "Screenshot is too large for Groq's image input limit. "
             "Try reducing display resolution or capturing fewer monitors."
         )
 

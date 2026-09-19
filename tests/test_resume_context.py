@@ -48,6 +48,16 @@ def test_apply_resume_corrections_applies_high_confidence_company_fix():
     assert result["high_confidence"][0]["corrected"] == "Microsoft"
 
 
+def test_apply_resume_corrections_applies_exact_profile_alias():
+    profile = _profile()
+    text = "I worked at micro soft and built ETL pipelines."
+
+    result = apply_resume_corrections(text, profile)
+
+    assert "Microsoft" in result["text"]
+    assert result["high_confidence"][0]["corrected"] == "Microsoft"
+
+
 def test_apply_resume_corrections_keeps_medium_confidence_as_suggestion():
     profile = _profile()
     text = "I prefer pithon for backend tasks."

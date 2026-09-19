@@ -89,6 +89,15 @@ def build_resume_context_summary(
         lines.append(f"Name: {full_name}")
     if location:
         lines.append(f"Location: {location}")
+
+    interview = profile.get("interview", {}) if isinstance(profile.get("interview"), dict) else {}
+    target_role = str(interview.get("target_role", "")).strip()
+    experience = str(interview.get("experience", "")).strip()
+    if target_role:
+        lines.append(f"Target Role: {target_role}")
+    if experience:
+        lines.append(f"Experience: {experience}")
+
     if summary:
         lines.append(f"Summary: {summary[:220]}")
 
@@ -120,7 +129,73 @@ def build_resume_context_summary(
         if rendered:
             lines.append(f"Recent Roles: {'; '.join(rendered)}")
 
+    normalization = (
+        profile.get("normalization", {})
+        if isinstance(profile.get("normalization"), dict)
+        else {}
+    )
+    answer_context = _string_list(normalization.get("answer_context", []))
+    if answer_context:
+        lines.append(f"Answer Context: {'; '.join(answer_context[:3])}")
+
     return lines[:10]
+
+
+def build_profile_normalization_summary(
+    profile: Optional[Dict[str, Any]],
+    max_terms: int = 14,
+) -> List[str]:
+    """Return compact active-profile normalization guidance for noisy transcripts."""
+    if not isinstance(profile, dict):
+        return []
+
+    lines: List[str] = []
+    interview = profile.get("interview", {}) if isinstance(profile.get("interview"), dict) else {}
+    identity = profile.get("identity", {}) if isinstance(profile.get("identity"), dict) else {}
+
+    person_name = str(interview.get("person_name") or identity.get("full_name") or "").strip()
+    target_role = str(interview.get("target_role", "")).strip()
+    experience = str(interview.get("experience", "")).strip()
+
+    if person_name or target_role or experience:
+        parts = []
+        if person_name:
+            parts.append(person_name)
+        if target_role:
+            parts.append(f"target role: {target_role}")
+        if experience:
+            parts.append(f"experience: {experience}")
+        lines.append("Active profile: " + "; ".join(parts))
+
+    normalization = (
+        profile.get("normalization", {})
+        if isinstance(profile.get("normalization"), dict)
+        else {}
+    )
+    canonical_terms = _string_list(normalization.get("canonical_terms", []))
+    if canonical_terms:
+        lines.append(f"Canonical terms: {', '.join(canonical_terms[:max_terms])}")
+
+    role_keywords = _string_list(normalization.get("role_keywords", []))
+    if role_keywords:
+        lines.append(f"Role keywords: {', '.join(role_keywords[:max_terms])}")
+
+    alias_lines: List[str] = []
+    aliases = _profile_aliases(profile)
+    for canonical, values in aliases.items():
+        cleaned_values = _string_list(values)[:3]
+        if cleaned_values:
+            alias_lines.append(f"{canonical}: {', '.join(cleaned_values)}")
+        if len(alias_lines) >= 8:
+            break
+    if alias_lines:
+        lines.append("Likely mishearings: " + "; ".join(alias_lines))
+
+    knowledge = _string_list(normalization.get("resume_knowledge", []))
+    if knowledge:
+        lines.append("Resume knowledge: " + "; ".join(knowledge[:4]))
+
+    return lines[:8]
 
 
 def is_resume_related_text(text: str, profile: Optional[Dict[str, Any]]) -> bool:
@@ -179,7 +254,7 @@ def apply_resume_corrections(
     high_with_spans: List[Dict[str, Any]] = []
     medium: List[Dict[str, Any]] = []
 
-    for ngram_size in (3, 2, 1):
+    for ngram_size in (4, 3, 2, 1):
         for index in range(0, len(tokens) - ngram_size + 1):
             span = range(index, index + ngram_size)
             if any(i in used_token_indexes for i in span):
@@ -194,10 +269,6 @@ def apply_resume_corrections(
             best_score = 0.0
             for term in terms:
                 if _normalize(term.canonical) == norm_phrase:
-                    best_term = None
-                    best_score = 0.0
-                    break
-                if _normalize(term.match_value) == norm_phrase:
                     best_term = None
                     best_score = 0.0
                     break
@@ -276,6 +347,7 @@ def _collect_terms(profile: Optional[Dict[str, Any]]) -> List[_TermEntry]:
         ("certifications", "certifications"),
         ("tools", "tools"),
         ("technologies", "technologies"),
+        ("keywords", "keywords"),
     )
 
     for category, key in mappings:
@@ -291,7 +363,28 @@ def _collect_terms(profile: Optional[Dict[str, Any]]) -> List[_TermEntry]:
         terms.append(_TermEntry(canonical=full_name, category="identity", match_value=full_name))
         category_by_term[full_name.lower()] = "identity"
 
-    aliases = profile.get("aliases", {}) if isinstance(profile.get("aliases"), dict) else {}
+    interview = profile.get("interview", {}) if isinstance(profile.get("interview"), dict) else {}
+    for key, category in (("person_name", "identity"), ("target_role", "job_titles"), ("experience", "experience")):
+        value = str(interview.get(key, "")).strip()
+        if len(value) >= 3:
+            terms.append(_TermEntry(canonical=value, category=category, match_value=value))
+            category_by_term[value.lower()] = category
+
+    normalization = (
+        profile.get("normalization", {})
+        if isinstance(profile.get("normalization"), dict)
+        else {}
+    )
+    for item in _string_list(normalization.get("canonical_terms", [])):
+        if len(item) >= 3:
+            terms.append(_TermEntry(canonical=item, category="profile_terms", match_value=item))
+            category_by_term[item.lower()] = "profile_terms"
+    for item in _string_list(normalization.get("role_keywords", [])):
+        if len(item) >= 3:
+            terms.append(_TermEntry(canonical=item, category="role_keywords", match_value=item))
+            category_by_term[item.lower()] = "role_keywords"
+
+    aliases = _profile_aliases(profile)
     for canonical, alias_values in aliases.items():
         canonical_clean = str(canonical).strip()
         if not canonical_clean:
@@ -321,6 +414,40 @@ def _string_list(value: Any) -> List[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _profile_aliases(profile: Dict[str, Any]) -> Dict[str, List[str]]:
+    merged: Dict[str, List[str]] = {}
+    for source in (
+        profile.get("aliases", {}),
+        (
+            profile.get("normalization", {}).get("aliases", {})
+            if isinstance(profile.get("normalization"), dict)
+            else {}
+        ),
+    ):
+        if not isinstance(source, dict):
+            continue
+        for canonical, values in source.items():
+            canonical_clean = str(canonical).strip()
+            if not canonical_clean:
+                continue
+            merged.setdefault(canonical_clean, [])
+            merged[canonical_clean].extend(_string_list(values))
+    return {key: _dedupe_strings(values) for key, values in merged.items()}
+
+
+def _dedupe_strings(values: Sequence[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for value in values:
+        cleaned = str(value).strip()
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
 
 
 def _normalize(text: str) -> str:

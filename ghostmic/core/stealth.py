@@ -18,6 +18,13 @@ logger = get_logger(__name__)
 WDA_NONE: int = 0x00000000
 WDA_MONITOR: int = 0x00000001          # Shows as black rectangle in capture
 WDA_EXCLUDEFROMCAPTURE: int = 0x00000011  # Completely invisible (Win10 2004+)
+GWL_EXSTYLE: int = -20
+WS_EX_TOOLWINDOW: int = 0x00000080
+WS_EX_APPWINDOW: int = 0x00040000
+SWP_NOMOVE: int = 0x0002
+SWP_NOSIZE: int = 0x0001
+SWP_NOZORDER: int = 0x0004
+SWP_FRAMECHANGED: int = 0x0020
 
 
 def _user32() -> ctypes.WinDLL:
@@ -78,6 +85,71 @@ def apply_stealth(hwnd: int) -> bool:
         err,
     )
     return False
+
+
+def hide_from_taskbar(hwnd: int) -> bool:
+    """Force a top-level window to use tool-window style instead of taskbar style.
+
+    Qt.Tool normally does this, but packaged Windows apps can still receive
+    WS_EX_APPWINDOW from the shell/app model. Explicitly changing the native
+    extended style keeps the overlay out of Alt-Tab/taskbar surfaces.
+    """
+    if sys.platform != "win32":
+        return False
+
+    if not hwnd:
+        logger.error("hide_from_taskbar: invalid HWND (0).")
+        return False
+
+    user32 = _user32()
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        get_window_long = user32.GetWindowLongPtrW
+        set_window_long = user32.SetWindowLongPtrW
+    else:
+        get_window_long = user32.GetWindowLongW
+        set_window_long = user32.SetWindowLongW
+
+    ctypes.set_last_error(0)
+    current_style = int(get_window_long(hwnd, GWL_EXSTYLE))
+    if current_style == 0:
+        err = ctypes.get_last_error()
+        if err:
+            logger.error(
+                "hide_from_taskbar: GetWindowLong failed for HWND=%d "
+                "(win32 error %d).",
+                hwnd,
+                err,
+            )
+            return False
+
+    desired_style = (current_style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+    if desired_style == current_style:
+        return True
+
+    ctypes.set_last_error(0)
+    previous_style = set_window_long(hwnd, GWL_EXSTYLE, desired_style)
+    if previous_style == 0:
+        err = ctypes.get_last_error()
+        if err:
+            logger.error(
+                "hide_from_taskbar: SetWindowLong failed for HWND=%d "
+                "(win32 error %d).",
+                hwnd,
+                err,
+            )
+            return False
+
+    user32.SetWindowPos(
+        hwnd,
+        0,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+    )
+    logger.info("hide_from_taskbar: tool-window style applied to HWND=%d", hwnd)
+    return True
 
 
 def remove_stealth(hwnd: int) -> bool:

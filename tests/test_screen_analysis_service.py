@@ -7,6 +7,7 @@ import requests
 from ghostmic.services.screen_analysis_service import (
     DEFAULT_SCREEN_PROMPT,
     DEEP_ANALYSIS_SCREEN_PROMPT,
+    GROQ_IMAGE_SIZE_LIMIT_BYTES,
     GROQ_VISION_MODEL,
     SCREEN_ANALYSIS_MAX_COMPLETION_TOKENS,
     SCREEN_ANALYSIS_TEMPERATURE,
@@ -82,7 +83,11 @@ def test_max_completion_tokens_supports_detailed_output() -> None:
 
 
 def test_screen_analysis_uses_qwen_vision_model() -> None:
-    assert GROQ_VISION_MODEL == "qwen/qwen3.6-27b"
+    assert GROQ_VISION_MODEL == "qwen/qwen3.8-27b"
+
+
+def test_screen_analysis_limit_matches_current_groq_image_limit() -> None:
+    assert GROQ_IMAGE_SIZE_LIMIT_BYTES == 20_000_000
 
 
 def test_resolve_screen_analysis_provider_is_groq_only() -> None:

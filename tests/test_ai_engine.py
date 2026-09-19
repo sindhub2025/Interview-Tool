@@ -65,16 +65,27 @@ def test_build_context_includes_runtime_session_context_tail():
     assert "- [11:20:07] AI Response: Check index selectivity" in context
 
 
-def test_build_context_normalizes_sort_table_in_etl_context():
+def test_build_context_normalizes_profile_alias_phrase():
     transcript = [_seg("How do you compare sort and target table record counts?", "speaker")]
+    resume_profile = {
+        "normalization": {
+            "canonical_terms": ["source and target table"],
+            "aliases": {"source and target table": ["sort and target table"]},
+        },
+    }
 
     context = AIThread._build_context(
         transcript,
         session_context="ETL Tester with 8 years of Experience",
+        resume_profile=resume_profile,
     )
 
-    assert "sort and target table" not in context.lower()
-    assert "source and target table" in context.lower()
+    speaker_lines = [
+        line.lower() for line in context.splitlines() if line.startswith("[Speaker]:")
+    ]
+    assert speaker_lines
+    assert "sort and target table" not in speaker_lines[-1]
+    assert "source and target table" in speaker_lines[-1]
 
 
 def test_follow_up_detector_matches_explicit_continuation_requests():
@@ -253,30 +264,36 @@ def test_build_context_includes_resume_context_for_resume_related_question():
     assert "Job Titles: Senior Data Engineer" in context
 
 
-def test_build_context_includes_sql_profile_for_sql_question():
-    transcript = [_seg("How do COUNT and current timestamp work in SQL?", "speaker")]
+def test_build_context_includes_active_profile_normalization_guidance():
+    transcript = [_seg("How do count and current timestamp work?", "speaker")]
+    resume_profile = {
+        "normalization": {
+            "canonical_terms": ["COUNT()", "CURRENT_TIMESTAMP"],
+            "aliases": {"COUNT()": ["count"], "CURRENT_TIMESTAMP": ["current timestamp"]},
+            "role_keywords": ["analytics"],
+        },
+    }
 
     context = AIThread._build_context(
         transcript,
-        sql_profile_enabled=True,
+        resume_profile=resume_profile,
     )
 
-    assert "[SQL Profile]:" in context
-    assert "COUNT() - number of rows" in context
-    assert "CURRENT_TIMESTAMP - current date-time" in context
+    assert "[Normalization Guidance]:" in context
     assert "COUNT()" in context
+    assert "CURRENT_TIMESTAMP" in context
 
 
-def test_build_system_prompt_includes_sql_policy_when_enabled():
+def test_build_system_prompt_includes_active_profile_policy_when_profile_available():
     prompt = AIThread._build_system_prompt(
         "Base prompt",
         "",
-        sql_profile_enabled=True,
+        resume_profile={"companies": ["Microsoft"]},
     )
 
-    assert "SQL profile usage policy" in prompt
-    assert "canonical function name" in prompt
-    assert "same normalization approach for other context-backed terms" in prompt
+    assert "Resume usage policy" in prompt
+    assert "structured resume context" in prompt
+    assert "high and the corrected term is grounded in the resume" in prompt
 
 
 def test_default_system_prompt_mentions_sample_code_and_sql_queries():

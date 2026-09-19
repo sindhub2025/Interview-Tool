@@ -59,12 +59,12 @@ class SystemTrayIcon(QSystemTrayIcon):
     mode_changed = pyqtSignal(str)
     quit_requested = pyqtSignal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, visible: bool = False) -> None:
         super().__init__(_tray_icon(), parent)
         self._recording = False
         self._build_menu()
         self.activated.connect(self._on_activated)
-        self.show()
+        self.setVisible(bool(visible))
 
     # ------------------------------------------------------------------
     # Menu
@@ -134,6 +134,7 @@ class SystemTrayIcon(QSystemTrayIcon):
         self._stealth_action.setChecked(enabled)
         self._stealth_action.blockSignals(prev)
         self._set_stealth_action_label(enabled)
+        self.setVisible(not enabled)
 
     def _set_stealth_action_label(self, enabled: bool) -> None:
         if enabled:
@@ -148,6 +149,7 @@ class SystemTrayIcon(QSystemTrayIcon):
     def _on_stealth_action_toggled(self, enabled: bool) -> None:
         enabled = bool(enabled)
         self._set_stealth_action_label(enabled)
+        self.setVisible(not enabled)
         self.stealth_toggled.emit(enabled)
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:

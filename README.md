@@ -14,7 +14,7 @@
 | 🗣 Voice Activity Detection | Silero VAD — only transcribes actual speech, not silence                                                                  |
 | 📝 Real-time transcription  | `faster-whisper` (base.en by default, CPU int8 or CUDA float16)                                                           |
 | 🤖 AI suggestions           | Groq API (active provider)                                                                                                |
-| 📄 Resume-aware assistance  | Upload PDF/DOCX/TXT resume, extract structured profile, and apply conservative resume-grounded transcript term correction |
+| 📄 Active interview profile | Enter person/role/experience, upload a resume, and build local profile terms for transcript normalization and personalized answers |
 | ⌨ Global hotkeys            | `Ctrl+Shift+G` record · `Ctrl+Shift+H` hide · `Ctrl+G` AI generate                                                        |
 | 🔧 Settings dialog          | Tabs for Audio, AI, Appearance, Hotkeys — also stealthed                                                                  |
 | 💾 Auto-save                | Transcript saved to `~/.ghostmic/` on exit                                                                                |
@@ -36,7 +36,7 @@ ghostmic/
 │   ├── ai_engine.py          # Groq AI response (QThread)
 │   └── stealth.py            # SetWindowDisplayAffinity logic
 ├── services/
-│   └── resume_service.py     # Resume ingestion, extraction, and structured profile persistence
+│   └── resume_service.py     # Active profile resume ingestion, enrichment, and structured persistence
 ├── ui/
 │   ├── main_window.py        # Frameless overlay window
 │   ├── transcript_panel.py   # Auto-scrolling transcript bubbles
@@ -49,7 +49,7 @@ ghostmic/
 │   ├── hotkeys.py            # Global hotkey registration (pynput)
 │   ├── logger.py             # Rotating file logger
 │   ├── text_processing.py    # Whisper output cleanup
-│   └── resume_context.py     # Resume-aware context summary and transcript correction helpers
+│   └── resume_context.py     # Active-profile context summary and transcript correction helpers
 └── assets/
     ├── icon.ico
     └── tray_icon.png
@@ -119,7 +119,7 @@ transcription VAD setting, and resolved VAD asset paths in `startup-logs/`.
 2. **Audio** tab → select your microphone and loopback device.
 3. **AI** tab → paste your Groq API key from `console.groq.com`.
 4. Click **OK** and press **⏺** (or `Ctrl+Shift+G`) to start recording.
-5. Optional: **Resume** tab → upload your resume (PDF/DOCX/TXT) to enable resume-aware answer correction.
+5. Optional: **Resume** tab → enter person name, target role, experience, and upload a resume (PDF/DOCX/TXT) to enable active-profile normalization and personalized answers.
 
 To re-enable OpenAI later, set `ai.expose_openai_provider` to `true` in your user config file.
 

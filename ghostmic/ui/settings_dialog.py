@@ -63,7 +63,7 @@ class SettingsDialog(QDialog):
     """
 
     settings_saved = pyqtSignal(dict)
-    resume_upload_requested = pyqtSignal(str)
+    resume_upload_requested = pyqtSignal(str, dict)
     resume_remove_requested = pyqtSignal()
 
     def __init__(self, config: dict, resume_status: Dict[str, Any] | None = None, parent=None) -> None:
@@ -269,6 +269,7 @@ class SettingsDialog(QDialog):
             [
                 "openai/gpt-oss-120b",
                 "openai/gpt-oss-20b",
+                "qwen/qwen3.8-27b",
                 "qwen/qwen3.6-27b",
             ]
         )
@@ -306,12 +307,6 @@ class SettingsDialog(QDialog):
         self._resume_context_enabled.setChecked(True)
         form.addRow("Resume context:", self._resume_context_enabled)
 
-        self._sql_profile_enabled = QCheckBox(
-            "Use SQL function glossary for SQL-related questions"
-        )
-        self._sql_profile_enabled.setChecked(False)
-        form.addRow("SQL Profile:", self._sql_profile_enabled)
-
         return w
 
     # ── Tab: Resume ───────────────────────────────────────────────────
@@ -326,9 +321,23 @@ class SettingsDialog(QDialog):
         heading.setStyleSheet("font-size: 11pt; font-weight: 700;")
         layout.addWidget(heading)
 
+        profile_form = QFormLayout()
+        self._profile_person_name = QLineEdit()
+        self._profile_person_name.setPlaceholderText("e.g. Jane Doe")
+        profile_form.addRow("Person name:", self._profile_person_name)
+
+        self._profile_target_role = QLineEdit()
+        self._profile_target_role.setPlaceholderText("e.g. Senior Data Engineer")
+        profile_form.addRow("Target role:", self._profile_target_role)
+
+        self._profile_experience = QLineEdit()
+        self._profile_experience.setPlaceholderText("e.g. 7 years")
+        profile_form.addRow("Experience:", self._profile_experience)
+        layout.addLayout(profile_form)
+
         detail = QLabel(
             "Supported formats: PDF, DOCX, TXT. Resume data is extracted into a structured "
-            "local profile used for resume-aware answer correction."
+            "active profile used for transcript normalization and personalized interview answers."
         )
         detail.setWordWrap(True)
         detail.setStyleSheet("color: #8b949e;")
@@ -506,7 +515,6 @@ class SettingsDialog(QDialog):
         )
         self._session_ctx.setText(ai.get("session_context", ""))
         self._resume_context_enabled.setChecked(bool(ai.get("resume_context_enabled", True)))
-        self._sql_profile_enabled.setChecked(bool(ai.get("sql_profile_enabled", False)))
 
         # Appearance
         self._opacity_slider.setValue(int(ui.get("opacity", 0.95) * 100))
@@ -573,7 +581,6 @@ class SettingsDialog(QDialog):
         cfg["ai"]["system_prompt"] = self._system_prompt.toPlainText()
         cfg["ai"]["session_context"] = self._session_ctx.text()
         cfg["ai"]["resume_context_enabled"] = self._resume_context_enabled.isChecked()
-        cfg["ai"]["sql_profile_enabled"] = self._sql_profile_enabled.isChecked()
 
         # Appearance / UI
         cfg.setdefault("ui", {})
@@ -622,7 +629,7 @@ class SettingsDialog(QDialog):
         if not file_path:
             return
         self.set_resume_busy(True, "Processing resume…")
-        self.resume_upload_requested.emit(file_path)
+        self.resume_upload_requested.emit(file_path, self._active_profile_context())
 
     def _on_resume_remove_clicked(self) -> None:
         # Prevent duplicate clicks by entering a busy state before emitting the
@@ -663,23 +670,44 @@ class SettingsDialog(QDialog):
         has_resume = bool(self._resume_status.get("has_resume", False))
         if has_resume:
             source_name = str(self._resume_status.get("source_file_name", "Uploaded resume"))
+            person_name = str(self._resume_status.get("person_name", "")).strip()
+            target_role = str(self._resume_status.get("target_role", "")).strip()
+            experience = str(self._resume_status.get("experience", "")).strip()
+            enrichment = str(self._resume_status.get("profile_enrichment_source", "")).strip()
+            terms_count = int(self._resume_status.get("normalization_terms_count", 0) or 0)
             skills_count = int(self._resume_status.get("skills_count", 0) or 0)
             companies_count = int(self._resume_status.get("companies_count", 0) or 0)
             projects_count = int(self._resume_status.get("projects_count", 0) or 0)
             certifications_count = int(self._resume_status.get("certifications_count", 0) or 0)
+            if person_name and not self._profile_person_name.text().strip():
+                self._profile_person_name.setText(person_name)
+            if target_role and not self._profile_target_role.text().strip():
+                self._profile_target_role.setText(target_role)
+            if experience and not self._profile_experience.text().strip():
+                self._profile_experience.setText(experience)
             self._resume_status_label.setText(
-                f"Active resume: {source_name}\n"
+                f"Active profile: {person_name or 'Unnamed'}"
+                f"{f' | {target_role}' if target_role else ''}\n"
+                f"Resume: {source_name} | Normalization terms: {terms_count}"
+                f"{f' ({enrichment})' if enrichment else ''}\n"
                 f"Skills: {skills_count} | Companies: {companies_count} | "
                 f"Projects: {projects_count} | Certifications: {certifications_count}"
             )
         else:
-            self._resume_status_label.setText("No resume uploaded.")
+            self._resume_status_label.setText("No active profile.")
 
         self._resume_upload_btn.setEnabled(True)
         self._resume_remove_btn.setEnabled(has_resume)
         if message:
             self._resume_message_label.setText(message)
             self._resume_message_label.setStyleSheet("color: #3fb950;")
+
+    def _active_profile_context(self) -> Dict[str, str]:
+        return {
+            "person_name": self._profile_person_name.text().strip(),
+            "target_role": self._profile_target_role.text().strip(),
+            "experience": self._profile_experience.text().strip(),
+        }
 
     # ------------------------------------------------------------------
     # Stealth
@@ -689,8 +717,13 @@ class SettingsDialog(QDialog):
         if sys.platform != "win32":
             return
         try:
-            from ghostmic.core.stealth import apply_stealth, remove_stealth
+            from ghostmic.core.stealth import (
+                apply_stealth,
+                hide_from_taskbar,
+                remove_stealth,
+            )
             hwnd = int(self.winId())
+            hide_from_taskbar(hwnd)
             stealth_enabled = bool(self._stealth_enabled_check.isChecked())
             if stealth_enabled:
                 apply_stealth(hwnd)

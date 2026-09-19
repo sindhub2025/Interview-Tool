@@ -177,17 +177,6 @@ class NormalizerService:
         # allowing concise mic-only queries like "What is SQL?"
         if len(normalized.split()) < 3:
             return ""
-        # Apply SQL term corrections synchronously (cheap, no API call).
-        # This fixes common Whisper misrecognitions like "soda" → "COUNT()".
-        try:
-            from ghostmic.utils.sql_context import apply_sql_corrections, is_sql_related_text
-            if is_sql_related_text(normalized):
-                corrected = apply_sql_corrections(normalized)
-                corrected_text = str(corrected.get("text", "") or "").strip()
-                if corrected_text:
-                    normalized = corrected_text
-        except Exception:  # pylint: disable=broad-except
-            pass  # Never let SQL correction break the normalization pipeline
         return normalized
 
     @staticmethod

@@ -12,10 +12,9 @@ from typing import List, Optional
 from ghostmic.utils.errors import is_rate_limited as _is_rate_limited_shared
 from ghostmic.utils.logger import get_logger
 from ghostmic.utils.resume_context import (
+    build_profile_normalization_summary,
     build_resume_context_summary,
-    is_resume_related_text,
 )
-from ghostmic.utils.sql_context import build_sql_profile_summary, is_sql_related_text
 from ghostmic.utils.text_processing import ensure_question_format
 
 logger = get_logger(__name__)
@@ -31,18 +30,6 @@ NORMALIZE_SYSTEM_PROMPT = (
     "Keep the original meaning. Fix grammar, punctuation, and obvious transcription mistakes. "
     "Do not answer any question. Return strict JSON only."
 )
-
-_DBMS_ACRONYM_RE = re.compile(r"\b(?:dbms|rdbms)\b", re.IGNORECASE)
-_BAD_RDBMS_FULL_EXPANSION_RE = re.compile(
-    r"\breal[-\s]*time\s+database\s+management\s+system(?:\s*\(\s*rtdbms\s*\))?",
-    re.IGNORECASE,
-)
-_BAD_RDBMS_SHORT_EXPANSION_RE = re.compile(
-    r"\breal[-\s]*time\s+dbms(?:\s*\(\s*rtdbms\s*\))?",
-    re.IGNORECASE,
-)
-_BAD_RDBMS_ACRONYM_RE = re.compile(r"\brtdbms\b", re.IGNORECASE)
-
 
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
@@ -310,27 +297,6 @@ def _sanitize_follow_up_questions(
     return cleaned[:follow_up_count]
 
 
-def _correct_database_acronym_expansions(normalized_text: str, source_text: str) -> str:
-    normalized = _normalize_whitespace(normalized_text)
-    source = _normalize_whitespace(source_text).lower()
-    if not normalized or "rdbms" not in source or "rtdbms" in source:
-        return normalized
-
-    corrected = _BAD_RDBMS_FULL_EXPANSION_RE.sub(
-        "Relational Database Management System (RDBMS)",
-        normalized,
-    )
-    corrected = _BAD_RDBMS_SHORT_EXPANSION_RE.sub(
-        "Relational Database Management System (RDBMS)",
-        corrected,
-    )
-    corrected = _BAD_RDBMS_ACRONYM_RE.sub(
-        "Relational Database Management System (RDBMS)",
-        corrected,
-    )
-    return corrected
-
-
 @dataclass(frozen=True)
 class QuestionNormalizationResult:
     normalized_question: str
@@ -347,10 +313,7 @@ def _parse_normalization_result(
         normalized_source = str(payload.get("normalized_question", "") or "")
         if not normalized_source.strip():
             normalized_source = fallback_question
-        normalized = _correct_database_acronym_expansions(
-            normalized_source,
-            fallback_question,
-        )
+        normalized = _normalize_whitespace(normalized_source)
         normalized = ensure_question_format(normalized)
         follow_ups = _sanitize_follow_up_questions(
             payload.get("follow_up_questions", []),
@@ -361,7 +324,7 @@ def _parse_normalization_result(
             follow_up_questions=follow_ups,
         )
 
-    normalized = _correct_database_acronym_expansions(model_text, fallback_question)
+    normalized = _normalize_whitespace(model_text)
     normalized = ensure_question_format(normalized)
     follow_ups = _sanitize_follow_up_questions([], normalized)
     return QuestionNormalizationResult(
@@ -374,12 +337,6 @@ def _build_normalization_context_block(question_text: str, ai_config: dict) -> s
     """Build a compact context block for transcript normalization prompts."""
     lines: List[str] = []
 
-    if _DBMS_ACRONYM_RE.search(question_text):
-        lines.append("Database acronym context:")
-        lines.append("- DBMS = Database Management System")
-        lines.append("- RDBMS = Relational Database Management System")
-        lines.append("- Preserve RDBMS as relational, not real-time.")
-
     session_context = _normalize_whitespace(ai_config.get("session_context", ""))
     if session_context:
         lines.append("Session context:")
@@ -387,18 +344,15 @@ def _build_normalization_context_block(question_text: str, ai_config: dict) -> s
 
     resume_profile = ai_config.get("resume_profile")
     resume_context_enabled = bool(ai_config.get("resume_context_enabled", True))
-    if resume_context_enabled and is_resume_related_text(question_text, resume_profile):
+    if resume_context_enabled and isinstance(resume_profile, dict):
+        normalization_lines = build_profile_normalization_summary(resume_profile)
+        if normalization_lines:
+            lines.append("Active profile normalization context:")
+            lines.extend(f"- {line}" for line in normalization_lines)
         resume_lines = build_resume_context_summary(resume_profile, max_items=6)
         if resume_lines:
-            lines.append("Resume context:")
+            lines.append("Active profile resume context:")
             lines.extend(f"- {line}" for line in resume_lines)
-
-    sql_profile_enabled = bool(ai_config.get("sql_profile_enabled", False))
-    if sql_profile_enabled or is_sql_related_text(question_text) or is_sql_related_text(session_context):
-        sql_lines = build_sql_profile_summary(max_items_per_section=6)
-        if sql_lines:
-            lines.append("SQL context:")
-            lines.extend(f"- {line}" for line in sql_lines)
 
     return "\n".join(lines).strip()
 
@@ -446,7 +400,7 @@ def normalize_question_with_followups(
     context_block = _build_normalization_context_block(cleaned_question, ai_config)
     prompt_sections = [
         "Normalize the transcript below into a clear interview question.",
-        "Use the context only to resolve resume facts, SQL terminology, names, and technical shorthand.",
+        "Use the context only to resolve active-profile facts, names, domain terms, and technical shorthand.",
         "Preserve the original intent. Do not answer the question.",
         "Return strict JSON only with this exact schema: {\"normalized_question\":\"...\",\"follow_up_questions\":[\"...\",\"...\",\"...\"]}.",
         "Rules:",

@@ -47,3 +47,35 @@ def test_vad_emits_segment_after_silence_boundary(monkeypatch):
     assert len(emitted) == 1
     assert emitted[0][0].size > 0
     assert emitted[0][1] == "speaker"
+
+
+def test_vad_keeps_brief_pause_inside_same_segment(monkeypatch):
+    monkeypatch.setattr(vad_module, "SPEECH_START_WINDOWS", 1)
+
+    emitted = []
+    thread = vad_module.VADThread(AudioBuffer())
+    thread._on_segment = lambda audio, source: emitted.append((audio, source))
+    state = thread._make_state()
+
+    speech_windows = 16
+    brief_pause_windows = max(1, vad_module.SPEECH_END_WINDOWS // 2)
+    more_speech_windows = 8
+    probabilities = iter(
+        [0.95] * speech_windows
+        + [0.1] * brief_pause_windows
+        + [0.95] * more_speech_windows
+    )
+    thread._vad_probability = lambda _window: next(probabilities)  # type: ignore[method-assign]
+
+    thread._process_chunk(
+        np.ones(
+            512 * (speech_windows + brief_pause_windows + more_speech_windows),
+            dtype=np.int16,
+        )
+        * 1400,
+        "user",
+        state,
+    )
+
+    assert emitted == []
+    assert state["state"] == vad_module.VADState.SPEAKING

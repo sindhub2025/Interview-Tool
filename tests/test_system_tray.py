@@ -25,6 +25,7 @@ def test_stealth_action_is_checkable_and_enabled_by_default() -> None:
         assert tray._stealth_action.isCheckable() is True
         assert tray._stealth_action.isChecked() is True
         assert "Hide from Windows Capture" in tray._stealth_action.text()
+        assert tray.isVisible() is False
     finally:
         tray.hide()
         tray.deleteLater()
@@ -43,11 +44,13 @@ def test_set_stealth_enabled_updates_action_without_emitting_signal() -> None:
         assert emitted == [False]
         assert tray._stealth_action.isChecked() is False
         assert "Allow Screenshots" in tray._stealth_action.text()
+        assert tray.isVisible() is True
 
         tray.set_stealth_enabled(True)
         assert emitted == [False]
         assert tray._stealth_action.isChecked() is True
         assert "Hide from Windows Capture" in tray._stealth_action.text()
+        assert tray.isVisible() is False
     finally:
         tray.hide()
         tray.deleteLater()

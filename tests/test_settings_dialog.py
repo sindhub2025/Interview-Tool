@@ -25,7 +25,6 @@ def _base_config(*, stealth_enabled: bool = True) -> dict:
             "temperature": 0.7,
             "trigger_mode": "auto",
             "resume_context_enabled": True,
-            "sql_profile_enabled": False,
         },
         "audio": {
             "sample_rate": 16000,
@@ -112,6 +111,7 @@ def test_settings_dialog_exposes_only_supported_groq_models() -> None:
         ] == [
             "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b",
             "qwen/qwen3.6-27b",
         ]
     finally:

@@ -1158,8 +1158,13 @@ class MainWindow(QMainWindow):
         if sys.platform != "win32":
             return
         try:
-            from ghostmic.core.stealth import apply_stealth, remove_stealth
+            from ghostmic.core.stealth import (
+                apply_stealth,
+                hide_from_taskbar,
+                remove_stealth,
+            )
             hwnd = int(self.winId())
+            hide_from_taskbar(hwnd)
             stealth_enabled = bool(
                 self._config.get("ui", {}).get("stealth_enabled", True)
             )
@@ -1408,6 +1413,7 @@ class MainWindow(QMainWindow):
             flags |= Qt.WindowType.WindowStaysOnTopHint
         else:
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        flags |= Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
         self.setWindowFlags(flags)
         self.show()
 

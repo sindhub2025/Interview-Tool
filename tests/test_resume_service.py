@@ -142,6 +142,39 @@ def test_profile_persists_across_service_reloads(tmp_path):
     assert "Microsoft" in profile.get("companies", [])
 
 
+def test_ingest_resume_stores_active_profile_metadata(resume_service, tmp_path):
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        (
+            "Jane Doe\n"
+            "Experience\n"
+            "Acme - Senior Data Engineer | 2022 - Present\n"
+            "Skills\n"
+            "Python, Snowflake, Airflow"
+        ),
+        encoding="utf-8",
+    )
+
+    status = resume_service.ingest_resume(
+        str(resume_path),
+        profile_context={
+            "person_name": "Jane Candidate",
+            "target_role": "Lead Data Engineer",
+            "experience": "8 years",
+        },
+    )
+    profile = resume_service.get_profile()
+
+    assert status["person_name"] == "Jane Candidate"
+    assert status["target_role"] == "Lead Data Engineer"
+    assert status["experience"] == "8 years"
+    assert status["normalization_terms_count"] > 0
+    assert profile is not None
+    assert profile["interview"]["profile_key"] == "jane-candidate-lead-data-engineer"
+    assert "Lead Data Engineer" in profile["normalization"]["canonical_terms"]
+    assert profile["normalization"]["source"] == "local"
+
+
 def test_skills_inferred_from_work_history_without_skills_section(resume_service):
     resume_text = """
 John Smith

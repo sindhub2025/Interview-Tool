@@ -7,6 +7,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMainWindow
 
@@ -90,6 +91,21 @@ def test_docked_mode_clears_the_main_window_background_style() -> None:
     assert "background-color: transparent" in window._root.styleSheet()
     assert window.geometry().width() == 120
     assert window.geometry().height() == 20
+
+
+def test_pin_toggle_preserves_tool_window_flag() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    try:
+        window._on_pin_toggled(False)
+        assert window.windowFlags() & Qt.WindowType.Tool
+
+        window._on_pin_toggled(True)
+        assert window.windowFlags() & Qt.WindowType.Tool
+    finally:
+        window.close()
 
 
 def test_speaker_question_layout_preserves_majority_height_for_ai_panel() -> None:
