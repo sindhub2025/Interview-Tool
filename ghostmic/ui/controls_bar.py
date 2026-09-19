@@ -215,7 +215,6 @@ class ControlsBar(QWidget):
     def _apply_mic_button_state(self) -> None:
         if self._mic_enabled:
             self._mic_btn.setText("Mic On")
-            self._mic_btn.setToolTip("Microphone capture enabled")
             self._mic_btn.setStyleSheet(
                 "QPushButton {"
                 " background-color: rgba(63, 185, 80, 0.20);"
@@ -230,7 +229,6 @@ class ControlsBar(QWidget):
             return
 
         self._mic_btn.setText("Mic Off")
-        self._mic_btn.setToolTip("Speaker-only capture (microphone ignored)")
         self._mic_btn.setStyleSheet(
             "QPushButton {"
             " background-color: rgba(139, 148, 158, 0.16);"

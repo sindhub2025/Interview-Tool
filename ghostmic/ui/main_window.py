@@ -33,9 +33,11 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor,
     QFont,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QShortcut,
     QWheelEvent,
 )
 from PyQt6.QtWidgets import (
@@ -344,6 +346,9 @@ class MainWindow(QMainWindow):
         self._dictation_timer.timeout.connect(self._commit_dictation_text)
 
         self._setup_window()
+        self._quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
+        self._quit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._quit_shortcut.activated.connect(self._on_close)
         self._build_ui()
         if self._docked:
             self._title_bar.set_docked(True)
@@ -1484,7 +1489,6 @@ class MainWindow(QMainWindow):
         x = available.x() + (available.width() - dock_width) // 2
         y = available.y()
 
-        # Do not set a window tooltip while docked; keep the dock pill passive.
         self.show()
         self.raise_()
         self.activateWindow()

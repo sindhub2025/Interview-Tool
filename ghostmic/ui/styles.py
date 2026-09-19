@@ -218,16 +218,6 @@ QGroupBox::title {{
     color: {TEXT_SECONDARY};
 }}
 
-/* ─── Tool tip ────────────────────────────────────────────────────── */
-QToolTip {{
-    background-color: {BG_CARD};
-    color: {TEXT_PRIMARY};
-    border: 1px solid {BORDER};
-    border-radius: 6px;
-    padding: 6px 8px;
-    font-size: {FONT_SIZE_SMALL}pt;
-}}
-
 /* ─── Status bar ──────────────────────────────────────────────────── */
 QLabel#status_label {{
     color: {TEXT_SECONDARY};
