@@ -79,6 +79,11 @@ def build_resume_context_summary(
     if not isinstance(profile, dict):
         return []
 
+    interview = profile.get("interview", {}) if isinstance(profile.get("interview"), dict) else {}
+    context_override = str(interview.get("context_override", "")).strip()
+    if context_override:
+        return [line.strip() for line in context_override.splitlines() if line.strip()][:10]
+
     lines: List[str] = []
     identity = profile.get("identity", {}) if isinstance(profile.get("identity"), dict) else {}
     full_name = str(identity.get("full_name", "")).strip()
@@ -90,7 +95,6 @@ def build_resume_context_summary(
     if location:
         lines.append(f"Location: {location}")
 
-    interview = profile.get("interview", {}) if isinstance(profile.get("interview"), dict) else {}
     target_role = str(interview.get("target_role", "")).strip()
     experience = str(interview.get("experience", "")).strip()
     if target_role:

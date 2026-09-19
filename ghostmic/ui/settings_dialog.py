@@ -63,6 +63,7 @@ class SettingsDialog(QDialog):
     """
 
     settings_saved = pyqtSignal(dict)
+    resume_context_saved = pyqtSignal(str)
     resume_upload_requested = pyqtSignal(str, dict)
     resume_remove_requested = pyqtSignal()
 
@@ -343,6 +344,14 @@ class SettingsDialog(QDialog):
         detail.setStyleSheet("color: #8b949e;")
         layout.addWidget(detail)
 
+        context_label = QLabel("Review the extracted context before using it in interview answers:")
+        context_label.setWordWrap(True)
+        layout.addWidget(context_label)
+        self._resume_context_edit = QTextEdit()
+        self._resume_context_edit.setPlaceholderText("Extracted resume context will appear here")
+        self._resume_context_edit.setMinimumHeight(170)
+        layout.addWidget(self._resume_context_edit)
+
         self._resume_status_label = QLabel("")
         self._resume_status_label.setWordWrap(True)
         self._resume_status_label.setStyleSheet(
@@ -582,6 +591,8 @@ class SettingsDialog(QDialog):
         cfg["ai"]["session_context"] = self._session_ctx.text()
         cfg["ai"]["resume_context_enabled"] = self._resume_context_enabled.isChecked()
 
+        self.resume_context_saved.emit(self._resume_context_edit.toPlainText())
+
         # Appearance / UI
         cfg.setdefault("ui", {})
         cfg["ui"]["opacity"] = self._opacity_slider.value() / 100.0
@@ -669,6 +680,9 @@ class SettingsDialog(QDialog):
         self._resume_status = dict(status or {})
         has_resume = bool(self._resume_status.get("has_resume", False))
         if has_resume:
+            self._resume_context_edit.setPlainText(
+                str(self._resume_status.get("resume_context", ""))
+            )
             source_name = str(self._resume_status.get("source_file_name", "Uploaded resume"))
             person_name = str(self._resume_status.get("person_name", "")).strip()
             target_role = str(self._resume_status.get("target_role", "")).strip()
@@ -694,6 +708,7 @@ class SettingsDialog(QDialog):
                 f"Projects: {projects_count} | Certifications: {certifications_count}"
             )
         else:
+            self._resume_context_edit.clear()
             self._resume_status_label.setText("No active profile.")
 
         self._resume_upload_btn.setEnabled(True)

@@ -22,6 +22,7 @@ import dataclasses
 from typing import Any, Dict, List, Optional, Sequence
 
 from ghostmic.utils.logger import get_logger
+from ghostmic.utils.resume_context import build_resume_context_summary
 
 logger = get_logger(__name__)
 
@@ -304,6 +305,7 @@ class ResumeStatus:
     person_name: str
     target_role: str
     experience: str
+    resume_context: str
     profile_key: str
     profile_enrichment_source: str
     uploaded_at: float
@@ -365,6 +367,7 @@ class ResumeService:
                 person_name="",
                 target_role="",
                 experience="",
+                resume_context="",
                 profile_key="",
                 profile_enrichment_source="",
                 uploaded_at=0.0,
@@ -389,6 +392,7 @@ class ResumeService:
             person_name=str(interview.get("person_name", "")),
             target_role=str(interview.get("target_role", "")),
             experience=str(interview.get("experience", "")),
+            resume_context=self.get_editable_context(profile),
             profile_key=str(interview.get("profile_key", "")),
             profile_enrichment_source=str(normalization.get("source", "")),
             uploaded_at=float(meta.get("uploaded_at", 0.0) or 0.0),
@@ -400,6 +404,34 @@ class ResumeService:
             normalization_terms_count=len(normalization.get("canonical_terms", []) or []),
         )
         return status.to_dict()
+
+    def get_editable_context(self, profile: Optional[Dict[str, Any]] = None) -> str:
+        """Return the prompt-ready resume context shown for user review."""
+        active_profile = profile if isinstance(profile, dict) else self._profile_cache
+        if not isinstance(active_profile, dict):
+            return ""
+        interview = active_profile.get("interview", {})
+        if isinstance(interview, dict):
+            override = str(interview.get("context_override", "")).strip()
+            if override:
+                return override
+        return "\n".join(build_resume_context_summary(active_profile))
+
+    def update_context(self, context: str) -> None:
+        """Persist the user's reviewed resume context without re-ingesting."""
+        if not isinstance(self._profile_cache, dict):
+            return
+        profile = copy.deepcopy(self._profile_cache)
+        interview = profile.setdefault("interview", {})
+        if not isinstance(interview, dict):
+            interview = {}
+            profile["interview"] = interview
+        interview["context_override"] = str(context or "").strip()
+        meta = profile.setdefault("meta", {})
+        if isinstance(meta, dict):
+            meta["updated_at"] = time.time()
+        self._write_profile(profile)
+        self._profile_cache = profile
 
     def ingest_resume(
         self,

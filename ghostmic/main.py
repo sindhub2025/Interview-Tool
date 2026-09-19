@@ -586,6 +586,16 @@ class GhostMicApp:
             self._setup_system_tray(app)
             _write_startup_trace("run.setup_system_tray.ok")
 
+            # Present the controls before background model/audio startup so
+            # the app is usable while those workers initialise.
+            startup_step = "show_window"
+            if not self._args.minimized and self._window:
+                self._window.show()
+            _write_startup_trace(
+                "run.show_window.ok",
+                shown=bool(not self._args.minimized and self._window),
+            )
+
             startup_step = "start_model_loader"
             self._start_model_loader()
             _write_startup_trace("run.start_model_loader.ok")
@@ -612,14 +622,6 @@ class GhostMicApp:
             startup_step = "start_session_context_compactor"
             self._session_context_compactor.start()
             _write_startup_trace("run.session_context_compactor.ok")
-
-            startup_step = "show_window"
-            if not self._args.minimized and self._window:
-                self._window.show()
-            _write_startup_trace(
-                "run.show_window.ok",
-                shown=bool(not self._args.minimized and self._window),
-            )
 
             startup_step = "sync_tray_state"
             if self._tray and self._window:
@@ -1312,12 +1314,27 @@ class GhostMicApp:
         ).start()
 
     def _sync_startup_mic_state(self) -> None:
-        """Prime microphone capture during startup when mic mode is enabled."""
+        """Defer saved mic activation until the Qt event loop is usable."""
         if not self._is_mic_capture_enabled():
             return
 
-        self._logger.info("Startup mic capture is enabled; priming microphone backend.")
-        self._prime_mic_capture_async()
+        if self._window:
+            self._window.controls.set_mic_enabled(True)
+        self._logger.info("Startup mic capture is enabled; scheduling microphone session.")
+        self._schedule_startup_mic_activation()
+
+    def _schedule_startup_mic_activation(self) -> None:
+        """Start saved mic mode after startup returns control to Qt."""
+        try:
+            from PyQt6.QtCore import QTimer
+
+            QTimer.singleShot(0, self._activate_startup_mic)
+        except ImportError:
+            self._activate_startup_mic()
+
+    def _activate_startup_mic(self) -> None:
+        if self._is_mic_capture_enabled() and hasattr(self, "_on_mic_toggled"):
+            self._on_mic_toggled(True)
 
     def _enable_mic_capture_live(self) -> bool:
         """Enable microphone capture without restarting speaker/VAD threads."""
@@ -2455,6 +2472,7 @@ class GhostMicApp:
                 parent=self._window,
             )
             dlg.settings_saved.connect(self._on_settings_saved)
+            dlg.resume_context_saved.connect(self._on_resume_context_saved)
             dlg.resume_upload_requested.connect(
                 lambda file_path, profile_context, dialog=dlg: self._on_resume_upload_requested(
                     file_path,
@@ -2466,6 +2484,11 @@ class GhostMicApp:
                 lambda dialog=dlg: self._on_resume_remove_requested(dialog)
             )
             dlg.exec()
+
+    def _on_resume_context_saved(self, context: str) -> None:
+        self._resume_service.update_context(context)
+        self._resume_profile = self._resume_service.get_profile()
+        self._refresh_ai_runtime_context()
 
     def _on_resume_upload_requested(
         self,

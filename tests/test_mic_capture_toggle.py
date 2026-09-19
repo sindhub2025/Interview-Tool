@@ -348,15 +348,16 @@ def test_mic_runtime_failure_after_fallback_switches_to_speaker_only(monkeypatch
     assert app._window.controls.mic_enabled_calls == [False]
 
 
-def test_startup_mic_state_primes_enabled_microphone(monkeypatch):
+def test_startup_mic_state_starts_enabled_microphone_session(monkeypatch):
     app = _make_app(capture_mic=True)
     called = []
 
-    app._prime_mic_capture_async = lambda: called.append("prime")
+    app._on_mic_toggled = lambda enabled: called.append(("toggle", enabled))
+    app._schedule_startup_mic_activation = lambda: app._activate_startup_mic()
 
     app._sync_startup_mic_state()
 
-    assert called == ["prime"]
+    assert called == [("toggle", True)]
 
 
 def test_startup_mic_state_skips_when_disabled(monkeypatch):

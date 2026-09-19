@@ -175,6 +175,27 @@ def test_ingest_resume_stores_active_profile_metadata(resume_service, tmp_path):
     assert profile["normalization"]["source"] == "local"
 
 
+def test_resume_context_can_be_reviewed_and_updated(resume_service, tmp_path):
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        "Jane Doe\nSummary\nData engineer with Python experience\nSkills\nPython, SQL",
+        encoding="utf-8",
+    )
+
+    status = resume_service.ingest_resume(str(resume_path))
+    assert "Name: Jane Doe" in status["resume_context"]
+    assert "Skills: Python, SQL" in status["resume_context"]
+
+    resume_service.update_context("Name: Corrected Candidate\nTarget Role: Platform Engineer")
+
+    assert resume_service.get_status()["resume_context"] == (
+        "Name: Corrected Candidate\nTarget Role: Platform Engineer"
+    )
+    assert resume_service.get_profile()["interview"]["context_override"] == (
+        "Name: Corrected Candidate\nTarget Role: Platform Engineer"
+    )
+
+
 def test_skills_inferred_from_work_history_without_skills_section(resume_service):
     resume_text = """
 John Smith
