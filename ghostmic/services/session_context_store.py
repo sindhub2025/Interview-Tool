@@ -62,11 +62,17 @@ class SessionContextStore:
             return
         source = str(getattr(segment, "source", ""))
         confidence = float(getattr(segment, "confidence", 1.0))
+        raw_stt_text = str(getattr(segment, "raw_stt_text", "") or text).strip()
+        normalized_text = str(getattr(segment, "normalized_text", "") or text).strip()
         self.append_event(
             "transcript",
             text,
             source=source,
-            metadata={"confidence": round(confidence, 4)},
+            metadata={
+                "confidence": round(confidence, 4),
+                "raw_stt_text": raw_stt_text,
+                "normalized_text": normalized_text,
+            },
         )
 
     def append_typed_prompt(self, prompt: str, refine: bool) -> None:

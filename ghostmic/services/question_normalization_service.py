@@ -16,6 +16,10 @@ from ghostmic.utils.resume_context import (
     build_resume_context_summary,
 )
 from ghostmic.utils.text_processing import ensure_question_format
+from ghostmic.services.normalizer_service import (
+    NormalizationContext,
+    normalize_deterministically,
+)
 
 logger = get_logger(__name__)
 
@@ -25,10 +29,9 @@ DEFAULT_TIMEOUT_SECONDS = 20.0
 DEFAULT_FOLLOW_UP_COUNT = 3
 
 NORMALIZE_SYSTEM_PROMPT = (
-    "You are an interview assistant that rewrites noisy speech-to-text interview questions "
-    "into clear written English and predicts realistic follow-up interview questions. "
-    "Keep the original meaning. Fix grammar, punctuation, and obvious transcription mistakes. "
-    "Do not answer any question. Return strict JSON only."
+    "You normalize one noisy speech-to-text item using compact conversational context. "
+    "Preserve meaning and never invent a technology, company, person, product, or concept. "
+    "Only make strongly supported corrections. Return strict JSON only."
 )
 
 try:
@@ -301,6 +304,13 @@ def _sanitize_follow_up_questions(
 class QuestionNormalizationResult:
     normalized_question: str
     follow_up_questions: List[str]
+    normalized_text: str = ""
+    is_question: bool = True
+    question_type: str = "direct"
+    topic: str = ""
+    corrections: List[dict] | None = None
+    continuation_of_previous: bool = False
+    referenced_entities: List[str] | None = None
 
 
 def _parse_normalization_result(
@@ -310,7 +320,9 @@ def _parse_normalization_result(
 ) -> QuestionNormalizationResult:
     payload = _extract_json_payload(model_text)
     if payload is not None:
-        normalized_source = str(payload.get("normalized_question", "") or "")
+        normalized_source = str(
+            payload.get("normalized_text", payload.get("normalized_question", "")) or ""
+        )
         if not normalized_source.strip():
             normalized_source = fallback_question
         normalized = _normalize_whitespace(normalized_source)
@@ -322,6 +334,13 @@ def _parse_normalization_result(
         return QuestionNormalizationResult(
             normalized_question=normalized,
             follow_up_questions=follow_ups,
+            normalized_text=normalized,
+            is_question=bool(payload.get("is_question", True)),
+            question_type=str(payload.get("question_type", "direct") or "direct"),
+            topic=str(payload.get("topic", "") or ""),
+            corrections=list(payload.get("corrections", []) or []),
+            continuation_of_previous=bool(payload.get("continuation_of_previous", False)),
+            referenced_entities=list(payload.get("referenced_entities", []) or []),
         )
 
     normalized = _normalize_whitespace(model_text)
@@ -330,11 +349,18 @@ def _parse_normalization_result(
     return QuestionNormalizationResult(
         normalized_question=normalized,
         follow_up_questions=follow_ups,
+        normalized_text=normalized,
+        corrections=[],
+        referenced_entities=[],
     )
 
 
 def _build_normalization_context_block(question_text: str, ai_config: dict) -> str:
     """Build a compact context block for transcript normalization prompts."""
+    supplied_context = ai_config.get("normalization_context")
+    if isinstance(supplied_context, NormalizationContext):
+        return supplied_context.prompt_block()
+
     lines: List[str] = []
 
     session_context = _normalize_whitespace(ai_config.get("session_context", ""))
@@ -357,6 +383,22 @@ def _build_normalization_context_block(question_text: str, ai_config: dict) -> s
     return "\n".join(lines).strip()
 
 
+def _deterministic_question_result(context: NormalizationContext) -> QuestionNormalizationResult:
+    result = normalize_deterministically(context)
+    return QuestionNormalizationResult(
+        normalized_question=ensure_question_format(result.normalized_text)
+        if result.is_question else result.normalized_text,
+        follow_up_questions=_sanitize_follow_up_questions([], result.normalized_text),
+        normalized_text=result.normalized_text,
+        is_question=result.is_question,
+        question_type=result.question_type,
+        topic=result.topic,
+        corrections=[correction.__dict__ for correction in result.corrections],
+        continuation_of_previous=result.continuation_of_previous,
+        referenced_entities=list(result.referenced_entities),
+    )
+
+
 def normalize_question_with_followups(
     question_text: str,
     ai_config: dict,
@@ -366,6 +408,23 @@ def normalize_question_with_followups(
     if not cleaned_question:
         raise ValueError("Question text is empty.")
 
+    supplied_context = ai_config.get("normalization_context")
+    profile = ai_config.get("resume_profile")
+    profile_normalization = profile.get("normalization", {}) if isinstance(profile, dict) else {}
+    profile_aliases = profile_normalization.get("aliases", {}) if isinstance(profile_normalization, dict) else {}
+    profile_terms = profile_normalization.get("canonical_terms", []) if isinstance(profile_normalization, dict) else []
+    context = supplied_context if isinstance(supplied_context, NormalizationContext) else NormalizationContext(
+        current_raw_transcript=cleaned_question,
+        speaker_source=str(ai_config.get("speaker_source", "speaker")),
+        previous_normalized_interviewer_question=str(ai_config.get("previous_question", "")),
+        previous_candidate_answer=str(ai_config.get("previous_answer", "")),
+        recent_conversation_turns=tuple(ai_config.get("recent_turns", ()) or ()),
+        current_detected_topic=str(ai_config.get("current_topic", "")),
+        known_technical_terms=tuple(ai_config.get("known_technical_terms", ()) or ()) + tuple(profile_terms or ()),
+        resume_profile_aliases=profile_aliases if isinstance(profile_aliases, dict) else {},
+        previous_normalized_terms=tuple(ai_config.get("previous_normalized_terms", ()) or ()),
+        screen_derived_context=str(ai_config.get("screen_context", "")),
+    )
     backend = _resolve_backend(ai_config)
     retries = int(ai_config.get("question_normalization_retries", DEFAULT_MAX_RETRIES))
     retries = max(1, retries)
@@ -375,26 +434,30 @@ def normalize_question_with_followups(
     timeout = float(
         ai_config.get("question_normalization_timeout", DEFAULT_TIMEOUT_SECONDS)
     )
+    fallback = _deterministic_question_result(context)
+    deadline = time.monotonic() + max(0.1, timeout)
 
     if backend == "openai":
         api_key = str(ai_config.get("openai_api_key", "")).strip()
         if not api_key:
-            raise ValueError("OpenAI API key not set. Add it in Settings -> AI.")
+            return fallback
         model = str(ai_config.get("openai_model", "gpt-5-mini")).strip() or "gpt-5-mini"
         try:
             from openai import OpenAI  # type: ignore[import]
         except ImportError as exc:
-            raise RuntimeError("openai package not installed. Run: pip install openai") from exc
+            logger.warning("Question normalization package unavailable: %s", exc)
+            return fallback
         client = OpenAI(api_key=api_key)
     else:
         api_key = str(ai_config.get("groq_api_key", "")).strip()
         if not api_key:
-            raise ValueError("Groq API key not set. Add it in Settings -> AI.")
+            return fallback
         model = str(ai_config.get("groq_model", "openai/gpt-oss-120b")).strip() or "openai/gpt-oss-120b"
         try:
             from openai import OpenAI  # type: ignore[import]
         except ImportError as exc:
-            raise RuntimeError("openai package not installed. Run: pip install openai") from exc
+            logger.warning("Question normalization package unavailable: %s", exc)
+            return fallback
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
 
     context_block = _build_normalization_context_block(cleaned_question, ai_config)
@@ -402,7 +465,7 @@ def normalize_question_with_followups(
         "Normalize the transcript below into a clear interview question.",
         "Use the context only to resolve active-profile facts, names, domain terms, and technical shorthand.",
         "Preserve the original intent. Do not answer the question.",
-        "Return strict JSON only with this exact schema: {\"normalized_question\":\"...\",\"follow_up_questions\":[\"...\",\"...\",\"...\"]}.",
+        "Return strict JSON only with normalized_text, is_question, question_type, topic, corrections, continuation_of_previous, referenced_entities, and follow_up_questions.",
         "Rules:",
         "1) Keep the normalized question faithful to the speaker intent.",
         "2) follow_up_questions must contain exactly 3 realistic real-world interview follow-up questions.",
@@ -417,6 +480,9 @@ def normalize_question_with_followups(
     user_prompt = "\n\n".join(prompt_sections)
 
     for attempt in range(retries):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -426,11 +492,13 @@ def normalize_question_with_followups(
                 ],
                 temperature=0.2,
                 max_tokens=512,
-                timeout=timeout,
+                timeout=min(timeout, max(0.1, remaining)),
                 stream=False,
             )
             raw_result = _extract_response_text(response)
             if raw_result:
+                if _extract_json_payload(raw_result) is None:
+                    raise RuntimeError("Normalization returned malformed JSON.")
                 return _parse_normalization_result(
                     raw_result,
                     fallback_question=cleaned_question,
@@ -450,11 +518,12 @@ def normalize_question_with_followups(
                     attempt + 1,
                     retries,
                 )
-                time.sleep(delay)
+                time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
                 continue
-            raise
+            logger.warning("Question normalization failed; using deterministic fallback: %s", exc)
+            break
 
-    raise RuntimeError("Question normalization failed after retries.")
+    return fallback
 
 
 def normalize_question(question_text: str, ai_config: dict) -> str:

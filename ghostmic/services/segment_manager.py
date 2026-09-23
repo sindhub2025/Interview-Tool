@@ -17,6 +17,7 @@ class NormalizedTranscriptSegment:
     source_chunk_ids: list[str]
     normalized_text: str
     source: str
+    raw_stt_text: str = ""
     sent_to_ai: bool = False
     created_at: float = field(default_factory=time.time)
 
@@ -102,6 +103,7 @@ class SegmentManager:
                 source_chunk_ids=span_ids,
                 normalized_text=candidate.normalized_text,
                 source=candidate.source,
+                raw_stt_text=candidate.raw_stt_text or candidate.normalized_text,
             )
             emitted.append(segment)
             self._remember_segment_key(segment_key)

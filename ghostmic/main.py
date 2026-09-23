@@ -48,6 +48,7 @@ from ghostmic.services.normalizer_service import NormalizerService
 from ghostmic.services.segment_manager import SegmentManager
 from ghostmic.services.ai_trigger_service import AITriggerService
 from ghostmic.services.question_extraction_service import QuestionExtractionService
+from ghostmic.services.conversation_state import ConversationState
 
 # Logger is set up in _main() after parsing --debug, but we need it here
 # for module-level imports that may log warnings.
@@ -531,13 +532,20 @@ class GhostMicApp:
         )
         self._runtime_state = RuntimeStateCache(runtime_state_path)
         self._session_context_store = SessionContextStore()
+        self._resume_service = ResumeService()
+        self._resume_profile = self._resume_service.get_profile()
+        self._conversation_state = ConversationState(
+            max_recent_turns=int(self._config.get("ai", {}).get("conversation_state_max_turns", 12)),
+            max_recent_entities=int(self._config.get("ai", {}).get("conversation_state_max_entities", 48)),
+            max_recent_topics=int(self._config.get("ai", {}).get("conversation_state_max_topics", 24)),
+            max_state_chars=int(self._config.get("ai", {}).get("conversation_state_max_chars", 12000)),
+        )
+        self._conversation_state.update_resume_context(self._resume_profile)
         self._logger.info("Session context file created: %s", self._session_context_store.path)
         self._session_context_compactor = SessionContextCompactor(
             self._session_context_store,
             self._config.get("ai", {}),
         )
-        self._resume_service = ResumeService()
-        self._resume_profile = self._resume_service.get_profile()
         self._ensure_streaming_pipeline_initialized()
 
     def run(self) -> int:
@@ -793,9 +801,69 @@ class GhostMicApp:
             from ghostmic.services.question_normalization_service import (
                 QuestionNormalizationWorker,
             )
+            from ghostmic.services.normalizer_service import NormalizationContext
+
+            with self._transcript_lock:
+                recent_history = list(self._ai_context_history[-6:])
+            semantic_snapshot = {}
+            conversation_state = getattr(self, "_conversation_state", None)
+            if conversation_state is not None:
+                semantic_snapshot = conversation_state.snapshot()
+            previous_question = ""
+            previous_answer = ""
+            for history_item in reversed(recent_history[:-1]):
+                history_text = str(getattr(history_item, "normalized_text", "") or getattr(history_item, "text", "")).strip()
+                if not history_text:
+                    continue
+                if str(getattr(history_item, "source", "")).lower() == "speaker" and not previous_question:
+                    previous_question = history_text
+                elif str(getattr(history_item, "source", "")).lower() != "speaker" and not previous_answer:
+                    previous_answer = history_text
+            previous_question = str(
+                semantic_snapshot.get("previous_interviewer_question", previous_question)
+            )
+            previous_answer = str(
+                semantic_snapshot.get("latest_candidate_answer", previous_answer)
+            )
+
+            ai_config = self._build_ai_runtime_config()
+            profile = ai_config.get("resume_profile") if isinstance(ai_config.get("resume_profile"), dict) else {}
+            profile_normalization = profile.get("normalization", {}) if isinstance(profile, dict) else {}
+            ai_config["normalization_context"] = NormalizationContext(
+                current_raw_transcript=raw_text,
+                speaker_source="speaker",
+                timestamp=time.time(),
+                previous_normalized_interviewer_question=previous_question,
+                previous_candidate_answer=previous_answer,
+                recent_conversation_turns=tuple(
+                    f"{item.get('speaker', 'unknown')}: {item.get('normalized_text', item.get('raw_text', ''))}"
+                    for item in semantic_snapshot.get("recent_conversation_turns", [])
+                ) or tuple(
+                    f"{getattr(item, 'source', 'speaker')}: {getattr(item, 'text', '')}"
+                    for item in recent_history
+                ),
+                current_detected_topic=str(
+                    semantic_snapshot.get("current_topic")
+                    or getattr(self, "_active_screen_anchor_question", "")
+                    or ""
+                ),
+                known_technical_terms=tuple(
+                    semantic_snapshot.get("technical_terms")
+                    or profile_normalization.get("canonical_terms", [])
+                    or []
+                ),
+                resume_profile_aliases=profile_normalization.get("aliases", {}) or {},
+                previous_normalized_terms=tuple(
+                    str(item.get("text", ""))
+                    for item in getattr(self, "_normalized_segment_items", [])[-6:]
+                    if isinstance(item, dict)
+                ),
+                screen_derived_context=str(getattr(self, "_active_screen_summary_text", "") or ""),
+                confidence_metadata={"source": "streaming_segment_queue"},
+            )
 
             worker = QuestionNormalizationWorker(
-                self._build_ai_runtime_config(),
+                ai_config,
                 raw_text,
                 parent=None,
             )
@@ -1662,6 +1730,10 @@ class GhostMicApp:
 
     def _begin_recording_session(self) -> int:
         """Create the identity used to route one Record/Mic capture session."""
+        conversation_state = getattr(self, "_conversation_state", None)
+        if conversation_state is not None:
+            conversation_state.reset()
+            conversation_state.update_resume_context(getattr(self, "_resume_profile", {}))
         self._recording_session_id = getattr(self, "_recording_session_id", 0) + 1
         session_id = self._recording_session_id
         self._valid_session_ids = {session_id}
@@ -2187,7 +2259,10 @@ class GhostMicApp:
 
         from ghostmic.utils.text_processing import clean_text
 
+        if not str(getattr(segment, "raw_stt_text", "") or "").strip():
+            segment.raw_stt_text = str(getattr(segment, "text", "") or "")
         segment.text = clean_text(getattr(segment, "text", ""))
+        segment.normalized_text = segment.text
         if not segment.text:
             self._logger.debug("Transcript segment text was empty after cleaning; ignoring.")
             return False
@@ -2250,6 +2325,16 @@ class GhostMicApp:
                     self._transcript_history = self._transcript_history[-1000:]
 
         question_segment = merged_target if merged_target is not None else segment
+
+        conversation_state = getattr(self, "_conversation_state", None)
+        if conversation_state is not None:
+            conversation_state.update_turn(
+                speaker=str(getattr(question_segment, "source", "unknown") or "unknown"),
+                raw_text=str(getattr(question_segment, "raw_stt_text", "") or question_segment.text),
+                normalized_text=str(getattr(question_segment, "normalized_text", "") or question_segment.text),
+                timestamp=float(getattr(question_segment, "timestamp", 0.0) or time.time()),
+                confidence=float(getattr(question_segment, "confidence", 1.0) or 1.0),
+            )
 
         if merged_target is not None:
             self._session_context_store.append_transcript(merged_target)
@@ -2404,6 +2489,9 @@ class GhostMicApp:
             summary_text = summary_text[:8000] + "..."
         self._active_screen_summary_text = summary_text
         self._active_screen_anchor_question = ""
+        conversation_state = getattr(self, "_conversation_state", None)
+        if conversation_state is not None:
+            conversation_state.update_screen_context(summary_text)
         self._session_context_store.append_screen_summary(full_text)
         self._window.ai_panel.finish_response(full_text)
         self._window.controls.set_screen_analysis_busy(False)
