@@ -23,6 +23,11 @@ class TranscriptSegment:
     session_id: int | None = None
     raw_stt_text: str = ""
     normalized_text: str = ""
+    segment_id: str = ""
+    chunk_ids: list[str] = field(default_factory=list)
+    timestamp_start: float = 0.0
+    timestamp_end: float = 0.0
+    status: str = "finalized"
 
     def __post_init__(self) -> None:
         if not self.raw_stt_text:

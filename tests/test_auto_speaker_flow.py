@@ -128,7 +128,7 @@ def test_auto_speaker_candidate_text_uses_min_word_and_char_thresholds():
     assert app._is_auto_speaker_candidate_text("Can you explain your ETL testing approach?") is True
 
 
-def test_transcription_ready_force_flushes_completed_streaming_segment():
+def test_transcription_ready_leaves_streaming_segment_boundary_to_normalizer():
     app = _app_for_auto("auto")
     app._config["transcription"] = {"streaming_normalization_enabled": True}
     app._valid_session_ids = {7}
@@ -144,7 +144,34 @@ def test_transcription_ready_force_flushes_completed_streaming_segment():
 
     app._on_transcription_ready(segment)
 
-    assert calls == [{"force_flush": True}]
+    assert calls == [{"force_flush": False}]
+
+
+def test_streaming_segment_updates_transcript_display_with_full_text():
+    app = _app_for_normalization_callbacks()
+    displayed = TranscriptSegment(
+        text="especially around late-arriving data?",
+        source="speaker",
+        timestamp=21.0,
+    )
+    updates = []
+    app._transcript_history = [displayed]
+    app._window = SimpleNamespace(
+        transcript_panel=SimpleNamespace(
+            set_segment_text=lambda segment, text: updates.append((segment, text))
+        )
+    )
+
+    app._sync_streaming_transcript_display(
+        SimpleNamespace(
+            normalized_text="Can you explain your ETL testing approach especially around late-arriving data?",
+            source="speaker",
+        )
+    )
+
+    expected = "Can you explain your ETL testing approach especially around late-arriving data?"
+    assert displayed.text == expected
+    assert updates == [(displayed, expected)]
 
 
 def test_auto_speaker_silence_elapsed_invokes_normalization_with_auto_send():
@@ -384,6 +411,29 @@ def test_register_normalized_segment_routes_auto_send_through_normalization_work
     assert captured[0][1] == app._normalized_segment_items[0]["text"]
     assert captured[0][2]["auto_send_after"] is True
     assert getattr(captured[0][0], "text") == app._normalized_segment_items[0]["text"]
+
+
+def test_record_route_sends_short_finalized_question_without_terminal_punctuation():
+    app = _app_for_normalization_callbacks()
+    app._recording_active = True
+    app._ai_trigger_service = AITriggerService()
+    captured = []
+    app._on_speaker_question_normalize_requested = lambda seg, text, **kwargs: captured.append(
+        (seg, text, kwargs)
+    )
+
+    normalized_segment = SimpleNamespace(
+        segment_id="segment-short-question",
+        normalized_text="What is SQL",
+        source="speaker",
+        source_chunk_ids=["chunk-1"],
+    )
+
+    app._register_normalized_segment(normalized_segment)
+
+    assert captured
+    assert captured[0][1] == "What is SQL?"
+    assert captured[0][2]["auto_send_after"] is True
 
 
 def test_register_normalized_segment_extracts_question_from_long_preamble():

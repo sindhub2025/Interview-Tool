@@ -2159,7 +2159,7 @@ class GhostMicApp:
             return
         accepted = self._append_transcript_segment(segment, require_recording=True)
         if accepted and self._is_streaming_normalization_enabled():
-            self._process_streaming_transcript_chunks(force_flush=True)
+            self._process_streaming_transcript_chunks(force_flush=False)
 
     def _should_merge_speaker_segments(self, previous, incoming) -> bool:
         """Return True when *incoming* should continue the previous question line."""
@@ -3159,9 +3159,30 @@ class GhostMicApp:
             return
 
         for normalized_segment in segments:
+            self._sync_streaming_transcript_display(normalized_segment)
             self._register_normalized_segment(normalized_segment)
 
         self._sync_normalized_segments_to_window()
+
+    def _sync_streaming_transcript_display(self, normalized_segment) -> None:
+        """Show the assembled streaming segment instead of its last raw chunk."""
+        if not self._window or not getattr(self, "_transcript_history", None):
+            return
+
+        normalized_text = str(getattr(normalized_segment, "normalized_text", "")).strip()
+        source = str(getattr(normalized_segment, "source", "") or "").strip().lower()
+        if not normalized_text or not source:
+            return
+
+        displayed_segment = self._transcript_history[-1]
+        displayed_source = str(getattr(displayed_segment, "source", "") or "").strip().lower()
+        current_text = str(getattr(displayed_segment, "text", "") or "").strip()
+        if displayed_source != source or len(normalized_text) <= len(current_text):
+            return
+
+        displayed_segment.text = normalized_text
+        displayed_segment.normalized_text = normalized_text
+        self._window.transcript_panel.set_segment_text(displayed_segment, normalized_text)
 
     def _register_normalized_segment(self, normalized_segment) -> None:
         segment_id = str(getattr(normalized_segment, "segment_id", "")).strip()
@@ -3197,12 +3218,16 @@ class GhostMicApp:
                     normalized_text,
                     source=source,
                     source_chunk_ids=source_chunk_ids,
+                    # SegmentManager has already finalized this streaming
+                    # window. Do not discard a valid interviewer question just
+                    # because Whisper omitted terminal punctuation.
+                    force_finalize=True,
                 )
                 if bool(getattr(item, "has_question", False))
             ]
 
         if not mic_only and not extracted_questions:
-            classification = extractor.classify(normalized_text)
+            classification = extractor.classify(normalized_text, force_finalize=True)
             self._logger.debug(
                 "Streaming segment skipped by question extractor: class=%s text=%r",
                 classification,
@@ -3274,7 +3299,9 @@ class GhostMicApp:
 
         # Minimum word count guard — lower threshold for mic-only mode
         # so shorter spoken queries are accepted.
-        min_words = 3 if mic_only else 5
+        # Record-mode questions can be intentionally concise (for example,
+        # "What is SQL?"). The streaming segment itself is already bounded.
+        min_words = 3
         word_count = len(normalized_text.split())
         if word_count < min_words:
             self._logger.debug(

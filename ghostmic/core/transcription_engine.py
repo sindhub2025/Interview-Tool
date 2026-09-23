@@ -8,6 +8,7 @@ pipeline, and emits TranscriptSegment results.
 from __future__ import annotations
 
 import io
+import hashlib
 import os
 import queue
 import random
@@ -15,6 +16,7 @@ import re
 import threading
 import time
 import wave
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -76,6 +78,21 @@ DEFAULT_TARGET_RMS: float = 2200.0
 DEFAULT_MAX_GAIN: float = 8.0
 DEFAULT_SILENCE_TRIM_THRESHOLD: int = 220
 DEFAULT_SILENCE_TRIM_PAD_SECONDS: float = 0.08
+DEFAULT_OVERLAP_MS: float = 0.0
+DEFAULT_MAX_CONTEXT_SECONDS: float = 2.0
+MAX_DIAGNOSTIC_HISTORY: int = 128
+
+
+@dataclass
+class _TranscriptionRequest:
+    request_id: str
+    source: str
+    session_id: int | None
+    chunk_ids: tuple[str, ...]
+    timestamp_start: float
+    timestamp_end: float
+    enqueued_at: float
+    status: str = "partial"
 
 
 from ghostmic.domain import TranscriptSegment  # re-exported for backward compat
@@ -240,6 +257,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
     if pyqtSignal is not None:
         transcription_ready = pyqtSignal(object)
         transcribing = pyqtSignal(str)
+        transcription_diagnostic = pyqtSignal(dict)
 
     def __init__(
         self,
@@ -263,6 +281,20 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         self._queue: "queue.Queue[Tuple[np.ndarray, str, float, int | None]]" = queue.Queue(
             maxsize=TRANSCRIPTION_QUEUE_MAXSIZE
         )
+        self._request_lock = threading.Lock()
+        self._request_metadata: Dict[Tuple[str, str, float], _TranscriptionRequest] = {}
+        self._seen_request_ids: deque[str] = deque(maxlen=TRANSCRIPTION_QUEUE_MAXSIZE * 8)
+        self._seen_request_id_set: set[str] = set()
+        self._request_counter = 0
+        self._last_finalized_end: Dict[Tuple[int | None, str], float] = {}
+        self._diagnostic_history: deque[dict] = deque(maxlen=MAX_DIAGNOSTIC_HISTORY)
+        self._overlap_ms = max(0.0, min(1000.0, float(self._remote_config.get("overlap_ms", DEFAULT_OVERLAP_MS))))
+        self._max_context_seconds = max(
+            0.0,
+            min(10.0, float(self._remote_config.get("max_context_seconds", DEFAULT_MAX_CONTEXT_SECONDS))),
+        )
+        self._audio_context: Dict[Tuple[int | None, str], np.ndarray] = {}
+        self._stage_metrics: Dict[str, dict[str, float]] = {}
         self._remote_transcription_enabled = False
         self._remote_backend: Optional[str] = None
         self._remote_model: Optional[str] = None
@@ -366,39 +398,206 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         audio: np.ndarray,
         source: str,
         session_id: int | None = None,
-    ) -> None:
-        """Enqueue an audio segment for transcription."""
+        *,
+        chunk_ids: Optional[List[str]] = None,
+        timestamp_start: Optional[float] = None,
+        timestamp_end: Optional[float] = None,
+        partial: bool = True,
+    ) -> bool:
+        """Enqueue bounded audio context for transcription.
+
+        The queue tuple remains backward-compatible; request identity and timing
+        live in a side map so callers can opt into chunk-level ordering metadata.
+        """
         if not self._accepting_segments:
             logger.debug(
                 "TranscriptionThread: rejecting new segment while stopping (%s).",
                 source,
             )
-            return
-        item = (audio, source, time.time(), session_id)
+            return False
+        now = time.time()
+        source_name = str(source or "speaker").strip().lower() or "speaker"
+        audio_array = np.asarray(audio, dtype=np.int16)
+        end = float(timestamp_end if timestamp_end is not None else now)
+        start = float(
+            timestamp_start
+            if timestamp_start is not None
+            else end - (audio_array.size / 16_000.0)
+        )
+        ids = tuple(str(item).strip() for item in (chunk_ids or []) if str(item).strip())
+        request_id = self._request_identity(session_id, source_name, start, end, ids)
+        with self._request_lock:
+            if request_id in self._seen_request_id_set:
+                self._emit_diagnostic(
+                    segment_id=request_id,
+                    source=source_name,
+                    dropped=True,
+                    stale=False,
+                    status="duplicate",
+                    text_chars=0,
+                )
+                return False
+            self._remember_request_id(request_id)
+
+        context_key = (session_id, source_name)
+        queued_audio = audio_array
+        if self._overlap_ms > 0 and self._max_context_seconds > 0:
+            prior = self._audio_context.get(context_key)
+            overlap_samples = min(audio_array.size, int(16_000 * self._overlap_ms / 1000.0))
+            if prior is not None and overlap_samples:
+                queued_audio = np.concatenate((prior[-overlap_samples:], audio_array))
+            max_samples = int(16_000 * self._max_context_seconds)
+            self._audio_context[context_key] = np.concatenate((
+                (prior if prior is not None else np.empty(0, dtype=np.int16)),
+                audio_array,
+            ))[-max_samples:]
+            if len(self._audio_context) > SOURCE_STATE_MAX_ENTRIES:
+                self._audio_context.pop(next(iter(self._audio_context)))
+
+        item = (queued_audio, source_name, now, session_id)
+        request = _TranscriptionRequest(
+            request_id=request_id,
+            source=source_name,
+            session_id=session_id,
+            chunk_ids=ids,
+            timestamp_start=start,
+            timestamp_end=end,
+            enqueued_at=now,
+            status="partial" if partial else "finalized",
+        )
+        with self._request_lock:
+            self._request_metadata[(source_name, str(session_id), now)] = request
         try:
             self._queue.put_nowait(item)
-            return
+            return True
         except queue.Full:
             # Keep near-real-time behavior: discard oldest and keep latest.
             try:
-                self._queue.get_nowait()
+                dropped_item = self._queue.get_nowait()
+                self._mark_queued_item(dropped_item, status="dropped")
             except queue.Empty:
-                return
+                self._mark_request(request, status="dropped")
+                self._forget_request(request)
+                return False
 
         try:
             self._queue.put_nowait(item)
+            return True
         except queue.Full:
+            self._mark_request(request, status="dropped")
+            self._forget_request(request)
             now = time.time()
             if now - self._last_queue_drop_log >= 5.0:
                 logger.warning("TranscriptionThread: queue full; dropping incoming segment.")
                 self._last_queue_drop_log = now
+            return False
+
+    @staticmethod
+    def _request_identity(
+        session_id: int | None,
+        source: str,
+        timestamp_start: float,
+        timestamp_end: float,
+        chunk_ids: tuple[str, ...],
+    ) -> str:
+        material = "|".join(
+            [
+                str(session_id),
+                source,
+                f"{timestamp_start:.6f}",
+                f"{timestamp_end:.6f}",
+                ",".join(chunk_ids),
+            ]
+        )
+        return hashlib.sha1(material.encode("utf-8")).hexdigest()[:20]
+
+    def _remember_request_id(self, request_id: str) -> None:
+        if len(self._seen_request_ids) >= self._seen_request_ids.maxlen:
+            expired = self._seen_request_ids.popleft()
+            self._seen_request_id_set.discard(expired)
+        self._seen_request_ids.append(request_id)
+        self._seen_request_id_set.add(request_id)
+
+    def _request_for_item(
+        self,
+        source: str,
+        session_id: int | None,
+        enqueued_at: float,
+    ) -> Optional[_TranscriptionRequest]:
+        with self._request_lock:
+            return self._request_metadata.get((source, str(session_id), enqueued_at))
+
+    def _mark_queued_item(self, item, *, status: str) -> None:
+        _audio, source, enqueued_at, session_id = item
+        request = self._request_for_item(source, session_id, enqueued_at)
+        if request is not None:
+            self._mark_request(request, status=status)
+            self._forget_request(request)
+
+    def _mark_request(self, request: _TranscriptionRequest, *, status: str) -> None:
+        request.status = status
+        self._emit_diagnostic(
+            segment_id=request.request_id,
+            source=request.source,
+            queue_wait_ms=max(0.0, (time.time() - request.enqueued_at) * 1000.0),
+            text_chars=0,
+            dropped=status in {"dropped", "empty", "error", "duplicate"},
+            stale=status == "stale",
+            status=status,
+        )
+
+    def _forget_request(self, request: _TranscriptionRequest) -> None:
+        with self._request_lock:
+            keys = [
+                key for key, value in self._request_metadata.items()
+                if value is request
+            ]
+            for key in keys:
+                self._request_metadata.pop(key, None)
+
+    def _emit_diagnostic(
+        self,
+        *,
+        segment_id: str,
+        source: str,
+        queue_wait_ms: float = 0.0,
+        preprocessing_ms: float = 0.0,
+        inference_ms: float = 0.0,
+        postprocessing_ms: float = 0.0,
+        context_normalization_ms: float = 0.0,
+        text_chars: int = 0,
+        dropped: bool = False,
+        stale: bool = False,
+        status: str = "finalized",
+    ) -> dict:
+        diagnostic = {
+            "segment_id": segment_id,
+            "queue_wait_ms": round(queue_wait_ms, 2),
+            "preprocessing_ms": round(preprocessing_ms, 2),
+            "inference_ms": round(inference_ms, 2),
+            "postprocessing_ms": round(postprocessing_ms, 2),
+            "context_normalization_ms": round(context_normalization_ms, 2),
+            "text_chars": int(max(0, text_chars)),
+            "source": source,
+            "dropped": bool(dropped),
+            "stale": bool(stale),
+            "status": status,
+        }
+        self._diagnostic_history.append(diagnostic)
+        if pyqtSignal is not None:
+            self.transcription_diagnostic.emit(diagnostic)  # type: ignore[attr-defined]
+        return diagnostic
+
+    def get_diagnostic_history(self) -> list[dict]:
+        return list(self._diagnostic_history)
 
     def clear_pending_segments(self) -> int:
         """Drop queued segments that have not started transcription yet."""
         dropped = 0
         while True:
             try:
-                self._queue.get_nowait()
+                item = self._queue.get_nowait()
+                self._mark_queued_item(item, status="dropped")
                 dropped += 1
             except queue.Empty:
                 break
@@ -416,6 +615,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             except queue.Empty:
                 continue
 
+            request = self._request_for_item(source, session_id, enqueued_at)
             age = time.time() - enqueued_at
             if age > self._max_pending_age_seconds:
                 logger.debug(
@@ -423,12 +623,18 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                     source,
                     age,
                 )
+                if request is not None:
+                    self._mark_request(request, status="stale")
+                    self._forget_request(request)
                 continue
 
             if self._model is None and not self._remote_transcription_enabled:
                 logger.warning(
                     "TranscriptionThread: no model loaded – dropping segment."
                 )
+                if request is not None:
+                    self._mark_request(request, status="dropped")
+                    self._forget_request(request)
                 continue
 
             if pyqtSignal is not None:
@@ -436,23 +642,79 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
 
             self._transcribing = True
             try:
-                segment = self._transcribe(audio, source, segment_timestamp=enqueued_at)
-                if segment:
+                started = time.perf_counter()
+                segment = self._transcribe(
+                    audio,
+                    source,
+                    segment_timestamp=(request.timestamp_end if request else enqueued_at),
+                    request=request,
+                )
+                if segment and self._accept_result(segment, request):
+                    if request is not None:
+                        request.status = "finalized"
                     segment.session_id = session_id
                     if self._on_result:
                         self._on_result(segment)
                     if pyqtSignal is not None:
                         self.transcription_ready.emit(segment)  # type: ignore[attr-defined]
+                elif segment is None and request is not None and request.status == "partial":
+                    self._mark_request(request, status="empty")
+                if request is not None and request.status == "partial":
+                    request.status = "finalized"
+                if request is not None:
+                    stage_metrics = self._stage_metrics.pop(request.request_id, {})
+                    self._emit_diagnostic(
+                        segment_id=request.request_id,
+                        source=source,
+                        queue_wait_ms=max(0.0, (time.time() - request.enqueued_at) * 1000.0),
+                        preprocessing_ms=stage_metrics.get("preprocessing_ms", 0.0),
+                        inference_ms=stage_metrics.get(
+                            "inference_ms", (time.perf_counter() - started) * 1000.0
+                        ),
+                        postprocessing_ms=stage_metrics.get("postprocessing_ms", 0.0),
+                        text_chars=len(getattr(segment, "text", "") or "") if segment else 0,
+                        dropped=segment is None,
+                        stale=request.status == "stale",
+                        status=request.status,
+                    )
+                    self._forget_request(request)
             finally:
                 self._transcribing = False
 
         logger.info("TranscriptionThread: stopped.")
+
+    def _accept_result(
+        self,
+        segment: TranscriptSegment,
+        request: Optional[_TranscriptionRequest],
+    ) -> bool:
+        """Accept only the newest finalized interval for a session/source."""
+        if request is None:
+            return bool(str(getattr(segment, "text", "") or "").strip())
+        ordering_key = (request.session_id, request.source)
+        with self._request_lock:
+            last_end = self._last_finalized_end.get(ordering_key, float("-inf"))
+            if request.timestamp_end <= last_end:
+                request.status = "stale"
+                self._emit_diagnostic(
+                    segment_id=request.request_id,
+                    source=request.source,
+                    dropped=False,
+                    stale=True,
+                    status="stale",
+                    text_chars=len(getattr(segment, "text", "") or ""),
+                )
+                return False
+            self._last_finalized_end[ordering_key] = request.timestamp_end
+            segment.status = "finalized"
+            return True
 
     def _transcribe(
         self,
         audio: np.ndarray,
         source: str,
         segment_timestamp: Optional[float] = None,
+        request: Optional[_TranscriptionRequest] = None,
     ) -> Optional[TranscriptSegment]:
         """Run whisper inference on *audio* and return a TranscriptSegment."""
         try:
@@ -462,11 +724,14 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                     audio,
                     source,
                     segment_timestamp=transcript_ts,
+                    request=request,
                 )
 
+            preprocessing_started = time.perf_counter()
             processed = self._prepare_local_audio(audio, source=source)
             if processed is None:
                 return None
+            preprocessing_ms = (time.perf_counter() - preprocessing_started) * 1000.0
 
             audio_float = processed.astype(np.float32) / 32768.0
             transcribe_kwargs: Dict[str, object] = {
@@ -488,16 +753,23 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 "repetition_penalty": float(
                     self._remote_config.get("repetition_penalty", 1.05)
                 ),
-                # VADThread already segments audio and preserves pre-roll.
-                "vad_filter": False,
-                "condition_on_previous_text": False,
+                # VADThread already segments audio; disabled by default to keep
+                # latency low and avoid a second silence boundary pass.
+                "vad_filter": bool(self._remote_config.get("vad_filter", False)),
+                # Independent chunks avoid Whisper carrying stale text across
+                # VAD boundaries; callers can opt in when using larger chunks.
+                "condition_on_previous_text": bool(
+                    self._remote_config.get("condition_on_previous_text", False)
+                ),
             }
             if self._use_context_prompt:
                 initial_prompt = self._build_initial_prompt(source)
                 if initial_prompt:
                     transcribe_kwargs["initial_prompt"] = initial_prompt
 
+            inference_started = time.perf_counter()
             segments, _ = self._model.transcribe(audio_float, **transcribe_kwargs)
+            inference_ms = (time.perf_counter() - inference_started) * 1000.0
 
             texts: List[str] = []
             avg_prob: float = 0.0
@@ -513,6 +785,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
             if not texts:
                 return None
 
+            postprocessing_started = time.perf_counter()
             full_text = " ".join(texts)
             # avg_logprob is in [-inf, 0]; adding 1.0 maps the typical
             # range [-1, 0] to [0, 1] as an approximate confidence score.
@@ -526,16 +799,43 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                 return None
 
             self._remember_local_text(source, full_text)
-
-            return TranscriptSegment(
+            result = TranscriptSegment(
                 text=full_text,
                 source=source,
                 timestamp=transcript_ts,
                 confidence=confidence,
+                raw_stt_text=full_text,
+                normalized_text=full_text,
+                segment_id=request.request_id if request else self._request_identity(
+                    None, source, transcript_ts, transcript_ts, ()
+                ),
+                chunk_ids=list(request.chunk_ids) if request else [],
+                timestamp_start=request.timestamp_start if request else transcript_ts,
+                timestamp_end=request.timestamp_end if request else transcript_ts,
+                status="finalized",
             )
+            if request is not None:
+                self._stage_metrics[request.request_id] = {
+                    "preprocessing_ms": preprocessing_ms,
+                    "inference_ms": inference_ms,
+                    "postprocessing_ms": (time.perf_counter() - postprocessing_started) * 1000.0,
+                }
+            return result
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("TranscriptionThread: error: %s", exc, exc_info=True)
+            if request is not None:
+                self._mark_request(request, status="retry")
+            if self._model is not None and self._remote_transcription_enabled:
+                try:
+                    return self._transcribe_remote(
+                        audio,
+                        source,
+                        segment_timestamp=segment_timestamp,
+                        request=request,
+                    )
+                except Exception:  # pragma: no cover - defensive fallback boundary
+                    logger.debug("TranscriptionThread: remote fallback after local failure failed.", exc_info=True)
             return None
 
     def _configure_remote_transcriber(self) -> Tuple[bool, str]:
@@ -630,6 +930,7 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         audio: np.ndarray,
         source: str,
         segment_timestamp: Optional[float] = None,
+        request: Optional[_TranscriptionRequest] = None,
     ) -> Optional[TranscriptSegment]:
         if not self._remote_transcription_enabled:
             return None
@@ -690,6 +991,13 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
                         source=source,
                         timestamp=float(segment_timestamp) if segment_timestamp else time.time(),
                         confidence=0.75,
+                        raw_stt_text=text,
+                        normalized_text=text,
+                        segment_id=request.request_id if request else "",
+                        chunk_ids=list(request.chunk_ids) if request else [],
+                        timestamp_start=request.timestamp_start if request else float(segment_timestamp or time.time()),
+                        timestamp_end=request.timestamp_end if request else float(segment_timestamp or time.time()),
+                        status="finalized",
                     )
                 except Exception as exc:  # pylint: disable=broad-except
                     is_rate_limited = self._is_rate_limited_exception(exc)
@@ -768,16 +1076,30 @@ class TranscriptionThread(QThread):  # type: ignore[misc]
         return False
 
     def _build_initial_prompt(self, source: str) -> Optional[str]:
+        terms: list[str] = []
+        profile = self._ai_config.get("resume_profile")
+        if isinstance(profile, dict):
+            normalization = profile.get("normalization", {})
+            if isinstance(normalization, dict):
+                terms.extend(str(item) for item in normalization.get("canonical_terms", []) or [])
+                terms.extend(str(item) for item in normalization.get("role_keywords", []) or [])
+        terms.extend(str(item) for item in self._ai_config.get("recent_technical_entities", []) or [])
+        terms.extend(str(item) for item in self._ai_config.get("current_topic_terms", []) or [])
         now = time.time()
         self._prune_source_state(
             self._last_local_text_by_source,
             self._last_local_text_ts_by_source,
             now,
         )
-        prompt = self._last_local_text_by_source.get(source, "")
-        if not prompt:
+        prompt_parts = [item.strip() for item in terms if item.strip()]
+        previous = self._last_local_text_by_source.get(source, "")
+        if previous:
+            prompt_parts.append(previous)
+        if not prompt_parts:
             return None
-        return prompt[-LOCAL_PROMPT_MAX_CHARS:]
+        # Only bounded, relevant vocabulary and one recent phrase enter Whisper;
+        # the complete resume/session history never becomes an initial prompt.
+        return " ".join(dict.fromkeys(prompt_parts))[-LOCAL_PROMPT_MAX_CHARS:]
 
     def _remember_local_text(self, source: str, text: str) -> None:
         now = time.time()
