@@ -178,6 +178,101 @@ def test_follow_up_suggestions_are_limited_and_clickable() -> None:
     assert "Sent to AI" in window._follow_up_status_label.text()
 
 
+def test_main_question_panel_keeps_previous_questions_visible() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    first_question = "How do you validate data quality in production?"
+    second_question = "How do you handle schema drift across services?"
+    window._set_question_text(first_question)
+    window._reveal_question_answer_area()
+    window._set_question_text(second_question)
+    window.set_question_follow_up_suggestions(["What would you monitor next?"])
+    for _ in range(10):
+        app.processEvents()
+
+    displayed_questions = window._question_text.toPlainText()
+    assert first_question in displayed_questions
+    assert second_question in displayed_questions
+    assert window._follow_up_header is not None
+    assert window._follow_up_header.isVisible() is True
+    assert window._follow_up_container is not None
+    assert window._follow_up_container.isVisible() is True
+
+
+def test_follow_up_section_can_be_collapsed_and_reopened() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window._set_question_text("How do you validate data quality in production?")
+    window._reveal_question_answer_area()
+    window.set_question_follow_up_suggestions(["What would you monitor next?"])
+    for _ in range(10):
+        app.processEvents()
+
+    assert window._follow_up_container is not None
+    assert window._follow_up_container.isVisible() is True
+    assert window._follow_up_container.height() > 0
+    assert any(button.isVisible() for button in window._follow_up_buttons)
+
+    assert window._follow_up_header is not None
+    window._follow_up_header.click()
+    for _ in range(5):
+        app.processEvents()
+
+    assert window._follow_up_container.isVisible() is False
+    window._follow_up_header.click()
+    for _ in range(5):
+        app.processEvents()
+
+    assert window._follow_up_container.isVisible() is True
+
+
+def test_long_question_wraps_without_horizontal_expansion() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window._set_question_text("What is your production validation strategy? " * 20)
+    window._reveal_question_answer_area()
+    window.set_question_follow_up_suggestions(
+        [
+            "Can you explain in detail how you would validate this strategy across multiple production regions and deployment stages?",
+            "What tradeoffs would you consider when designing monitoring and alerting for this workflow?",
+            "How would you test failure recovery and communicate the results to stakeholders?",
+        ]
+    )
+    QTest.qWait(100)
+    for _ in range(10):
+        app.processEvents()
+
+    assert window._question_text.horizontalScrollBar().maximum() == 0
+    assert window._question_text.verticalScrollBar().maximum() > 0
+    question_height, answer_height = window._splitter.sizes()
+    assert question_height <= 180
+    assert answer_height > question_height
+    assert window.width() <= window._expanded_window_size.width()
+    assert all(
+        button.width() <= window._question_card.width()
+        for button in window._follow_up_buttons
+        if button.isVisible()
+    )
+
+
 def test_queued_normalized_questions_show_send_actions_and_respect_lock() -> None:
     app = _qt_app()
     assert app is not None

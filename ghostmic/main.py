@@ -859,7 +859,18 @@ class GhostMicApp:
                     if isinstance(item, dict)
                 ),
                 screen_derived_context=str(getattr(self, "_active_screen_summary_text", "") or ""),
-                confidence_metadata={"source": "streaming_segment_queue"},
+                confidence_metadata={
+                    "source": "streaming_segment_queue",
+                    "vocabulary_replacement_threshold": ai_config.get(
+                        "vocabulary_replacement_threshold", 0.82
+                    ),
+                    "vocabulary_suggestion_threshold": ai_config.get(
+                        "vocabulary_suggestion_threshold", 0.62
+                    ),
+                },
+                organization_vocabulary=ai_config.get("organization_vocabulary", {})
+                if isinstance(ai_config.get("organization_vocabulary", {}), dict)
+                else {},
             )
 
             worker = QuestionNormalizationWorker(
@@ -3377,7 +3388,9 @@ class GhostMicApp:
         if should_auto_promote:
             # Promote to top Question area, normalize, and trigger AI response.
             try:
-                setattr(normalized_segment, "text", normalized_text)
+                setattr(normalized_segment, "normalized_text", normalized_text)
+                if not hasattr(normalized_segment, "raw_stt_text"):
+                    setattr(normalized_segment, "text", normalized_text)
             except Exception:
                 pass
             self._logger.info(
@@ -4075,7 +4088,10 @@ class GhostMicApp:
             return
 
         with self._transcript_lock:
+            # Keep raw_stt_text immutable; the legacy text field remains the
+            # display/AI-facing normalized view.
             segment.text = normalized
+            segment.normalized_text = normalized
 
         self._session_context_store.append_event(
             "normalized_question",

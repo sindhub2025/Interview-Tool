@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ghostmic.services.correction_policy import allow_automatic_correction
+
 RESUME_QUERY_KEYWORDS = frozenset(
     {
         "resume",
@@ -299,9 +301,17 @@ def apply_resume_corrections(
                 "category": best_term.category,
                 "score": round(best_score, 3),
                 "confidence": confidence,
+                "evidence": ["resume/profile term", "normalized string similarity"],
             }
 
-            if confidence == "high":
+            policy_allows = allow_automatic_correction(
+                phrase,
+                best_term.canonical,
+                evidence=correction["evidence"],
+                confidence=confidence,
+                score=best_score,
+            )
+            if confidence == "high" and policy_allows:
                 start_char = token_matches[index].start()
                 end_char = token_matches[index + ngram_size - 1].end()
                 correction["start"] = start_char

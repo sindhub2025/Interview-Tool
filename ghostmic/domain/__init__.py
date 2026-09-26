@@ -28,6 +28,7 @@ class TranscriptSegment:
     timestamp_start: float = 0.0
     timestamp_end: float = 0.0
     status: str = "finalized"
+    corrections: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.raw_stt_text:

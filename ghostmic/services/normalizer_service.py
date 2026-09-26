@@ -7,6 +7,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from ghostmic.services.transcript_store import TranscriptChunk
+from ghostmic.services.technical_vocabulary import TechnicalVocabularyEngine
 from ghostmic.utils.text_processing import clean_text, ensure_question_format
 
 _TERMINAL_PUNCTUATION_RE = re.compile(r"[.?!][\"')\]]*\s*$")
@@ -54,6 +55,7 @@ class NormalizationCorrection:
     reason: str
     confidence: str
     context_source: str = ""
+    evidence: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,7 @@ class NormalizationContext:
     previous_normalized_terms: tuple[str, ...] = field(default_factory=tuple)
     screen_derived_context: str = ""
     confidence_metadata: Mapping[str, Any] = field(default_factory=dict)
+    organization_vocabulary: Mapping[str, Sequence[str] | str] = field(default_factory=dict)
 
     def prompt_block(self, *, max_turns: int = 6, max_chars: int = 3600) -> str:
         """Render only the compact, explicitly labelled context window."""
@@ -140,6 +143,32 @@ def normalize_deterministically(context: NormalizationContext) -> NormalizationR
     raw = " ".join(str(context.current_raw_transcript or "").split()).strip()
     normalized = clean_text(raw)
     corrections: list[NormalizationCorrection] = []
+    vocabulary = TechnicalVocabularyEngine(
+        replacement_threshold=float(context.confidence_metadata.get("vocabulary_replacement_threshold", 0.82)),
+        suggestion_threshold=float(context.confidence_metadata.get("vocabulary_suggestion_threshold", 0.62)),
+        organization_terms=context.organization_vocabulary,
+        resume_terms=context.resume_profile_aliases,
+        session_terms=tuple(context.known_technical_terms) + tuple(context.previous_normalized_terms),
+    )
+    vocabulary_text, vocabulary_candidates = vocabulary.normalize_text(
+        normalized,
+        current_topic=context.current_detected_topic,
+        recent_terms=context.previous_normalized_terms,
+    )
+    normalized = vocabulary_text
+    for candidate in vocabulary_candidates:
+        if candidate.raw_term.lower() == candidate.canonical_term.lower():
+            continue
+        corrections.append(
+            NormalizationCorrection(
+                raw_term=candidate.raw_term,
+                normalized_term=candidate.canonical_term,
+                reason="; ".join(candidate.evidence) or "technical vocabulary match",
+                confidence=candidate.confidence,
+                context_source=candidate.source,
+                evidence=tuple(candidate.evidence),
+            )
+        )
     terms = dict(_DETERMINISTIC_TERMS)
     for canonical, aliases in context.resume_profile_aliases.items():
         for alias in aliases:
@@ -162,6 +191,7 @@ def normalize_deterministically(context: NormalizationContext) -> NormalizationR
                 reason="known technical/profile term supported by the normalization dictionary",
                 confidence=CONFIDENCE_HIGH,
                 context_source="known terms" if raw_term in _DETERMINISTIC_TERMS else "active profile terms",
+                evidence=("technical vocabulary dictionary",),
             )
         )
 

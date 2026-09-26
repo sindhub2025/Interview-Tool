@@ -64,6 +64,7 @@ class SessionContextStore:
         confidence = float(getattr(segment, "confidence", 1.0))
         raw_stt_text = str(getattr(segment, "raw_stt_text", "") or text).strip()
         normalized_text = str(getattr(segment, "normalized_text", "") or text).strip()
+        corrections = list(getattr(segment, "corrections", []) or [])
         self.append_event(
             "transcript",
             text,
@@ -72,6 +73,7 @@ class SessionContextStore:
                 "confidence": round(confidence, 4),
                 "raw_stt_text": raw_stt_text,
                 "normalized_text": normalized_text,
+                "corrections": corrections,
             },
         )
 

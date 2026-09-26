@@ -52,6 +52,9 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ai.resume_context_enabled": (bool, True, None),
     "ai.resume_correction_threshold_high": (float, 0.87, lambda v: 0.5 <= v <= 1.0),
     "ai.resume_correction_threshold_medium": (float, 0.74, lambda v: 0.4 <= v <= 1.0),
+    "ai.vocabulary_replacement_threshold": (float, 0.82, lambda v: 0.5 <= v <= 1.0),
+    "ai.vocabulary_suggestion_threshold": (float, 0.62, lambda v: 0.3 <= v <= 1.0),
+    "ai.organization_vocabulary": (dict, {}, None),
     # Audio
     "audio.sample_rate":       (int,   16000,    lambda v: v in (8000, 16000, 44100, 48000)),
     "audio.channels":          (int,   1,        lambda v: v in (1, 2)),

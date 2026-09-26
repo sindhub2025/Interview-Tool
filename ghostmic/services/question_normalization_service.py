@@ -16,6 +16,7 @@ from ghostmic.utils.resume_context import (
     build_resume_context_summary,
 )
 from ghostmic.utils.text_processing import ensure_question_format
+from ghostmic.services.correction_policy import allow_automatic_correction
 from ghostmic.services.normalizer_service import (
     NormalizationContext,
     normalize_deterministically,
@@ -320,9 +321,44 @@ def _parse_normalization_result(
 ) -> QuestionNormalizationResult:
     payload = _extract_json_payload(model_text)
     if payload is not None:
+        strict_schema = "normalized_text" in payload
         normalized_source = str(
             payload.get("normalized_text", payload.get("normalized_question", "")) or ""
         )
+        raw_corrections = payload.get("corrections", [])
+        corrections = []
+        if isinstance(raw_corrections, list):
+            for correction in raw_corrections:
+                if not isinstance(correction, dict):
+                    continue
+                raw_term = str(correction.get("raw_term", "")).strip()
+                normalized_term = str(correction.get("normalized_term", "")).strip()
+                confidence = str(correction.get("confidence", "LOW")).upper()
+                reason = str(correction.get("reason", "")).strip()
+                evidence = correction.get("evidence", [])
+                if isinstance(evidence, str):
+                    evidence = [evidence]
+                evidence = [str(item).strip() for item in evidence if str(item).strip()]
+                if not evidence and "known technical term" in reason.lower():
+                    evidence = ["technical vocabulary dictionary"]
+                if not raw_term or not normalized_term or not reason or not evidence:
+                    continue
+                if allow_automatic_correction(
+                    raw_term,
+                    normalized_term,
+                    evidence=evidence,
+                    confidence=confidence,
+                    score=float(correction.get("score", 1.0) or 1.0),
+                ):
+                    corrections.append({
+                        "raw_term": raw_term,
+                        "normalized_term": normalized_term,
+                        "confidence": confidence,
+                        "reason": reason,
+                        "evidence": evidence,
+                    })
+        if strict_schema and normalized_source.strip() and not corrections:
+            normalized_source = fallback_question
         if not normalized_source.strip():
             normalized_source = fallback_question
         normalized = _normalize_whitespace(normalized_source)
@@ -338,7 +374,7 @@ def _parse_normalization_result(
             is_question=bool(payload.get("is_question", True)),
             question_type=str(payload.get("question_type", "direct") or "direct"),
             topic=str(payload.get("topic", "") or ""),
-            corrections=list(payload.get("corrections", []) or []),
+            corrections=corrections,
             continuation_of_previous=bool(payload.get("continuation_of_previous", False)),
             referenced_entities=list(payload.get("referenced_entities", []) or []),
         )
@@ -424,6 +460,17 @@ def normalize_question_with_followups(
         resume_profile_aliases=profile_aliases if isinstance(profile_aliases, dict) else {},
         previous_normalized_terms=tuple(ai_config.get("previous_normalized_terms", ()) or ()),
         screen_derived_context=str(ai_config.get("screen_context", "")),
+        confidence_metadata={
+            "vocabulary_replacement_threshold": ai_config.get(
+                "vocabulary_replacement_threshold", 0.82
+            ),
+            "vocabulary_suggestion_threshold": ai_config.get(
+                "vocabulary_suggestion_threshold", 0.62
+            ),
+        },
+        organization_vocabulary=ai_config.get("organization_vocabulary", {})
+        if isinstance(ai_config.get("organization_vocabulary", {}), dict)
+        else {},
     )
     backend = _resolve_backend(ai_config)
     retries = int(ai_config.get("question_normalization_retries", DEFAULT_MAX_RETRIES))
@@ -465,7 +512,7 @@ def normalize_question_with_followups(
         "Normalize the transcript below into a clear interview question.",
         "Use the context only to resolve active-profile facts, names, domain terms, and technical shorthand.",
         "Preserve the original intent. Do not answer the question.",
-        "Return strict JSON only with normalized_text, is_question, question_type, topic, corrections, continuation_of_previous, referenced_entities, and follow_up_questions.",
+        "Return strict JSON only with normalized_text, is_question, question_type, topic, corrections, continuation_of_previous, referenced_entities, and follow_up_questions. Each correction must include raw_term, normalized_term, confidence, reason, evidence, and score.",
         "Rules:",
         "1) Keep the normalized question faithful to the speaker intent.",
         "2) follow_up_questions must contain exactly 3 realistic real-world interview follow-up questions.",

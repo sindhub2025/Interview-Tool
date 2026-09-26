@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QPlainTextEdit,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -66,6 +67,8 @@ logger = get_logger(__name__)
 
 RESIZE_MARGIN = 12  # pixels from edge that trigger resize
 QWIDGETSIZE_MAX = 16_777_215  # Qt maximum widget dimension
+QUESTION_EDITOR_MAX_HEIGHT = 120
+QUESTION_PANE_MAX_HEIGHT = 180
 
 FOLLOW_UP_BUTTON_STYLE = (
     "QPushButton {"
@@ -314,13 +317,15 @@ class MainWindow(QMainWindow):
         self._expanded_window_size = QSize(420, 650)
         self._collapsed_window_height = 90
         self._latest_question_text = ""
+        self._question_history: list[str] = []
         self._question_text_locked = False
         self._question_follow_up_suggestions: list[str] = []
+        self._follow_up_collapsed = False
         self._queued_normalized_questions: list[str] = []
         self._queued_question_segment_ids: list[str] = []
         self._queued_question_statuses: list[str] = []
         self._follow_up_buttons: list[QPushButton] = []
-        self._follow_up_header: QLabel | None = None
+        self._follow_up_header: QToolButton | None = None
         self._follow_up_container: QWidget | None = None
         self._follow_up_status_label: QLabel | None = None
         self._queued_questions_header: QLabel | None = None
@@ -489,6 +494,7 @@ class MainWindow(QMainWindow):
         self._question_card.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        self._question_card.setMinimumWidth(0)
         self._question_card.setStyleSheet(
             "QFrame#question_card {"
             " background-color: rgba(33, 38, 45, 0.92);"
@@ -516,6 +522,12 @@ class MainWindow(QMainWindow):
         self._question_text.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        self._question_text.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
+        self._question_text.setMinimumWidth(0)
+        self._question_text.setMinimumHeight(0)
+        self._question_text.setMaximumHeight(QUESTION_EDITOR_MAX_HEIGHT)
         self._question_text.setLineWrapMode(
             QPlainTextEdit.LineWrapMode.WidgetWidth
         )
@@ -529,24 +541,43 @@ class MainWindow(QMainWindow):
         )
         question_layout.addWidget(self._question_text, 1)
 
-        follow_up_header = QLabel("Likely Follow-Up Questions")
+        follow_up_header = QToolButton()
+        follow_up_header.setText("Likely Follow-Up Questions")
+        follow_up_header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        follow_up_header.setArrowType(Qt.ArrowType.DownArrow)
+        follow_up_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        follow_up_header.setAutoRaise(True)
+        follow_up_header.clicked.connect(self._toggle_follow_up_visibility)
         follow_up_header.setStyleSheet(
-            "color: #79c0ff; font-size: 9.5pt; font-weight: 800;"
+            "QToolButton {"
+            " color: #79c0ff; font-size: 9.5pt; font-weight: 800;"
+            " padding: 0px; border: none; text-align: left;"
+            "}"
+            "QToolButton:hover { color: #a5d6ff; }"
         )
         follow_up_header.hide()
         self._follow_up_header = follow_up_header
         question_layout.addWidget(follow_up_header)
 
         follow_up_container = QWidget()
+        follow_up_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        follow_up_container.setMinimumHeight(0)
+        follow_up_container.setMaximumHeight(96)
         follow_up_layout = QVBoxLayout(follow_up_container)
         follow_up_layout.setContentsMargins(0, 0, 0, 0)
-        follow_up_layout.setSpacing(6)
+        follow_up_layout.setSpacing(3)
 
         for index in range(3):
             button = QPushButton("")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setFlat(False)
-            button.setMinimumHeight(34)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
+            button.setMinimumWidth(0)
+            button.setMinimumHeight(26)
             button.setStyleSheet(FOLLOW_UP_BUTTON_STYLE)
             button.clicked.connect(
                 lambda _checked=False, idx=index: self._on_follow_up_clicked(idx)
@@ -706,11 +737,24 @@ class MainWindow(QMainWindow):
             max(100, available_height - 40),
         )
         question_max = max(40, available_height - ai_min_height)
+        question_max = min(question_max, QUESTION_PANE_MAX_HEIGHT)
         question_min = min(120, max(60, int(available_height * 0.12)))
         if question_min > question_max:
             question_min = max(40, question_max)
 
         return max(question_min, min(question_max, natural_height))
+
+    def _toggle_follow_up_visibility(self) -> None:
+        self._follow_up_collapsed = not self._follow_up_collapsed
+        if self._follow_up_header is not None:
+            self._follow_up_header.setArrowType(
+                Qt.ArrowType.RightArrow
+                if self._follow_up_collapsed
+                else Qt.ArrowType.DownArrow
+            )
+        self._update_follow_up_visibility()
+        if self._qa_revealed:
+            QTimer.singleShot(0, self._apply_splitter_proportions)
 
     def _apply_startup_collapsed_layout(self) -> None:
         """Start as a toolbar-only rectangle."""
@@ -735,7 +779,19 @@ class MainWindow(QMainWindow):
         self._latest_question_text = str(text or "").strip()
         if self._latest_question_text != previous_text:
             self.clear_follow_up_status()
-        self._question_text.setPlainText(self._latest_question_text)
+
+        if not self._latest_question_text:
+            self._question_history.clear()
+        elif not self._question_history:
+            self._question_history.append(self._latest_question_text)
+        elif self._canonical_question(self._question_history[-1]) == self._canonical_question(
+            self._latest_question_text
+        ):
+            self._question_history[-1] = self._latest_question_text
+        else:
+            self._question_history.append(self._latest_question_text)
+
+        self._question_text.setPlainText("\n\n".join(self._question_history))
         if not self._latest_question_text:
             self._question_follow_up_suggestions = []
             for button in self._follow_up_buttons:
@@ -940,11 +996,22 @@ class MainWindow(QMainWindow):
         if self._follow_up_header is not None:
             self._follow_up_header.setVisible(visible)
         if self._follow_up_container is not None:
-            self._follow_up_container.setVisible(
-                visible and bool(self._question_follow_up_suggestions)
+            container_visible = (
+                visible
+                and not self._follow_up_collapsed
+                and bool(self._question_follow_up_suggestions)
             )
+            self._follow_up_container.setVisible(container_visible)
+            if container_visible:
+                button_count = min(3, len(self._question_follow_up_suggestions))
+                content_height = (button_count * 26) + max(0, button_count - 1) * 3
+                self._follow_up_container.setMinimumHeight(content_height)
+            else:
+                self._follow_up_container.setMinimumHeight(0)
         if self._follow_up_status_label is not None:
-            self._follow_up_status_label.setVisible(visible and bool(status_text))
+            self._follow_up_status_label.setVisible(
+                visible and not self._follow_up_collapsed and bool(status_text)
+            )
 
     def _update_queued_questions_visibility(self) -> None:
         visible = self._qa_revealed and bool(self._queued_normalized_questions)

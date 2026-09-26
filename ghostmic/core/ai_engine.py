@@ -114,6 +114,7 @@ _WEIGHT_STANDALONE_PENALTY: float = -0.30  # penalty for ≥ 2 novel content wor
 
 # Maximum token count for a question to qualify as a "short" follow-up.
 SHORT_FOLLOW_UP_MAX_TOKENS: int = 15
+DEFAULT_RESPONSE_MAX_TOKENS: int = 1024
 
 # Minimum content-word length for domain-keyword extraction.
 _DOMAIN_KEYWORD_MIN_LEN: int = 4
@@ -854,6 +855,7 @@ class AIThread(QThread):  # type: ignore[misc]
         )
         full_response: List[str] = []
         stream = None
+        finish_reason = "unknown"
 
         try:
             default_model = (
@@ -870,6 +872,13 @@ class AIThread(QThread):  # type: ignore[misc]
                 model,
                 len(context),
             )
+            configured_max_tokens = self._config.get(
+                "max_tokens", DEFAULT_RESPONSE_MAX_TOKENS
+            )
+            try:
+                max_tokens = max(256, min(4096, int(configured_max_tokens)))
+            except (TypeError, ValueError):
+                max_tokens = DEFAULT_RESPONSE_MAX_TOKENS
 
             logger.info(
                 "AIThread (%s): calling "
@@ -883,7 +892,7 @@ class AIThread(QThread):  # type: ignore[misc]
                     {"role": "user", "content": context},
                 ],
                 temperature=temperature,
-                max_tokens=512,
+                max_tokens=max_tokens,
                 stream=True,
             )
             logger.info(
@@ -926,6 +935,7 @@ class AIThread(QThread):  # type: ignore[misc]
                         "length",
                         "tool_calls",
                     ):
+                        finish_reason = choice.finish_reason or "unknown"
                         logger.debug(
                             "AIThread (%s): stream finished "
                             "(reason: %s, chunks: %d)",
@@ -958,6 +968,12 @@ class AIThread(QThread):  # type: ignore[misc]
 
         complete = "".join(full_response)
         if complete:
+            if finish_reason == "length":
+                logger.warning(
+                    "AIThread (%s): response reached max_tokens=%d; output may be incomplete",
+                    backend_name,
+                    max_tokens,
+                )
             if self._on_ready:
                 self._on_ready(complete)
             if pyqtSignal is not None:

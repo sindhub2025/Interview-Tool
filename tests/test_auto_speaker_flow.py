@@ -147,33 +147,6 @@ def test_transcription_ready_leaves_streaming_segment_boundary_to_normalizer():
     assert calls == [{"force_flush": False}]
 
 
-def test_streaming_segment_updates_transcript_display_with_full_text():
-    app = _app_for_normalization_callbacks()
-    displayed = TranscriptSegment(
-        text="especially around late-arriving data?",
-        source="speaker",
-        timestamp=21.0,
-    )
-    updates = []
-    app._transcript_history = [displayed]
-    app._window = SimpleNamespace(
-        transcript_panel=SimpleNamespace(
-            set_segment_text=lambda segment, text: updates.append((segment, text))
-        )
-    )
-
-    app._sync_streaming_transcript_display(
-        SimpleNamespace(
-            normalized_text="Can you explain your ETL testing approach especially around late-arriving data?",
-            source="speaker",
-        )
-    )
-
-    expected = "Can you explain your ETL testing approach especially around late-arriving data?"
-    assert displayed.text == expected
-    assert updates == [(displayed, expected)]
-
-
 def test_auto_speaker_silence_elapsed_invokes_normalization_with_auto_send():
     app = _app_for_auto("auto")
     segment = TranscriptSegment(
