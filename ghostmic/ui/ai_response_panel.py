@@ -8,8 +8,8 @@ from html import escape
 import re
 from typing import List
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QTextCursor
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QKeySequence, QTextCursor, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -162,12 +162,20 @@ def render_response_html(text: str) -> str:
 
 
 class AIResponseCard(QFrame):
-    """A single AI answer card with a Copy action."""
+    """A single AI answer card with normal and teleprompter presentations."""
 
     def __init__(self, text: str = "", title: str = "Answer", parent=None) -> None:
         super().__init__(parent)
         self._text = text
         self._title = title
+        self._teleprompter_active = False
+        self._reading_font_size = 24
+        self._scroll_speed = 2
+        self._scrolling = False
+        self._camera_window = None
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setInterval(40)
+        self._scroll_timer.timeout.connect(self._advance_scroll)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -198,6 +206,14 @@ class AIResponseCard(QFrame):
         )
         self._copy_btn.clicked.connect(self._copy)
         header.addWidget(self._copy_btn)
+
+        self._teleprompter_btn = QPushButton("Teleprompter")
+        self._teleprompter_btn.setFixedSize(104, 26)
+        self._teleprompter_btn.setStyleSheet(
+            "font-size: 10pt; font-weight: 600; padding: 0px 8px;"
+        )
+        self._teleprompter_btn.clicked.connect(self.toggle_teleprompter)
+        header.addWidget(self._teleprompter_btn)
         layout.addLayout(header)
 
         # Response text
@@ -215,8 +231,236 @@ class AIResponseCard(QFrame):
         self._text_edit.setHtml(render_response_html(self._text))
         layout.addWidget(self._text_edit)
 
+        self._teleprompter_toolbar = QWidget()
+        toolbar = QHBoxLayout(self._teleprompter_toolbar)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(4)
+        self._font_down_btn = QPushButton("A−")
+        self._font_up_btn = QPushButton("A+")
+        self._start_scroll_btn = QPushButton("Start")
+        self._camera_btn = QPushButton("Camera Mode")
+        self._speed_down_btn = QPushButton("−")
+        self._speed_up_btn = QPushButton("+")
+        self._speed_label = QLabel("Speed 2/5")
+        for button in (self._font_down_btn, self._font_up_btn,
+                       self._start_scroll_btn, self._speed_down_btn,
+                       self._speed_up_btn):
+            button.setMinimumWidth(38)
+            toolbar.addWidget(button)
+        toolbar.addWidget(self._speed_label)
+        toolbar.addWidget(self._camera_btn)
+        toolbar.addStretch()
+        self._font_down_btn.clicked.connect(lambda: self._change_font_size(-2))
+        self._font_up_btn.clicked.connect(lambda: self._change_font_size(2))
+        self._start_scroll_btn.clicked.connect(self._toggle_scrolling)
+        self._speed_down_btn.clicked.connect(lambda: self._change_speed(-1))
+        self._speed_up_btn.clicked.connect(lambda: self._change_speed(1))
+        self._camera_btn.clicked.connect(self.toggle_camera_mode)
+        self._teleprompter_toolbar.setVisible(False)
+        layout.addWidget(self._teleprompter_toolbar)
+
+        self._reading_view = QTextBrowser()
+        self._reading_view.setReadOnly(True)
+        self._reading_view.setOpenExternalLinks(False)
+        self._reading_view.setStyleSheet(
+            f"background-color: {BG_DEEP}; color: {TEXT_PRIMARY}; "
+            "border: none; border-radius: 6px; padding: 20px 24px;"
+        )
+        self._reading_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self._reading_view.setMinimumHeight(0)
+        self._reading_view.setVisible(False)
+        layout.addWidget(self._reading_view)
+
+    def _render_reading_view(self, *, scroll_to_end: bool = False) -> None:
+        old_scroll = self._reading_view.verticalScrollBar().value()
+        old_max = self._reading_view.verticalScrollBar().maximum()
+        html = render_response_html(self._text)
+        if html:
+            html = html.replace(
+                "<html><body style='margin:0; padding:0; background:transparent; "
+                f"color:{TEXT_PRIMARY}; font-family:\"Segoe UI\"; font-size:11pt;'>",
+                "<html><body style='margin:0; padding:0; background:transparent; "
+                f"color:{TEXT_PRIMARY}; font-family:\"Segoe UI\"; font-size:{self._reading_font_size}pt; "
+                "line-height:1.45;'>",
+            )
+            html = html.replace("font-size:11pt", f"font-size:{self._reading_font_size}pt")
+            html = html.replace("font-size:10pt", f"font-size:{max(12, self._reading_font_size - 6)}pt")
+            html = html.replace(
+                f"font-size:{self._reading_font_size}pt; white-space:pre-wrap",
+                f"font-size:{max(12, self._reading_font_size - 6)}pt; white-space:pre-wrap",
+            )
+        self._reading_view.setHtml(html)
+        scrollbar = self._reading_view.verticalScrollBar()
+        if scroll_to_end:
+            scrollbar.setValue(scrollbar.maximum())
+        elif old_max:
+            scrollbar.setValue(min(scrollbar.maximum(), int(old_scroll / old_max * scrollbar.maximum())))
+        else:
+            scrollbar.setValue(scrollbar.minimum())
+
+    def _change_font_size(self, delta: int) -> None:
+        self._reading_font_size = max(16, min(40, self._reading_font_size + delta))
+        self._font_down_btn.setEnabled(self._reading_font_size > 16)
+        self._font_up_btn.setEnabled(self._reading_font_size < 40)
+        if self._teleprompter_active:
+            self._render_reading_view()
+
+    def _change_speed(self, delta: int) -> None:
+        self._scroll_speed = max(1, min(5, self._scroll_speed + delta))
+        self._speed_label.setText(f"Speed {self._scroll_speed}/5")
+
+    def _toggle_scrolling(self) -> None:
+        scrollbar = self._reading_view.verticalScrollBar()
+        if not self._scrolling and scrollbar.value() >= scrollbar.maximum() and scrollbar.maximum() > 0:
+            scrollbar.setValue(scrollbar.minimum())
+        self._scrolling = not self._scrolling
+        if self._scrolling:
+            self._scroll_timer.start()
+            self._start_scroll_btn.setText("Pause")
+        else:
+            self._scroll_timer.stop()
+            self._start_scroll_btn.setText("Resume" if scrollbar.value() > scrollbar.minimum() else "Start")
+
+    def _advance_scroll(self) -> None:
+        scrollbar = self._reading_view.verticalScrollBar()
+        value = min(scrollbar.maximum(), scrollbar.value() + self._scroll_speed)
+        scrollbar.setValue(value)
+        if value >= scrollbar.maximum():
+            self._scrolling = False
+            self._scroll_timer.stop()
+            self._start_scroll_btn.setText("Replay")
+
+    def _camera_geometry(self):
+        screen = QApplication.screenAt(self.mapToGlobal(self.rect().center()))
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return None
+        available = screen.availableGeometry()
+        width = min(640, max(420, available.width() - 32))
+        height = min(210, max(150, available.height() // 5))
+        x = available.x() + (available.width() - width) // 2
+        y = available.y() + min(80, max(24, available.height() // 20))
+        return available, x, y, width, height
+
+    def _center_camera_window(self) -> None:
+        if self._camera_window is None:
+            return
+        geometry = self._camera_geometry()
+        if geometry is not None:
+            _, x, y, width, height = geometry
+            self._camera_window.setGeometry(x, y, width, height)
+
+    def toggle_camera_mode(self) -> None:
+        if self._camera_window is not None:
+            self._exit_camera_mode()
+            return
+        from PyQt6.QtCore import QRect
+        self._camera_window = QFrame(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        self._camera_window.setObjectName("teleprompter_camera_window")
+        self._camera_window.setStyleSheet(
+            f"QFrame#teleprompter_camera_window {{ background-color: {BG_DEEP}; "
+            f"border: 1px solid {BORDER}; border-radius: 8px; }}"
+        )
+        camera_layout = QVBoxLayout(self._camera_window)
+        camera_layout.setContentsMargins(8, 6, 8, 6)
+        camera_layout.addWidget(self._teleprompter_toolbar)
+        camera_layout.addWidget(self._reading_view, 1)
+        self._camera_window.setMinimumSize(320, 120)
+        self._camera_window.resize(620, 190)
+        self._center_camera_window()
+        self._camera_btn.setText("Exit Camera Mode")
+        self._camera_window.destroyed.connect(self._camera_window_closed)
+        self._install_camera_shortcuts()
+        self._camera_window.show()
+        self._reading_view.setFocus()
+
+    def _install_camera_shortcuts(self) -> None:
+        if self._camera_window is None:
+            return
+        shortcuts = {
+            "Space": self._toggle_scrolling,
+            "Up": lambda: self._change_speed(1),
+            "Down": lambda: self._change_speed(-1),
+            "+": lambda: self._change_font_size(2),
+            "=": lambda: self._change_font_size(2),
+            "-": lambda: self._change_font_size(-2),
+            "Home": self._scroll_home,
+            "End": self._scroll_end,
+            "C": self.toggle_camera_mode,
+            "Esc": self._exit_camera_mode,
+        }
+        self._camera_shortcuts = []
+        for key, callback in shortcuts.items():
+            shortcut = QShortcut(QKeySequence(key), self._camera_window)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(callback)
+            self._camera_shortcuts.append(shortcut)
+
+    def _scroll_home(self) -> None:
+        self._scrolling = False
+        self._scroll_timer.stop()
+        self._reading_view.verticalScrollBar().setValue(0)
+        self._start_scroll_btn.setText("Start")
+
+    def _scroll_end(self) -> None:
+        self._scrolling = False
+        self._scroll_timer.stop()
+        self._reading_view.verticalScrollBar().setValue(
+            self._reading_view.verticalScrollBar().maximum()
+        )
+        self._start_scroll_btn.setText("Replay")
+
+    def _exit_camera_mode(self) -> None:
+        window = self._camera_window
+        if window is None:
+            return
+        self._camera_window = None
+        window.close()
+        self._teleprompter_toolbar.setParent(self)
+        self._reading_view.setParent(self)
+        card_layout = self.layout()
+        if card_layout is not None:
+            card_layout.addWidget(self._teleprompter_toolbar)
+            card_layout.addWidget(self._reading_view)
+        self._camera_btn.setText("Camera Mode")
+        self._teleprompter_toolbar.setVisible(self._teleprompter_active)
+        self._reading_view.setVisible(self._teleprompter_active)
+
+    def _camera_window_closed(self) -> None:
+        if self._camera_window is not None:
+            self._camera_window = None
+            self._teleprompter_toolbar.setParent(self)
+            self._reading_view.setParent(self)
+            if self.layout() is not None:
+                self.layout().addWidget(self._teleprompter_toolbar)
+                self.layout().addWidget(self._reading_view)
+            self._camera_btn.setText("Camera Mode")
+
+    def toggle_teleprompter(self) -> None:
+        active = not self._teleprompter_active
+        if not active and self._camera_window is not None:
+            self._exit_camera_mode()
+        if active:
+            self._render_reading_view()
+        self._teleprompter_active = active
+        self._text_edit.setVisible(not active)
+        self._reading_view.setVisible(active)
+        self._teleprompter_toolbar.setVisible(active)
+        self._teleprompter_btn.setText("Normal View" if active else "Teleprompter")
+        if not active:
+            self._scrolling = False
+            self._scroll_timer.stop()
+
+    def is_teleprompter_active(self) -> bool:
+        return self._teleprompter_active
+
     def _render_text(self, *, scroll_to_end: bool) -> None:
         self._text_edit.setHtml(render_response_html(self._text))
+        if self._teleprompter_active:
+            self._render_reading_view(scroll_to_end=scroll_to_end)
         cursor = self._text_edit.textCursor()
         cursor.movePosition(
             QTextCursor.MoveOperation.End
@@ -229,14 +473,21 @@ class AIResponseCard(QFrame):
     def append_text(self, chunk: str) -> None:
         """Append a streaming chunk to the response."""
         self._text += chunk
-        self._render_text(scroll_to_end=True)
+        self._render_text(scroll_to_end=not self._teleprompter_active)
 
     def set_text(self, text: str) -> None:
         from ghostmic.utils.logger import get_logger
 
         logger = get_logger(__name__)
+        self._scrolling = False
+        self._scroll_timer.stop()
         self._text = text
         self._render_text(scroll_to_end=False)
+        if self._teleprompter_active:
+            self._reading_view.verticalScrollBar().setValue(
+                self._reading_view.verticalScrollBar().minimum()
+            )
+            self._start_scroll_btn.setText("Start")
         self._text_edit.updateGeometry()
         logger.info(
             "AIResponseCard.set_text() called - set %d chars to QTextBrowser, new height=%d",

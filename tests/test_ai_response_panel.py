@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
-from ghostmic.ui.ai_response_panel import AIResponsePanel, render_response_html
+from ghostmic.ui.ai_response_panel import AIResponseCard, AIResponsePanel, render_response_html
 
 
 def _qt_app() -> QApplication:
@@ -128,3 +128,48 @@ def test_render_response_html_highlights_sql_and_python_code_blocks() -> None:
     assert html.count("font-size:10pt") >= 2
     assert html.count("line-height:1.5") >= 2
     assert "padding:12px 14px" in html
+
+
+def test_teleprompter_toggle_and_synchronized_content() -> None:
+    app = _qt_app()
+    card = AIResponseCard("First answer")
+
+    assert card._teleprompter_btn.text() == "Teleprompter"
+    assert not card.is_teleprompter_active()
+    assert not card._reading_view.isVisible()
+
+    card._teleprompter_btn.click()
+    app.processEvents()
+    assert card.is_teleprompter_active()
+    assert card._teleprompter_btn.text() == "Normal View"
+    assert not card._text_edit.isVisible()
+    assert "First answer" in card._reading_view.toPlainText()
+
+    card.append_text(" and more.")
+    assert "First answer and more." in card._reading_view.toPlainText()
+
+    card._teleprompter_btn.click()
+    assert not card.is_teleprompter_active()
+    assert card._teleprompter_btn.text() == "Teleprompter"
+    assert card._text_edit.isVisible()
+
+
+def test_teleprompter_replacing_answer_removes_stale_content() -> None:
+    app = _qt_app()
+    card = AIResponseCard("Old answer")
+    card._teleprompter_btn.click()
+    card.set_text("New answer")
+    app.processEvents()
+
+    assert "New answer" in card._reading_view.toPlainText()
+    assert "Old answer" not in card._reading_view.toPlainText()
+
+
+def test_copy_keeps_original_plain_answer() -> None:
+    app = _qt_app()
+    answer = "SELECT * FROM users;"
+    card = AIResponseCard(answer)
+    card._teleprompter_btn.click()
+    card._copy_btn.click()
+
+    assert app.clipboard().text() == answer
