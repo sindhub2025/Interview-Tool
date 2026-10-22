@@ -164,17 +164,22 @@ def render_response_html(text: str) -> str:
 class AIResponseCard(QFrame):
     """A single AI answer card with normal and teleprompter presentations."""
 
+    camera_mode_requested = pyqtSignal(bool)
+
     def __init__(self, text: str = "", title: str = "Answer", parent=None) -> None:
         super().__init__(parent)
         self._text = text
         self._title = title
         self._teleprompter_active = False
         self._reading_font_size = 24
-        self._scroll_speed = 2
+        self._scroll_speed = 2.0
+        self._scroll_remainder = 0.0
         self._scrolling = False
-        self._camera_window = None
+        self._camera_mode_active = False
+        self._camera_shortcuts = []
+        self._tooltips_before_camera = {}
         self._scroll_timer = QTimer(self)
-        self._scroll_timer.setInterval(40)
+        self._scroll_timer.setInterval(16)
         self._scroll_timer.timeout.connect(self._advance_scroll)
         self._build_ui()
 
@@ -182,21 +187,26 @@ class AIResponseCard(QFrame):
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        self.setObjectName("ai_response_card")
         self.setStyleSheet(
-            f"background-color: {BG_CARD}; border: 1px solid {BORDER}; "
-            "border-radius: 8px;"
+            f"QFrame#ai_response_card {{ background-color: {BG_CARD}; "
+            f"border: 1px solid {BORDER}; border-radius: 10px; }}"
         )
+        self._style_before_camera = self.styleSheet()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(6)
 
         # Top row: title + buttons
-        header = QHBoxLayout()
-        title_label = QLabel(self._title)
-        title_label.setStyleSheet(
-            f"color: {ACCENT_BLUE}; font-weight: bold; font-size: 10pt;"
+        self._card_header = QWidget(self)
+        header = QHBoxLayout(self._card_header)
+        header.setContentsMargins(2, 0, 2, 0)
+        header.setSpacing(6)
+        self._title_label = QLabel(self._title)
+        self._title_label.setStyleSheet(
+            f"color: {ACCENT_BLUE}; font-weight: 700; font-size: 9pt;"
         )
-        header.addWidget(title_label)
+        header.addWidget(self._title_label)
         header.addStretch()
 
         self._copy_btn = QPushButton("Copy")
@@ -205,6 +215,7 @@ class AIResponseCard(QFrame):
             "font-size: 10pt; font-weight: 600; padding: 0px 12px;"
         )
         self._copy_btn.clicked.connect(self._copy)
+        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         header.addWidget(self._copy_btn)
 
         self._teleprompter_btn = QPushButton("Teleprompter")
@@ -213,8 +224,9 @@ class AIResponseCard(QFrame):
             "font-size: 10pt; font-weight: 600; padding: 0px 8px;"
         )
         self._teleprompter_btn.clicked.connect(self.toggle_teleprompter)
+        self._teleprompter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         header.addWidget(self._teleprompter_btn)
-        layout.addLayout(header)
+        layout.addWidget(self._card_header)
 
         # Response text
         self._text_edit = QTextBrowser()
@@ -231,40 +243,62 @@ class AIResponseCard(QFrame):
         self._text_edit.setHtml(render_response_html(self._text))
         layout.addWidget(self._text_edit)
 
-        self._teleprompter_toolbar = QWidget()
+        self._teleprompter_toolbar = QWidget(self)
+        self._teleprompter_toolbar.setObjectName("teleprompter_toolbar")
         toolbar = QHBoxLayout(self._teleprompter_toolbar)
-        toolbar.setContentsMargins(0, 0, 0, 0)
-        toolbar.setSpacing(4)
+        toolbar.setContentsMargins(2, 0, 2, 0)
+        toolbar.setSpacing(5)
         self._font_down_btn = QPushButton("A−")
         self._font_up_btn = QPushButton("A+")
         self._start_scroll_btn = QPushButton("Start")
         self._camera_btn = QPushButton("Camera Mode")
         self._speed_down_btn = QPushButton("−")
         self._speed_up_btn = QPushButton("+")
-        self._speed_label = QLabel("Speed 2/5")
+        self._font_size_label = QLabel("24 pt")
+        self._speed_label = QLabel("2x")
+        self._font_down_btn.setToolTip("Decrease reading text size")
+        self._font_up_btn.setToolTip("Increase reading text size")
+        self._start_scroll_btn.setToolTip("Start or pause auto-scroll")
+        self._speed_down_btn.setToolTip("Decrease scroll speed")
+        self._speed_up_btn.setToolTip("Increase scroll speed")
+        self._font_down_btn.setAccessibleName("Decrease reading text size")
+        self._font_up_btn.setAccessibleName("Increase reading text size")
+        self._start_scroll_btn.setAccessibleName("Start or pause auto-scroll")
+        self._speed_down_btn.setAccessibleName("Decrease scroll speed")
+        self._speed_up_btn.setAccessibleName("Increase scroll speed")
         for button in (self._font_down_btn, self._font_up_btn,
                        self._start_scroll_btn, self._speed_down_btn,
                        self._speed_up_btn):
-            button.setMinimumWidth(38)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setMinimumWidth(30)
             toolbar.addWidget(button)
+        toolbar.insertWidget(1, self._font_size_label)
+        self._font_size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         toolbar.addWidget(self._speed_label)
-        toolbar.addWidget(self._camera_btn)
         toolbar.addStretch()
+        toolbar.addWidget(self._camera_btn)
         self._font_down_btn.clicked.connect(lambda: self._change_font_size(-2))
         self._font_up_btn.clicked.connect(lambda: self._change_font_size(2))
         self._start_scroll_btn.clicked.connect(self._toggle_scrolling)
         self._speed_down_btn.clicked.connect(lambda: self._change_speed(-1))
         self._speed_up_btn.clicked.connect(lambda: self._change_speed(1))
         self._camera_btn.clicked.connect(self.toggle_camera_mode)
+        self._camera_btn.setAccessibleName("Camera Mode")
+        self._apply_teleprompter_toolbar_style()
         self._teleprompter_toolbar.setVisible(False)
         layout.addWidget(self._teleprompter_toolbar)
 
         self._reading_view = QTextBrowser()
         self._reading_view.setReadOnly(True)
         self._reading_view.setOpenExternalLinks(False)
+        self._reading_view.setFrameShape(QFrame.Shape.NoFrame)
+        self._reading_view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self._reading_view.setStyleSheet(
-            f"background-color: {BG_DEEP}; color: {TEXT_PRIMARY}; "
-            "border: none; border-radius: 6px; padding: 20px 24px;"
+            "QTextBrowser { background: transparent; color: #eff4fa; "
+            "border: none; padding: 2px 10px; "
+            "selection-background-color: #315b83; }"
         )
         self._reading_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -300,16 +334,56 @@ class AIResponseCard(QFrame):
         else:
             scrollbar.setValue(scrollbar.minimum())
 
+    def _apply_teleprompter_toolbar_style(self) -> None:
+        button_style = (
+            "QPushButton { background: #1b232e; color: #dce5ef; "
+            "border: 1px solid rgba(148,163,184,0.16); border-radius: 7px; "
+            "padding: 0 8px; font-size: 9pt; font-weight: 600; }"
+            "QPushButton:hover { background: #263242; border-color: rgba(125,173,220,0.42); }"
+            "QPushButton:pressed { background: #111821; }"
+            "QPushButton:disabled { color: #687687; background: #151b23; }"
+        )
+        for button in (self._font_down_btn, self._font_up_btn,
+                       self._speed_down_btn, self._speed_up_btn):
+            button.setFixedSize(30, 28)
+            button.setStyleSheet(button_style)
+        self._start_scroll_btn.setFixedSize(70, 28)
+        self._start_scroll_btn.setObjectName("scroll_toggle_btn")
+        self._start_scroll_btn.setStyleSheet(
+            button_style + "QPushButton#scroll_toggle_btn { color: #d9f5e1; "
+            "background: rgba(46,160,67,0.16); border-color: rgba(63,185,80,0.34); }"
+            "QPushButton#scroll_toggle_btn:hover { background: rgba(46,160,67,0.26); }"
+        )
+        self._camera_btn.setFixedSize(78, 28)
+        self._camera_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #a9c9e8; "
+            "border: 1px solid rgba(125,173,220,0.23); border-radius: 7px; "
+            "padding: 0 8px; font-size: 9pt; font-weight: 600; }"
+            "QPushButton:hover { background: rgba(88,166,255,0.12); "
+            "border-color: rgba(125,173,220,0.50); }"
+        )
+        self._font_size_label.setStyleSheet(
+            "color: #8795a5; font-size: 8pt; font-weight: 600;"
+        )
+        self._font_size_label.setFixedWidth(36)
+        self._speed_label.setStyleSheet(
+            "color: #e7edf5; font-size: 9pt; font-weight: 700; padding: 0 2px;"
+        )
+        self._speed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._speed_label.setFixedWidth(34)
+
     def _change_font_size(self, delta: int) -> None:
         self._reading_font_size = max(16, min(40, self._reading_font_size + delta))
+        self._font_size_label.setText(f"{self._reading_font_size} pt")
         self._font_down_btn.setEnabled(self._reading_font_size > 16)
         self._font_up_btn.setEnabled(self._reading_font_size < 40)
         if self._teleprompter_active:
             self._render_reading_view()
 
     def _change_speed(self, delta: int) -> None:
-        self._scroll_speed = max(1, min(5, self._scroll_speed + delta))
-        self._speed_label.setText(f"Speed {self._scroll_speed}/5")
+        self._scroll_speed = max(1.0, min(5.0, self._scroll_speed + (delta * 0.5)))
+        speed = f"{self._scroll_speed:.1f}".rstrip("0").rstrip(".")
+        self._speed_label.setText(f"{speed}x")
 
     def _toggle_scrolling(self) -> None:
         scrollbar = self._reading_view.verticalScrollBar()
@@ -318,67 +392,132 @@ class AIResponseCard(QFrame):
         self._scrolling = not self._scrolling
         if self._scrolling:
             self._scroll_timer.start()
-            self._start_scroll_btn.setText("Pause")
         else:
             self._scroll_timer.stop()
-            self._start_scroll_btn.setText("Resume" if scrollbar.value() > scrollbar.minimum() else "Start")
+        self._update_scroll_button_label()
+
+    def _update_scroll_button_label(self) -> None:
+        scrollbar = self._reading_view.verticalScrollBar()
+        if self._scrolling:
+            label = "Ⅱ" if self._camera_mode_active else "Pause"
+        elif scrollbar.value() >= scrollbar.maximum() and scrollbar.maximum() > 0:
+            label = "↻" if self._camera_mode_active else "Replay"
+        elif scrollbar.value() > scrollbar.minimum():
+            label = "▶" if self._camera_mode_active else "Resume"
+        else:
+            label = "▶" if self._camera_mode_active else "Start"
+        self._start_scroll_btn.setText(label)
 
     def _advance_scroll(self) -> None:
         scrollbar = self._reading_view.verticalScrollBar()
-        value = min(scrollbar.maximum(), scrollbar.value() + self._scroll_speed)
+        # Scale fractional speed to a steady pixels-per-second rate. At 60 Hz,
+        # 2x advances about 20 px/s and 5x about 50 px/s.
+        self._scroll_remainder += self._scroll_speed * 0.16
+        pixels = int(self._scroll_remainder)
+        self._scroll_remainder -= pixels
+        value = min(scrollbar.maximum(), scrollbar.value() + pixels)
         scrollbar.setValue(value)
         if value >= scrollbar.maximum():
             self._scrolling = False
             self._scroll_timer.stop()
-            self._start_scroll_btn.setText("Replay")
-
-    def _camera_geometry(self):
-        screen = QApplication.screenAt(self.mapToGlobal(self.rect().center()))
-        if screen is None:
-            screen = QApplication.primaryScreen()
-        if screen is None:
-            return None
-        available = screen.availableGeometry()
-        width = min(640, max(420, available.width() - 32))
-        height = min(210, max(150, available.height() // 5))
-        x = available.x() + (available.width() - width) // 2
-        y = available.y() + min(80, max(24, available.height() // 20))
-        return available, x, y, width, height
-
-    def _center_camera_window(self) -> None:
-        if self._camera_window is None:
-            return
-        geometry = self._camera_geometry()
-        if geometry is not None:
-            _, x, y, width, height = geometry
-            self._camera_window.setGeometry(x, y, width, height)
+            self._update_scroll_button_label()
 
     def toggle_camera_mode(self) -> None:
-        if self._camera_window is not None:
-            self._exit_camera_mode()
-            return
-        from PyQt6.QtCore import QRect
-        self._camera_window = QFrame(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
-        self._camera_window.setObjectName("teleprompter_camera_window")
-        self._camera_window.setStyleSheet(
-            f"QFrame#teleprompter_camera_window {{ background-color: {BG_DEEP}; "
-            f"border: 1px solid {BORDER}; border-radius: 8px; }}"
+        requested = not self._camera_mode_active
+        self.camera_mode_requested.emit(requested)
+
+    def set_camera_mode(self, active: bool) -> None:
+        """Synchronize the card's presentation with MainWindow camera mode."""
+        self._camera_mode_active = active
+        if active:
+            self._style_before_camera = self.styleSheet()
+            camera_buttons = (
+                self._font_down_btn,
+                self._font_up_btn,
+                self._start_scroll_btn,
+                self._speed_down_btn,
+                self._speed_up_btn,
+                self._camera_btn,
+            )
+            self._tooltips_before_camera = {
+                button: button.toolTip() for button in camera_buttons
+            }
+            for button in camera_buttons:
+                button.setToolTip("")
+        else:
+            for button, tooltip in self._tooltips_before_camera.items():
+                button.setToolTip(tooltip)
+            self._tooltips_before_camera.clear()
+        self._camera_btn.setText("×" if active else "Camera Mode")
+        self._camera_btn.setAccessibleName(
+            "Exit Camera Mode" if active else "Camera Mode"
         )
-        camera_layout = QVBoxLayout(self._camera_window)
-        camera_layout.setContentsMargins(8, 6, 8, 6)
-        camera_layout.addWidget(self._teleprompter_toolbar)
-        camera_layout.addWidget(self._reading_view, 1)
-        self._camera_window.setMinimumSize(320, 120)
-        self._camera_window.resize(620, 190)
-        self._center_camera_window()
-        self._camera_btn.setText("Exit Camera Mode")
-        self._camera_window.destroyed.connect(self._camera_window_closed)
-        self._install_camera_shortcuts()
-        self._camera_window.show()
-        self._reading_view.setFocus()
+        if not active:
+            self._camera_btn.setToolTip("Compact the window below your camera")
+        self._card_header.setVisible(not active)
+        if active:
+            self.setStyleSheet(
+                "QFrame#ai_response_card { background: transparent; border: none; }"
+            )
+        else:
+            self.setStyleSheet(self._style_before_camera)
+        if active:
+            self.layout().setContentsMargins(10, 2, 10, 4)
+        else:
+            self.layout().setContentsMargins(10, 8, 10, 10)
+        self.layout().setSpacing(5 if active else 6)
+        self._teleprompter_toolbar.setStyleSheet(
+            "QWidget#teleprompter_toolbar { background: transparent; "
+            "border-top: 1px solid rgba(203,213,225,0.12); }"
+            if active else ""
+        )
+        toolbar_layout = self._teleprompter_toolbar.layout()
+        toolbar_layout.setContentsMargins(2, 5 if active else 0, 2, 0)
+        toolbar_layout.setSpacing(4 if active else 5)
+        if active:
+            self._camera_btn.setFixedSize(30, 28)
+            self._camera_btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #9ba9b9; "
+                "border: 1px solid rgba(148,163,184,0.18); border-radius: 14px; "
+                "padding: 0; font-size: 16pt; font-weight: 400; }"
+                "QPushButton:hover { color: #f1f5f9; "
+                "background: rgba(255,255,255,0.08); "
+                "border-color: rgba(203,213,225,0.36); }"
+            )
+            self._start_scroll_btn.setFixedSize(34, 28)
+            self._start_scroll_btn.setStyleSheet(
+                "QPushButton { background: rgba(46,160,67,0.13); color: #b7e4c0; "
+                "border: 1px solid rgba(63,185,80,0.24); border-radius: 14px; "
+                "padding: 0; font-size: 10pt; font-weight: 700; }"
+                "QPushButton:hover { background: rgba(46,160,67,0.24); }"
+            )
+            self._update_scroll_button_label()
+        else:
+            self._camera_btn.setFixedSize(78, 28)
+            self._apply_teleprompter_toolbar_style()
+            self._update_scroll_button_label()
+        if active:
+            layout = self.layout()
+            layout.removeWidget(self._teleprompter_toolbar)
+            layout.removeWidget(self._reading_view)
+            layout.addWidget(self._reading_view, 1)
+            layout.addWidget(self._teleprompter_toolbar)
+        else:
+            layout = self.layout()
+            layout.removeWidget(self._reading_view)
+            layout.removeWidget(self._teleprompter_toolbar)
+            layout.insertWidget(2, self._teleprompter_toolbar)
+            layout.insertWidget(3, self._reading_view, 1)
+        if active:
+            self._install_camera_shortcuts()
+        else:
+            for shortcut in self._camera_shortcuts:
+                shortcut.setEnabled(False)
+                shortcut.deleteLater()
+            self._camera_shortcuts.clear()
 
     def _install_camera_shortcuts(self) -> None:
-        if self._camera_window is None:
+        if self._camera_shortcuts:
             return
         shortcuts = {
             "Space": self._toggle_scrolling,
@@ -390,11 +529,10 @@ class AIResponseCard(QFrame):
             "Home": self._scroll_home,
             "End": self._scroll_end,
             "C": self.toggle_camera_mode,
-            "Esc": self._exit_camera_mode,
+            "Esc": self.toggle_camera_mode,
         }
-        self._camera_shortcuts = []
         for key, callback in shortcuts.items():
-            shortcut = QShortcut(QKeySequence(key), self._camera_window)
+            shortcut = QShortcut(QKeySequence(key), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(callback)
             self._camera_shortcuts.append(shortcut)
@@ -413,36 +551,8 @@ class AIResponseCard(QFrame):
         )
         self._start_scroll_btn.setText("Replay")
 
-    def _exit_camera_mode(self) -> None:
-        window = self._camera_window
-        if window is None:
-            return
-        self._camera_window = None
-        window.close()
-        self._teleprompter_toolbar.setParent(self)
-        self._reading_view.setParent(self)
-        card_layout = self.layout()
-        if card_layout is not None:
-            card_layout.addWidget(self._teleprompter_toolbar)
-            card_layout.addWidget(self._reading_view)
-        self._camera_btn.setText("Camera Mode")
-        self._teleprompter_toolbar.setVisible(self._teleprompter_active)
-        self._reading_view.setVisible(self._teleprompter_active)
-
-    def _camera_window_closed(self) -> None:
-        if self._camera_window is not None:
-            self._camera_window = None
-            self._teleprompter_toolbar.setParent(self)
-            self._reading_view.setParent(self)
-            if self.layout() is not None:
-                self.layout().addWidget(self._teleprompter_toolbar)
-                self.layout().addWidget(self._reading_view)
-            self._camera_btn.setText("Camera Mode")
-
     def toggle_teleprompter(self) -> None:
         active = not self._teleprompter_active
-        if not active and self._camera_window is not None:
-            self._exit_camera_mode()
         if active:
             self._render_reading_view()
         self._teleprompter_active = active
@@ -507,6 +617,7 @@ class AIResponsePanel(QWidget):
 
     activity_started = pyqtSignal()
     text_prompt_submitted = pyqtSignal(str, bool)
+    camera_mode_requested = pyqtSignal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -514,6 +625,7 @@ class AIResponsePanel(QWidget):
         self._active_card: AIResponseCard | None = None
         self._thinking_label: QLabel | None = None
         self._collapsed = False
+        self._camera_mode = False
 
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -542,6 +654,7 @@ class AIResponsePanel(QWidget):
             f" border-bottom-right-radius: 10px;"
             f"}}"
         )
+        self._style_before_camera = self.styleSheet()
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setSpacing(0)
@@ -589,7 +702,8 @@ class AIResponsePanel(QWidget):
         self._responses_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.addWidget(self._responses_container, 1)
 
-        input_row = QHBoxLayout()
+        self._prompt_row = QWidget(self._content)
+        input_row = QHBoxLayout(self._prompt_row)
         input_row.setSpacing(6)
 
         self._prompt_input = QLineEdit()
@@ -609,13 +723,40 @@ class AIResponsePanel(QWidget):
         self._refine_btn.clicked.connect(self._on_refine_clicked)
         input_row.addWidget(self._refine_btn)
 
-        content_layout.addLayout(input_row)
+        content_layout.addWidget(self._prompt_row)
 
         outer_layout.addWidget(self._content, 1)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def _wire_camera_mode(self, card: AIResponseCard) -> None:
+        card.camera_mode_requested.connect(self.camera_mode_requested.emit)
+        card.set_camera_mode(self._camera_mode)
+
+    def set_camera_mode(self, active: bool) -> None:
+        """Compact the answer panel while keeping its response card in place."""
+        if active == self._camera_mode:
+            return
+        self._camera_mode = active
+        if active:
+            self._prompt_row_was_hidden = self._prompt_row.isHidden()
+            self._style_before_camera = self.styleSheet()
+            self._prompt_row.hide()
+            self._content.layout().setContentsMargins(0, 0, 0, 0)
+            self._content.layout().setSpacing(0)
+            self.setStyleSheet(
+                "QWidget#ai_response_panel, QWidget#ai_panel_content { "
+                "background: transparent; border: none; }"
+            )
+        else:
+            self._prompt_row.setVisible(not getattr(self, "_prompt_row_was_hidden", False))
+            self._content.layout().setContentsMargins(0, 0, 0, 0)
+            self._content.layout().setSpacing(8)
+            self.setStyleSheet(self._style_before_camera)
+        for card in self._cards:
+            card.set_camera_mode(active)
 
     def start_response(self, title: str = "Answer") -> None:
         """Create a new blank response card ready for streaming."""
@@ -641,6 +782,7 @@ class AIResponsePanel(QWidget):
             return
 
         card = AIResponseCard(title=title, parent=self._responses_container)
+        self._wire_camera_mode(card)
         self._active_card = card
         self._cards = [card]
         self._responses_layout.addWidget(card, 1)
@@ -687,6 +829,7 @@ class AIResponsePanel(QWidget):
             else:
                 logger.warning("AIResponsePanel.finish_response() - no active card, creating one")
                 card = AIResponseCard(title="Answer", parent=self._responses_container)
+                self._wire_camera_mode(card)
                 self._active_card = card
                 self._cards = [card]
                 self._responses_layout.addWidget(card, 1)
@@ -735,6 +878,7 @@ class AIResponsePanel(QWidget):
         self._remove_thinking()
         self.clear_responses()
         card = AIResponseCard(f"⚠ {message}", title=title, parent=self._responses_container)
+        self._wire_camera_mode(card)
         card.setStyleSheet(
             "background-color: #3d0000; border: 1px solid #f85149; "
             "border-radius: 8px; padding: 4px;"

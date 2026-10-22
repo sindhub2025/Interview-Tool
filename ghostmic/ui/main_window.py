@@ -652,6 +652,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self.ai_panel.activity_started.connect(self._reveal_question_answer_area)
+        self.ai_panel.camera_mode_requested.connect(self.set_camera_mode)
         self._splitter.addWidget(self.ai_panel)
         root_layout.addWidget(self._qa_container, stretch=1)
         self._qa_container.setMaximumHeight(0)
@@ -1476,6 +1477,100 @@ class MainWindow(QMainWindow):
     # Slots
     # ------------------------------------------------------------------
 
+    def set_camera_mode(self, active: bool) -> None:
+        """Transform this MainWindow into the compact teleprompter view."""
+        if active == getattr(self, "_camera_mode", False):
+            return
+        if active:
+            self._camera_mode = True
+            root_layout = self._root.layout()
+            qa_layout = self._qa_container.layout()
+            self._camera_restore = {
+                "geometry": QRect(self.geometry()),
+                "title": self._title_bar.isVisible(),
+                "title_separator": self._title_separator.isVisible(),
+                "controls": self._controls.isVisible(),
+                "capture": self._controls._screenshot_btn.isVisible(),
+                "settings": self._controls._settings_btn.isVisible(),
+                "qa": self._qa_container.isVisible(),
+                "splitter": self._splitter.isVisible(),
+                "question_hidden": self._question_card.isHidden(),
+                "splitter_sizes": self._splitter.sizes(),
+                "controls_index": root_layout.indexOf(self._controls),
+                "root_margins": (
+                    root_layout.contentsMargins().left(),
+                    root_layout.contentsMargins().top(),
+                    root_layout.contentsMargins().right(),
+                    root_layout.contentsMargins().bottom(),
+                ),
+                "qa_margins": (
+                    qa_layout.contentsMargins().left(),
+                    qa_layout.contentsMargins().top(),
+                    qa_layout.contentsMargins().right(),
+                    qa_layout.contentsMargins().bottom(),
+                ),
+                "qa_spacing": qa_layout.spacing(),
+                "root_style": self._root.styleSheet(),
+            }
+            self._title_bar.hide()
+            self._title_separator.hide()
+            self._controls.show()
+            self._controls.set_camera_mode(True)
+            self._controls.adjustSize()
+            root_layout.setContentsMargins(8, 7, 8, 8)
+            self._root.setStyleSheet(
+                "#root_widget { background-color: rgba(12,15,21,244); "
+                "border: 1px solid rgba(203,213,225,0.18); border-radius: 14px; }"
+            )
+            self._qa_container.show()
+            self._splitter.show()
+            qa_layout.setContentsMargins(0, 0, 0, 0)
+            qa_layout.setSpacing(0)
+            self._question_card.hide()
+            self.ai_panel.set_camera_mode(True)
+            root_layout.removeWidget(self._controls)
+            root_layout.addWidget(
+                self._controls, alignment=Qt.AlignmentFlag.AlignHCenter
+            )
+            self.resize(640, 252)
+            screen = QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                width = max(1, min(self.width(), area.width() - 24))
+                height = max(1, min(self.height(), area.height() - 24))
+                x = area.x() + (area.width() - width) // 2
+                top_offset = min(80, max(24, area.height() // 20))
+                y = area.y() + min(top_offset, max(0, area.height() - height))
+                self.setGeometry(x, y, width, height)
+        else:
+            self._camera_mode = False
+            self.ai_panel.set_camera_mode(False)
+            restore = getattr(self, "_camera_restore", None)
+            if restore:
+                self._controls.set_camera_mode(False)
+                root_layout = self._root.layout()
+                root_layout.removeWidget(self._controls)
+                root_layout.insertWidget(
+                    restore["controls_index"], self._controls, 0,
+                    Qt.AlignmentFlag.AlignHCenter,
+                )
+                root_layout.setContentsMargins(*restore["root_margins"])
+                self._root.setStyleSheet(restore["root_style"])
+                self._qa_container.layout().setContentsMargins(*restore["qa_margins"])
+                self._qa_container.layout().setSpacing(restore["qa_spacing"])
+                self._question_card.setVisible(not restore["question_hidden"])
+                self._splitter.setSizes(restore["splitter_sizes"])
+                self.setGeometry(restore["geometry"])
+                self._title_bar.setVisible(restore["title"])
+                self._title_separator.setVisible(restore["title_separator"])
+                self._controls.setVisible(restore["controls"])
+                self._controls._screenshot_btn.setVisible(restore["capture"])
+                self._controls._settings_btn.setVisible(restore["settings"])
+                self._qa_container.setVisible(restore["qa"])
+                self._splitter.setVisible(restore["splitter"])
+        # Reapply capture exclusion after the compact-window geometry settles.
+        QTimer.singleShot(100, self._apply_stealth)
+
     def _on_close(self) -> None:
         QApplication.instance().quit()
 
@@ -1608,6 +1703,8 @@ class MainWindow(QMainWindow):
         logger.info("Mode changed to: %s", mode)
 
     def _show_settings(self) -> None:
+        if getattr(self, "_camera_mode", False):
+            self.set_camera_mode(False)
         from ghostmic.ui.settings_dialog import SettingsDialog
         dlg = SettingsDialog(self._config, parent=self)
         dlg.settings_saved.connect(self.update_config)

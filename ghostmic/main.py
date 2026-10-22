@@ -2565,6 +2565,8 @@ class GhostMicApp:
         from ghostmic.ui.settings_dialog import SettingsDialog
 
         if self._window:
+            if getattr(self._window, "_camera_mode", False):
+                self._window.set_camera_mode(False)
             dlg = SettingsDialog(
                 self._config,
                 resume_status=self._resume_service.get_status(),
