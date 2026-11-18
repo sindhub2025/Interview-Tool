@@ -34,6 +34,11 @@ from ghostmic.ui.styles import (
     TEXT_SECONDARY,
 )
 from ghostmic.ui.presentation import Workspace, coerce_workspace
+from ghostmic.domain.response_document import ResponseDocument
+from ghostmic.services.response_composer import ResponseComposer
+from ghostmic.ui.response_renderer import ResponseRenderer
+from ghostmic.ui.teleprompter_preferences import TeleprompterPreferences
+from ghostmic.ui.teleprompter_controller import TeleprompterController
 
 QWIDGETSIZE_MAX = 16_777_215
 
@@ -162,6 +167,12 @@ def render_response_html(text: str) -> str:
     )
 
 
+def render_document_html(document: ResponseDocument, *, teleprompter: bool = False, font_size: int = 11) -> str:
+    """Render a ResponseDocument to HTML using ResponseRenderer."""
+    renderer = ResponseRenderer(font_size=font_size, teleprompter=teleprompter)
+    return renderer.render(document)
+
+
 class AIResponseCard(QFrame):
     """A single AI answer card with normal and teleprompter presentations."""
 
@@ -174,6 +185,9 @@ class AIResponseCard(QFrame):
         self._workspace = Workspace.STANDARD
         self._reading_font_size = 24
         self._scroll_speed = 2.0
+        self._prefs = TeleprompterPreferences(font_size=24, scroll_speed=2.0)
+        self._teleprompter_ctrl: TeleprompterController | None = None
+        self._response_document: ResponseDocument | None = None
         self._scroll_remainder = 0.0
         self._scrolling = False
         self._camera_overlay_active = False
@@ -182,6 +196,7 @@ class AIResponseCard(QFrame):
         self._scroll_timer = QTimer(self)
         self._scroll_timer.setInterval(16)
         self._scroll_timer.timeout.connect(self._advance_scroll)
+        # TeleprompterController is wired in after _build_ui() creates the reading view
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -314,24 +329,90 @@ class AIResponseCard(QFrame):
         self._reading_view.setVisible(False)
         layout.addWidget(self._reading_view)
 
+        # Wire TeleprompterController to the reading view
+        self._teleprompter_ctrl = TeleprompterController(self._prefs, parent=self)
+        self._teleprompter_ctrl.attach(self._reading_view)
+        self._teleprompter_ctrl.scrolling_state_changed.connect(self._on_ctrl_scroll_state)
+        self._teleprompter_ctrl.font_size_changed.connect(self._on_ctrl_font_size)
+        self._teleprompter_ctrl.speed_changed.connect(self._on_ctrl_speed)
+
+    def set_response(self, document: ResponseDocument) -> None:
+        """Set response from a structured ResponseDocument."""
+        self._response_document = document
+        self._text = document.plain_text
+        # Update title if document has a meaningful one
+        if document.title and document.title not in {"Answer", ""}:
+            self._title_label.setText(document.title)
+        self._render_text(scroll_to_end=False)
+
+    def apply_preferences(self, prefs: TeleprompterPreferences) -> None:
+        """Apply shared Teleprompter preferences to this card."""
+        self._prefs = prefs.clamp()
+        self._reading_font_size = self._prefs.font_size
+        self._scroll_speed = self._prefs.scroll_speed
+        self._font_size_label.setText(f"{self._prefs.font_size} pt")
+        speed_str = f"{self._prefs.scroll_speed:.1f}".rstrip("0").rstrip(".")
+        self._speed_label.setText(f"{speed_str}x")
+        if self._teleprompter_ctrl:
+            self._teleprompter_ctrl.apply_preferences(self._prefs)
+
+    def _on_ctrl_scroll_state(self, scrolling: bool) -> None:
+        """Sync UI button state from TeleprompterController."""
+        self._scrolling = scrolling
+        if scrolling:
+            if not self._scroll_timer.isActive():
+                self._scroll_timer.start()
+        else:
+            self._scroll_timer.stop()
+        self._update_scroll_button_label()
+
+    def _on_ctrl_font_size(self, size: int) -> None:
+        self._reading_font_size = size
+        self._font_size_label.setText(f"{size} pt")
+        self._font_down_btn.setEnabled(size > 16)
+        self._font_up_btn.setEnabled(size < 40)
+        if self._workspace is Workspace.TELEPROMPTER:
+            pos = 0.0
+            if self._teleprompter_ctrl:
+                pos = self._teleprompter_ctrl.save_reading_position()
+            self._render_reading_view()
+            if self._teleprompter_ctrl and pos > 0:
+                self._teleprompter_ctrl.restore_reading_position(pos)
+
+    def _on_ctrl_speed(self, speed: float) -> None:
+        self._scroll_speed = speed
+        speed_str = f"{speed:.1f}".rstrip("0").rstrip(".")
+        self._speed_label.setText(f"{speed_str}x")
+
     def _render_reading_view(self, *, scroll_to_end: bool = False) -> None:
         old_scroll = self._reading_view.verticalScrollBar().value()
         old_max = self._reading_view.verticalScrollBar().maximum()
-        html = render_response_html(self._text)
-        if html:
-            html = html.replace(
-                "<html><body style='margin:0; padding:0; background:transparent; "
-                f"color:{TEXT_PRIMARY}; font-family:\"Segoe UI\"; font-size:11pt;'>",
-                "<html><body style='margin:0; padding:0; background:transparent; "
-                f"color:{TEXT_PRIMARY}; font-family:\"Segoe UI\"; font-size:{self._reading_font_size}pt; "
-                "line-height:1.45;'>",
+        
+        if self._response_document is not None and self._response_document.blocks:
+            renderer = ResponseRenderer(
+                font_size=self._reading_font_size,
+                line_spacing=1.45,
+                teleprompter=True,
             )
-            html = html.replace("font-size:11pt", f"font-size:{self._reading_font_size}pt")
-            html = html.replace("font-size:10pt", f"font-size:{max(12, self._reading_font_size - 6)}pt")
-            html = html.replace(
-                f"font-size:{self._reading_font_size}pt; white-space:pre-wrap",
-                f"font-size:{max(12, self._reading_font_size - 6)}pt; white-space:pre-wrap",
-            )
+            html = renderer.render(self._response_document)
+        else:
+            # Legacy path: render from plain text with font substitution
+            html = render_response_html(self._text)
+            if html:
+                html = html.replace(
+                    f"<html><body style='margin:0; padding:0; background:transparent; "
+                    f"color:{TEXT_PRIMARY}; font-family:\"Segoe UI\"; font-size:11pt;'>",
+                    f"<html><body style='margin:0; padding:0; background:transparent; "
+                    f"color:{TEXT_PRIMARY}; font-family:\"Segoe UI\"; font-size:{self._reading_font_size}pt; "
+                    "line-height:1.45;'>",
+                )
+                html = html.replace("font-size:11pt", f"font-size:{self._reading_font_size}pt")
+                html = html.replace("font-size:10pt", f"font-size:{max(12, self._reading_font_size - 6)}pt")
+                html = html.replace(
+                    f"font-size:{self._reading_font_size}pt; white-space:pre-wrap",
+                    f"font-size:{max(12, self._reading_font_size - 6)}pt; white-space:pre-wrap",
+                )
+        
         self._reading_view.setHtml(html)
         scrollbar = self._reading_view.verticalScrollBar()
         if scroll_to_end:
@@ -381,28 +462,38 @@ class AIResponseCard(QFrame):
         self._speed_label.setFixedWidth(34)
 
     def _change_font_size(self, delta: int) -> None:
-        self._reading_font_size = max(16, min(40, self._reading_font_size + delta))
-        self._font_size_label.setText(f"{self._reading_font_size} pt")
-        self._font_down_btn.setEnabled(self._reading_font_size > 16)
-        self._font_up_btn.setEnabled(self._reading_font_size < 40)
-        if self._workspace is Workspace.TELEPROMPTER:
-            self._render_reading_view()
+        if self._teleprompter_ctrl:
+            self._teleprompter_ctrl.change_font_size(delta // 2 if delta != 0 else 0)
+        else:
+            self._reading_font_size = max(16, min(40, self._reading_font_size + delta))
+            self._font_size_label.setText(f"{self._reading_font_size} pt")
+            self._font_down_btn.setEnabled(self._reading_font_size > 16)
+            self._font_up_btn.setEnabled(self._reading_font_size < 40)
+            if self._workspace is Workspace.TELEPROMPTER:
+                self._render_reading_view()
 
     def _change_speed(self, delta: int) -> None:
-        self._scroll_speed = max(1.0, min(5.0, self._scroll_speed + (delta * 0.5)))
-        speed = f"{self._scroll_speed:.1f}".rstrip("0").rstrip(".")
-        self._speed_label.setText(f"{speed}x")
+        if self._teleprompter_ctrl:
+            self._teleprompter_ctrl.change_speed(delta)
+        else:
+            self._scroll_speed = max(1.0, min(5.0, self._scroll_speed + (delta * 0.5)))
+            speed = f"{self._scroll_speed:.1f}".rstrip("0").rstrip(".")
+            self._speed_label.setText(f"{speed}x")
 
     def _toggle_scrolling(self) -> None:
-        scrollbar = self._reading_view.verticalScrollBar()
-        if not self._scrolling and scrollbar.value() >= scrollbar.maximum() and scrollbar.maximum() > 0:
-            scrollbar.setValue(scrollbar.minimum())
-        self._scrolling = not self._scrolling
-        if self._scrolling:
-            self._scroll_timer.start()
+        if self._teleprompter_ctrl:
+            self._teleprompter_ctrl.toggle()
         else:
-            self._scroll_timer.stop()
-        self._update_scroll_button_label()
+            # Legacy fallback
+            scrollbar = self._reading_view.verticalScrollBar()
+            if not self._scrolling and scrollbar.value() >= scrollbar.maximum() and scrollbar.maximum() > 0:
+                scrollbar.setValue(scrollbar.minimum())
+            self._scrolling = not self._scrolling
+            if self._scrolling:
+                self._scroll_timer.start()
+            else:
+                self._scroll_timer.stop()
+            self._update_scroll_button_label()
 
     def _update_scroll_button_label(self) -> None:
         scrollbar = self._reading_view.verticalScrollBar()
@@ -417,6 +508,8 @@ class AIResponseCard(QFrame):
         self._start_scroll_btn.setText(label)
 
     def _advance_scroll(self) -> None:
+        if self._teleprompter_ctrl is not None:
+            return
         scrollbar = self._reading_view.verticalScrollBar()
         # Scale fractional speed to a steady pixels-per-second rate. At 60 Hz,
         # 2x advances about 20 px/s and 5x about 50 px/s.
@@ -558,17 +651,23 @@ class AIResponseCard(QFrame):
             self._camera_shortcuts.append(shortcut)
 
     def _scroll_home(self) -> None:
-        self._scrolling = False
-        self._scroll_timer.stop()
-        self._reading_view.verticalScrollBar().setValue(0)
+        if self._teleprompter_ctrl:
+            self._teleprompter_ctrl.reset()
+        else:
+            self._scrolling = False
+            self._scroll_timer.stop()
+            self._reading_view.verticalScrollBar().setValue(0)
         self._start_scroll_btn.setText("Start")
 
     def _scroll_end(self) -> None:
-        self._scrolling = False
-        self._scroll_timer.stop()
-        self._reading_view.verticalScrollBar().setValue(
-            self._reading_view.verticalScrollBar().maximum()
-        )
+        if self._teleprompter_ctrl:
+            self._teleprompter_ctrl.go_to_end()
+        else:
+            self._scrolling = False
+            self._scroll_timer.stop()
+            self._reading_view.verticalScrollBar().setValue(
+                self._reading_view.verticalScrollBar().maximum()
+            )
         self._start_scroll_btn.setText("Replay")
 
     def toggle_teleprompter(self) -> None:
@@ -583,7 +682,15 @@ class AIResponseCard(QFrame):
         return self._workspace is Workspace.TELEPROMPTER
 
     def _render_text(self, *, scroll_to_end: bool) -> None:
-        self._text_edit.setHtml(render_response_html(self._text))
+        if self._response_document is not None and self._response_document.blocks:
+            renderer = ResponseRenderer(
+                font_size=11,
+                line_spacing=1.45,
+                teleprompter=False,
+            )
+            self._text_edit.setHtml(renderer.render(self._response_document))
+        else:
+            self._text_edit.setHtml(render_response_html(self._text))
         if self._workspace is Workspace.TELEPROMPTER:
             self._render_reading_view(scroll_to_end=scroll_to_end)
         cursor = self._text_edit.textCursor()
@@ -597,6 +704,7 @@ class AIResponseCard(QFrame):
 
     def append_text(self, chunk: str) -> None:
         """Append a streaming chunk to the response."""
+        self._response_document = None
         self._text += chunk
         self._render_text(
             scroll_to_end=self._workspace is not Workspace.TELEPROMPTER
@@ -606,8 +714,11 @@ class AIResponseCard(QFrame):
         from ghostmic.utils.logger import get_logger
 
         logger = get_logger(__name__)
+        if self._teleprompter_ctrl:
+            self._teleprompter_ctrl.stop()
         self._scrolling = False
         self._scroll_timer.stop()
+        self._response_document = None
         self._text = text
         self._render_text(scroll_to_end=False)
         if self._workspace is Workspace.TELEPROMPTER:
@@ -626,7 +737,11 @@ class AIResponseCard(QFrame):
         return self._text
 
     def _copy(self) -> None:
-        QApplication.clipboard().setText(self._text)
+        if self._response_document is not None:
+            renderer = ResponseRenderer()
+            QApplication.clipboard().setText(renderer.render_plain_text(self._response_document))
+        else:
+            QApplication.clipboard().setText(self._text)
 
 
 class AIResponsePanel(QWidget):
@@ -883,6 +998,23 @@ class AIResponsePanel(QWidget):
             logger.warning("AIResponsePanel.finish_response() - no active card or text is None")
         
         self._active_card = None
+
+    def set_response_document(self, document: ResponseDocument, title: str = "Answer") -> None:
+        """Set response from a structured ResponseDocument."""
+        self._remove_thinking()
+        self.clear_responses()
+        card = AIResponseCard(title=title, parent=self._responses_container)
+        self._wire_camera_mode(card)
+        self._active_card = card
+        self._cards = [card]
+        self._responses_layout.addWidget(card, 1)
+        card.set_response(document)
+        self._active_card = None
+        self._scroll_to_bottom()
+
+    def set_response(self, document: ResponseDocument, title: str = "Answer") -> None:
+        """Alias for set_response_document."""
+        self.set_response_document(document, title=title)
 
     def show_thinking(self, message: str = "Generating response...") -> None:
         """Show a loading indicator while the AI is processing."""

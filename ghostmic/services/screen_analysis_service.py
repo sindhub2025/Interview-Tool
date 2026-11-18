@@ -189,6 +189,42 @@ def resolve_screen_analysis_provider(ai_config: dict) -> str:
     return "groq"
 
 
+def run_screen_analysis_pipeline(
+    ai_config: dict,
+    *,
+    timeout: float = 90.0,
+) -> "tuple[str, Any]":
+    """Run the full capture → preprocess → analyze pipeline.
+    
+    Returns:
+        (raw_text, screen_understanding) where screen_understanding is a
+        ScreenUnderstanding if the new services are available, else None.
+        
+    This function is used by the new ScreenAnalysisWorker path.
+    For backward compatibility, also returns raw_text so callers that
+    only need the string continue to work.
+    """
+    from ghostmic.services.screen_capture_service import ScreenCaptureService
+    from ghostmic.services.image_preprocessor import ImagePreprocessor
+    from ghostmic.services.screen_understanding_service import ScreenUnderstandingService
+    from ghostmic.services.vision_provider_router import VisionProviderRouter
+    from ghostmic.domain.captured_screen import CaptureRequest
+
+    capture_svc = ScreenCaptureService()
+    preprocessor = ImagePreprocessor()
+    router = VisionProviderRouter()
+
+    request = CaptureRequest(target="full_virtual_desktop")
+    frame = capture_svc.capture(request)
+    prepared = preprocessor.prepare(frame)
+    
+    provider_config = router.resolve(ai_config)
+    understanding_svc = ScreenUnderstandingService(provider_config, timeout=timeout)
+    understanding = understanding_svc.analyze(prepared)
+    
+    return understanding.raw_text, understanding
+
+
 try:
     from PyQt6.QtCore import QThread, pyqtSignal
 except ImportError:  # pragma: no cover - fallback for non-Qt environments
@@ -213,12 +249,27 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
     if pyqtSignal is not None:
         analysis_ready = pyqtSignal(str)
         analysis_error = pyqtSignal(str)
+        understanding_ready = pyqtSignal(object)
 
     def __init__(self, ai_config: dict, parent=None) -> None:
         super().__init__(parent)
         self._ai_config = dict(ai_config or {})
 
     def run(self) -> None:
+        timeout = float(self._ai_config.get("screen_analysis_timeout", 90.0))
+        try:
+            raw_text, understanding = run_screen_analysis_pipeline(
+                self._ai_config, timeout=timeout
+            )
+            if understanding is not None and hasattr(self, "understanding_ready"):
+                self.understanding_ready.emit(understanding)
+            self.analysis_ready.emit(raw_text)
+            return
+        except Exception as pipeline_exc:
+            logger.warning(
+                "Structured screen analysis pipeline failed, falling back to legacy: %s",
+                pipeline_exc,
+            )
         try:
             image_bytes, metadata = capture_full_screen_png_bytes()
             logger.info(

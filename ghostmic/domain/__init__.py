@@ -35,3 +35,18 @@ class TranscriptSegment:
             self.raw_stt_text = self.text
         if not self.normalized_text:
             self.normalized_text = self.text
+
+
+from ghostmic.domain.captured_screen import (  # noqa: E402
+    CaptureRequest, CaptureMetadata, CapturedFrame, PreparedCapture, MonitorInfo,
+)
+from ghostmic.domain.screen_understanding import (  # noqa: E402
+    ScreenObservation, ScreenTable, ScreenCodeBlock, ScreenUnderstanding,
+)
+from ghostmic.domain.response_document import (  # noqa: E402
+    ResponseBlock, ResponseDocument,
+    BLOCK_HEADING, BLOCK_PARAGRAPH, BLOCK_BULLET_LIST, BLOCK_NUMBERED_LIST,
+    BLOCK_CODE, BLOCK_TABLE, BLOCK_KEY_VALUE, BLOCK_WARNING, BLOCK_UNCERTAINTY,
+    BLOCK_RELATIONSHIP, RESPONSE_TYPE_SCREEN_ANALYSIS, RESPONSE_TYPE_INTERVIEW_ANSWER,
+    RESPONSE_TYPE_FOLLOW_UP, RESPONSE_TYPE_REFINED, RESPONSE_TYPE_GENERAL,
+)

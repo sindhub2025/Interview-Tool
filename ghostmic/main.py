@@ -493,6 +493,13 @@ class GhostMicApp:
         self._last_question_text: str = ""  # tracks most recent speaker question for topic-shift detection
         self._active_screen_summary_text: str = ""
         self._active_screen_anchor_question: str = ""
+        # New structured screen context (replaces loose string fields above)
+        try:
+            from ghostmic.services.screen_context_service import ScreenContextService
+            self._screen_context_service = ScreenContextService()
+        except Exception:
+            self._screen_context_service = None
+        self._last_screen_understanding = None
         self._transcript_lock = threading.Lock()
         self._model_ready = False
         self._model_error_message: Optional[str] = None
@@ -2522,6 +2529,14 @@ class GhostMicApp:
         worker.analysis_ready.connect(self._on_screen_analysis_ready)
         worker.analysis_error.connect(self._on_screen_analysis_error)
         worker.finished.connect(self._cleanup_screen_analysis_worker)
+
+        # Try to wire the structured pipeline result
+        def _on_pipeline_understanding(understanding):
+            self._last_screen_understanding = understanding
+
+        if hasattr(worker, "understanding_ready"):
+            worker.understanding_ready.connect(_on_pipeline_understanding)
+
         self._screen_analysis_worker = worker
         worker.start()
 
@@ -2531,13 +2546,45 @@ class GhostMicApp:
         summary_text = str(full_text or "").strip()
         if len(summary_text) > 8000:
             summary_text = summary_text[:8000] + "..."
+        # Backward-compatible loose string fields (still used by normalization context)
         self._active_screen_summary_text = summary_text
         self._active_screen_anchor_question = ""
+        # Update structured context service
+        screen_understanding = getattr(self, "_last_screen_understanding", None)
+        if getattr(self, "_screen_context_service", None) is not None:
+            if screen_understanding is not None:
+                self._screen_context_service.update(screen_understanding)
+            else:
+                # Fallback: build a minimal understanding from raw text
+                try:
+                    from ghostmic.domain.screen_understanding import ScreenUnderstanding
+                    import uuid
+                    fallback = ScreenUnderstanding(
+                        capture_id=str(uuid.uuid4()),
+                        summary=summary_text[:500],
+                        raw_text=summary_text,
+                    )
+                    self._screen_context_service.update(fallback)
+                except Exception as exc:
+                    self._logger.warning("Failed to create fallback ScreenUnderstanding: %s", exc)
         conversation_state = getattr(self, "_conversation_state", None)
         if conversation_state is not None:
             conversation_state.update_screen_context(summary_text)
         self._session_context_store.append_screen_summary(full_text)
-        self._window.ai_panel.finish_response(full_text)
+        # Present using ResponseDocument if composer available
+        try:
+            from ghostmic.services.response_composer import ResponseComposer
+            from ghostmic.domain.response_document import RESPONSE_TYPE_SCREEN_ANALYSIS
+            composer = ResponseComposer()
+            if screen_understanding is not None:
+                doc = composer.from_screen_understanding(screen_understanding, title="Screen Analysis")
+            else:
+                doc = composer.from_plain_text(full_text, title="Screen Analysis",
+                                               response_type=RESPONSE_TYPE_SCREEN_ANALYSIS)
+            self._window.ai_panel.set_response_document(doc, title="Screen Analysis")
+        except Exception as exc:
+            self._logger.warning("ResponseComposer unavailable, using plain text: %s", exc)
+            self._window.ai_panel.finish_response(full_text)
         self._window.controls.set_screen_analysis_busy(False)
         self._window.controls.set_status("✓ Screen analysis ready", "#3fb950")
 
@@ -2548,7 +2595,19 @@ class GhostMicApp:
         force_follow_up: bool = False,
         topic_shift_classifier: Optional[Callable[[str, str], bool]] = None,
     ) -> str:
-        """Return sticky screen-summary context while questions stay on-topic."""
+        """Return sticky screen-summary context while questions stay on-topic.
+        
+        Delegates to ScreenContextService for lifecycle management.
+        Falls back to loose string fields for backward compatibility.
+        """
+        # Prefer the structured ScreenContextService
+        if hasattr(self, "_screen_context_service") and self._screen_context_service is not None and self._screen_context_service.has_context:
+            return self._screen_context_service.get_context_for_question(
+                latest_speaker_text,
+                force_include=force_follow_up,
+            )
+        
+        # Backward-compatible fallback using loose string fields
         summary_text = str(getattr(self, "_active_screen_summary_text", "")).strip()
         if not summary_text:
             return ""
@@ -2570,8 +2629,7 @@ class GhostMicApp:
                 moved_away = bool(topic_shift_classifier(anchor_question, latest_question))
             except Exception as exc:  # pylint: disable=broad-except
                 self._logger.debug(
-                    "AI request: screen-context topic classification failed: %s",
-                    exc,
+                    "AI request: screen-context topic classification failed: %s", exc,
                 )
 
         if moved_away:
@@ -4697,6 +4755,9 @@ class GhostMicApp:
                 self._last_ai_response_text = ""
                 self._active_screen_summary_text = ""
                 self._active_screen_anchor_question = ""
+                if getattr(self, "_screen_context_service", None) is not None:
+                    self._screen_context_service.clear()
+                self._last_screen_understanding = None
             self._reset_auto_question_session_state()
             if self._is_streaming_normalization_enabled():
                 self._reset_streaming_normalization_state(clear_ui=True)
@@ -4732,6 +4793,9 @@ class GhostMicApp:
                 self._last_ai_response_text = ""
                 self._active_screen_summary_text = ""
                 self._active_screen_anchor_question = ""
+                if getattr(self, "_screen_context_service", None) is not None:
+                    self._screen_context_service.clear()
+                self._last_screen_understanding = None
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
