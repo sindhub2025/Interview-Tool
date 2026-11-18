@@ -31,6 +31,10 @@ build/
 .DS_Store
 Thumbs.db
 
+# OAuth credentials
+OAuth.json
+OAuthPersonal.json
+
 # GhostMic user data
 ~/.ghostmic/
 
