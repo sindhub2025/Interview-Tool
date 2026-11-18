@@ -42,6 +42,10 @@ hiddenimports = [
     "groq",
     "openai",
     "requests",
+    "googleapiclient",
+    "google_auth_oauthlib",
+    "google.oauth2",
+    "keyring",
 ]
 
 # faster_whisper relies on dynamic imports; include submodules explicitly.

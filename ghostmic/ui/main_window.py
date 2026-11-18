@@ -312,6 +312,8 @@ class MainWindow(QMainWindow):
         self._config = config
         self._config_path = config_path
         self._compact_mode = False
+        self._camera_mode = False
+        self._active_workspace = "standard"
         self._qa_revealed = False
         self._qa_animation: QParallelAnimationGroup | None = None
         self._expanded_window_size = QSize(420, 650)
@@ -349,6 +351,7 @@ class MainWindow(QMainWindow):
         self._dictation_timer = QTimer(self)
         self._dictation_timer.setSingleShot(True)
         self._dictation_timer.timeout.connect(self._commit_dictation_text)
+        self._settings_dialog = None
 
         self._setup_window()
         self._quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
@@ -362,6 +365,11 @@ class MainWindow(QMainWindow):
         # Restore compact mode if previously saved
         if self._config.get("ui", {}).get("compact_mode", False):
             self.toggle_compact_mode()
+        saved_workspace = self._config.get("ui", {}).get(
+            "active_workspace", "standard"
+        )
+        if saved_workspace == "teleprompter":
+            self.set_workspace("teleprompter")
 
     # ------------------------------------------------------------------
     # Window setup
@@ -463,6 +471,7 @@ class MainWindow(QMainWindow):
         self._controls = ControlsBar()
         self._controls.record_toggled.connect(self._on_record_toggled)
         self._controls.mode_changed.connect(self._on_mode_changed)
+        self._controls.workspace_changed.connect(self.set_workspace)
         root_layout.addWidget(self._controls, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         # Hidden transcript store remains wired for app logic; the visible Q&A
@@ -756,6 +765,25 @@ class MainWindow(QMainWindow):
         self._update_follow_up_visibility()
         if self._qa_revealed:
             QTimer.singleShot(0, self._apply_splitter_proportions)
+
+    @property
+    def active_workspace(self) -> str:
+        """Return the current presentation workspace."""
+        return self._active_workspace
+
+    def set_workspace(self, workspace: str) -> None:
+        """Switch presentation without changing session, recording, or content."""
+        normalized = workspace.strip().lower()
+        if normalized not in {"standard", "teleprompter"}:
+            logger.warning("Ignoring invalid workspace: %r", workspace)
+            return
+        if normalized == self._active_workspace:
+            self._controls.set_workspace(normalized)
+            return
+        self._active_workspace = normalized
+        self._config.setdefault("ui", {})["active_workspace"] = normalized
+        self._controls.set_workspace(normalized)
+        self.set_camera_mode(normalized == "teleprompter")
 
     def _apply_startup_collapsed_layout(self) -> None:
         """Start as a toolbar-only rectangle."""
@@ -1481,8 +1509,13 @@ class MainWindow(QMainWindow):
         """Transform this MainWindow into the compact teleprompter view."""
         if active == getattr(self, "_camera_mode", False):
             return
+        self._active_workspace = "teleprompter" if active else "standard"
+        self._config.setdefault("ui", {})["active_workspace"] = self._active_workspace
+        self._controls.set_workspace(self._active_workspace)
         if active:
             self._camera_mode = True
+            self._qa_revealed = True
+            self._qa_container.setMaximumHeight(QWIDGETSIZE_MAX)
             root_layout = self._root.layout()
             qa_layout = self._qa_container.layout()
             self._camera_restore = {
@@ -1706,6 +1739,20 @@ class MainWindow(QMainWindow):
         if getattr(self, "_camera_mode", False):
             self.set_camera_mode(False)
         from ghostmic.ui.settings_dialog import SettingsDialog
+        if self._settings_dialog is not None:
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            self._settings_dialog.setFocus()
+            return
         dlg = SettingsDialog(self._config, parent=self)
+        self._settings_dialog = dlg
         dlg.settings_saved.connect(self.update_config)
-        dlg.exec()
+        dlg.finished.connect(lambda _result, dialog=dlg: setattr(
+            self,
+            "_settings_dialog",
+            None if self._settings_dialog is dialog else self._settings_dialog,
+        ))
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        dlg.setFocus()

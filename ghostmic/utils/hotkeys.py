@@ -25,6 +25,7 @@ DEFAULT_HOTKEYS: Dict[str, str] = {
     "copy_response": "<ctrl>+<shift>+c",
     "clear_transcript": "<ctrl>+<shift>+x",
     "win_h_dictation": "<win>+h",
+    "screenshot_email": "<ctrl>+<shift>+e",
 }
 
 
@@ -96,13 +97,25 @@ class HotkeyManager:
 
         hotkeys: Dict[str, Callable] = {}
         skipped_hotkeys = []
+        seen_combos: Dict[str, str] = {}
 
         for name, default_combo in DEFAULT_HOTKEYS.items():
             combo_raw = self._config.get(name, default_combo)
             combo = _to_pynput_combo(combo_raw)
             handler = self._callbacks.get(name)
-            if handler:
-                hotkeys[combo] = handler
+            if not handler:
+                continue
+            owner = seen_combos.get(combo)
+            if owner:
+                skipped_hotkeys.append(f"{name} (duplicates {owner})")
+                logger.warning(
+                    "HotkeyManager: skipping duplicate %s binding %s",
+                    name,
+                    combo_raw,
+                )
+                continue
+            seen_combos[combo] = name
+            hotkeys[combo] = handler
 
         if not hotkeys:
             return

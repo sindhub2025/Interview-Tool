@@ -378,6 +378,43 @@ def test_sent_normalized_segments_are_hidden_from_queue() -> None:
         app.processEvents()
 
     assert window._queued_normalized_questions == []
+
+
+def test_workspace_switch_preserves_session_content_and_recording_state() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    window = MainWindow(_load_config())
+    window.show()
+    for _ in range(10):
+        app.processEvents()
+
+    window._set_question_text("How do you preserve state across workspace changes?")
+    window._reveal_question_answer_area()
+    window.ai_panel.finish_response("The response remains available.")
+    window.controls.set_recording(True)
+    QTest.qWait(350)
+
+    window.set_workspace("teleprompter")
+    assert window.active_workspace == "teleprompter"
+    assert window.ai_panel.get_last_response_text() == (
+        "The response remains available."
+    )
+    assert "preserve state" in window._question_text.toPlainText()
+    assert window.controls.is_recording
+
+    for _ in range(4):
+        window.set_workspace("standard")
+        window.set_workspace("teleprompter")
+
+    assert window.active_workspace == "teleprompter"
+    assert window.controls.is_recording
+    assert window.ai_panel.get_last_response_text() == (
+        "The response remains available."
+    )
+    window.close()
+    window.deleteLater()
+    app.processEvents()
     assert window._queued_question_labels[0].text() == ""
     assert not window._queued_question_labels[0].parentWidget().isVisible()
 

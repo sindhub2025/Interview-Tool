@@ -4,6 +4,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from ghostmic.ui.settings_dialog import SettingsDialog
@@ -57,6 +58,18 @@ def _base_config(*, stealth_enabled: bool = True) -> dict:
             "commit_idle_ms": 1200,
         },
     }
+
+
+def test_settings_dialog_is_non_modal_and_stays_in_front() -> None:
+    app = _qt_app()
+    assert app is not None
+
+    dialog = SettingsDialog(_base_config())
+    try:
+        assert dialog.windowModality() == Qt.WindowModality.NonModal
+        assert bool(dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+    finally:
+        dialog.deleteLater()
 
 
 def test_settings_dialog_loads_stealth_checkbox_from_config() -> None:

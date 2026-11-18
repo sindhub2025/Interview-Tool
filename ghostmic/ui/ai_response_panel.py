@@ -225,6 +225,7 @@ class AIResponseCard(QFrame):
         )
         self._teleprompter_btn.clicked.connect(self.toggle_teleprompter)
         self._teleprompter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._teleprompter_btn.setVisible(False)
         header.addWidget(self._teleprompter_btn)
         layout.addWidget(self._card_header)
 
@@ -553,6 +554,7 @@ class AIResponseCard(QFrame):
 
     def toggle_teleprompter(self) -> None:
         active = not self._teleprompter_active
+        self.show()
         if active:
             self._render_reading_view()
         self._teleprompter_active = active

@@ -128,6 +128,40 @@ Runtime settings, including API keys, are stored outside the repository config f
 - Windows: `%APPDATA%\GhostMic\config.json`
 - Other platforms: `~/.ghostmic/config.json`
 
+## Screenshot-to-Email (Gmail)
+
+The application captures the entire virtual desktop only when
+`Ctrl+Shift+E` is pressed (or the configured hotkey). Enable and configure
+it under **Settings → General**.
+
+### Gmail OAuth setup
+
+1. Open Google Cloud Console and create or select a project.
+2. Enable the **Gmail API**.
+3. Create an OAuth 2.0 **Desktop app** credential.
+4. Download the OAuth client JSON file.
+5. In GhostMic Settings, set **Gmail OAuth JSON** to that file's full path.
+6. Enable screenshot email and enter the recipient, subject, and message.
+7. Press `Ctrl+Shift+E`. A browser window will open for Google authorization.
+
+OAuth refresh credentials are stored by `keyring` in the Windows Credential
+Manager. The OAuth client JSON should remain outside the application
+configuration. Do not copy refresh tokens or client secrets into
+`config.json` or application logs.
+
+Install and run:
+
+```powershell
+python -m pip install -r requirements_windows.txt
+python ghostmic\main.py
+```
+
+Build the Windows executable:
+
+```powershell
+python -m PyInstaller --noconfirm --clean InterviewTool.spec
+```
+
 ---
 
 ## Resume Upload + Resume-Aware Correction

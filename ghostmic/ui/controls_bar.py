@@ -7,6 +7,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -209,6 +210,7 @@ class ControlsBar(QWidget):
     record_toggled = pyqtSignal(bool)
     mic_toggled = pyqtSignal(bool)
     mode_changed = pyqtSignal(str)
+    workspace_changed = pyqtSignal(str)
     settings_requested = pyqtSignal()
     screenshot_requested = pyqtSignal()
 
@@ -221,6 +223,7 @@ class ControlsBar(QWidget):
         self._api_connected = False
         self._api_backend = "Groq"
         self._camera_mode = False
+        self._workspace = "standard"
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -257,6 +260,29 @@ class ControlsBar(QWidget):
         layout.addWidget(self._camera_drag_handle)
         self._apply_mic_button_state()
 
+        workspace_label = QLabel("Workspace")
+        workspace_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 8pt; font-weight: 600;"
+        )
+        layout.addWidget(workspace_label)
+
+        self._workspace_group = QButtonGroup(self)
+        self._workspace_group.setExclusive(True)
+        self._standard_workspace_btn = QPushButton("Standard")
+        self._teleprompter_workspace_btn = QPushButton("Teleprompter")
+        for button in (
+            self._standard_workspace_btn,
+            self._teleprompter_workspace_btn,
+        ):
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setMinimumHeight(30)
+            self._workspace_group.addButton(button)
+            layout.addWidget(button)
+        self._standard_workspace_btn.setChecked(True)
+        self._workspace_group.idClicked.connect(self._on_workspace_clicked)
+        self._apply_workspace_style()
+
         self._controls_spacer = QSpacerItem(
             0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
@@ -269,9 +295,14 @@ class ControlsBar(QWidget):
 
         self._mode_combo = QComboBox(self)
         self._mode_combo.addItems(self.MODES)
-        self._mode_combo.setFixedWidth(130)
+        self._mode_combo.setFixedWidth(118)
         self._mode_combo.currentTextChanged.connect(self.mode_changed)
-        self._mode_combo.setVisible(False)
+        context_label = QLabel("Context")
+        context_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 8pt; font-weight: 600;"
+        )
+        layout.addWidget(context_label)
+        layout.addWidget(self._mode_combo)
 
         self._status_label = QLabel("Ready", self)
         self._status_label.setObjectName("status_label")
@@ -457,6 +488,56 @@ class ControlsBar(QWidget):
 
     def current_mode(self) -> str:
         return self._mode_combo.currentText()
+
+    def current_workspace(self) -> str:
+        """Return the active presentation workspace."""
+        return self._workspace
+
+    def set_workspace(self, workspace: str) -> None:
+        """Synchronize the workspace selector without emitting a transition."""
+        normalized = workspace.strip().lower()
+        if normalized not in {"standard", "teleprompter"}:
+            normalized = "standard"
+        self._workspace = normalized
+        button = (
+            self._teleprompter_workspace_btn
+            if normalized == "teleprompter"
+            else self._standard_workspace_btn
+        )
+        previous = self._workspace_group.blockSignals(True)
+        button.setChecked(True)
+        self._workspace_group.blockSignals(previous)
+        self._apply_workspace_style()
+
+    def _on_workspace_clicked(self, button_id: int) -> None:
+        button = self._workspace_group.button(button_id)
+        if button is None:
+            return
+        workspace = (
+            "teleprompter"
+            if button is self._teleprompter_workspace_btn
+            else "standard"
+        )
+        self._workspace = workspace
+        self._apply_workspace_style()
+        self.workspace_changed.emit(workspace)
+
+    def _apply_workspace_style(self) -> None:
+        base = (
+            "QPushButton { background: rgba(139,148,158,0.12); color: #c9d1d9;"
+            " border: 1px solid rgba(139,148,158,0.35); padding: 0 9px;"
+            " font-size: 9pt; font-weight: 600; }"
+            "QPushButton:hover { background: rgba(88,166,255,0.20); }"
+        )
+        active = (
+            "QPushButton:checked { background: rgba(88,166,255,0.32);"
+            " color: #f0f6fc; border-color: #58a6ff; }"
+        )
+        for button in (
+            self._standard_workspace_btn,
+            self._teleprompter_workspace_btn,
+        ):
+            button.setStyleSheet(base + active)
 
     def _apply_mic_button_state(self) -> None:
         if self._mic_enabled:

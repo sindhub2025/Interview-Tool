@@ -71,6 +71,8 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self._config = config
         self._resume_status = dict(resume_status or {})
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         # Explicit busy flag for resume operations. Use this instead of
         # inspecting `_resume_message_label` text to determine busy state.
         self._resume_busy = False
@@ -139,6 +141,30 @@ class SettingsDialog(QDialog):
 
         self._hotkey_dictation = QLineEdit()
         form.addRow("Win+H dictation hotkey:", self._hotkey_dictation)
+
+        self._hotkey_screenshot_email = QLineEdit()
+        form.addRow("Screenshot-to-email hotkey:", self._hotkey_screenshot_email)
+
+        self._screenshot_email_enabled = QCheckBox(
+            "Enable desktop screenshot capture and Gmail delivery"
+        )
+        form.addRow("Screenshot email:", self._screenshot_email_enabled)
+
+        self._screenshot_email_recipient = QLineEdit()
+        form.addRow("Email recipient:", self._screenshot_email_recipient)
+
+        self._screenshot_email_subject = QLineEdit()
+        form.addRow("Email subject:", self._screenshot_email_subject)
+
+        self._screenshot_email_message = QTextEdit()
+        self._screenshot_email_message.setFixedHeight(70)
+        form.addRow("Email message:", self._screenshot_email_message)
+
+        self._screenshot_oauth_credentials = QLineEdit()
+        self._screenshot_oauth_credentials.setPlaceholderText(
+            "Path to downloaded Gmail OAuth desktop client JSON"
+        )
+        form.addRow("Gmail OAuth JSON:", self._screenshot_oauth_credentials)
 
         self._dictation_enabled = QCheckBox("Enable Win+H dictation capture")
         form.addRow("Dictation:", self._dictation_enabled)
@@ -453,6 +479,7 @@ class SettingsDialog(QDialog):
         transcription = self._config.get("transcription", {})
         ui = self._config.get("ui", {})
         hotkeys = self._config.get("hotkeys", {})
+        screenshot_email = self._config.get("screenshot_email", {})
 
         # General
         lang = transcription.get("language", "en")
@@ -465,6 +492,29 @@ class SettingsDialog(QDialog):
         self._hotkey_copy.setText(hotkeys.get("copy_response", "ctrl+shift+c"))
         self._hotkey_clear.setText(hotkeys.get("clear_transcript", "ctrl+shift+x"))
         self._hotkey_dictation.setText(hotkeys.get("win_h_dictation", "win+h"))
+        self._hotkey_screenshot_email.setText(
+            hotkeys.get("screenshot_email", "ctrl+shift+e")
+        )
+        self._screenshot_email_enabled.setChecked(
+            bool(screenshot_email.get("enabled", False))
+        )
+        self._screenshot_email_recipient.setText(
+            str(screenshot_email.get("recipient", ""))
+        )
+        self._screenshot_email_subject.setText(
+            str(screenshot_email.get("subject", "Desktop screenshot"))
+        )
+        self._screenshot_email_message.setPlainText(
+            str(
+                screenshot_email.get(
+                    "message",
+                    "Desktop screenshot attached.",
+                )
+            )
+        )
+        self._screenshot_oauth_credentials.setText(
+            str(screenshot_email.get("oauth_credentials_file", ""))
+        )
 
         dictation = self._config.get("dictation", {})
         self._dictation_enabled.setChecked(bool(dictation.get("enabled", True)))
@@ -543,6 +593,33 @@ class SettingsDialog(QDialog):
         cfg["hotkeys"]["copy_response"] = self._hotkey_copy.text()
         cfg["hotkeys"]["clear_transcript"] = self._hotkey_clear.text()
         cfg["hotkeys"]["win_h_dictation"] = self._hotkey_dictation.text()
+        cfg["hotkeys"]["screenshot_email"] = (
+            self._hotkey_screenshot_email.text().strip().lower()
+            or "ctrl+shift+e"
+        )
+
+        recipient = self._screenshot_email_recipient.text().strip()
+        if recipient and (
+            "@" not in recipient
+            or "." not in recipient.rsplit("@", 1)[-1]
+        ):
+            recipient = ""
+        cfg.setdefault("screenshot_email", {})
+        cfg["screenshot_email"]["enabled"] = (
+            self._screenshot_email_enabled.isChecked()
+        )
+        cfg["screenshot_email"]["recipient"] = recipient
+        cfg["screenshot_email"]["subject"] = (
+            self._screenshot_email_subject.text().strip()
+            or "Desktop screenshot"
+        )
+        cfg["screenshot_email"]["message"] = (
+            self._screenshot_email_message.toPlainText().strip()
+            or "Desktop screenshot attached."
+        )
+        cfg["screenshot_email"]["oauth_credentials_file"] = (
+            self._screenshot_oauth_credentials.text().strip()
+        )
 
         cfg.setdefault("dictation", {})
         cfg["dictation"]["enabled"] = self._dictation_enabled.isChecked()

@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import platform
+import signal
 import sys
 import threading
 import time
@@ -300,6 +301,7 @@ def _default_config() -> dict:
             "always_on_top": True,
             "stealth_enabled": True,
             "compact_mode": False,
+            "active_workspace": "standard",
             "docked": False,
             "dock_height": 56,
             "pre_dock_x": None,
@@ -314,6 +316,14 @@ def _default_config() -> dict:
             "copy_response": "ctrl+shift+c",
             "clear_transcript": "ctrl+shift+x",
             "win_h_dictation": "win+h",
+            "screenshot_email": "ctrl+shift+e",
+        },
+        "screenshot_email": {
+            "enabled": False,
+            "recipient": "",
+            "subject": "Desktop screenshot",
+            "message": "Desktop screenshot attached.",
+            "oauth_credentials_file": "",
         },
         "dictation": {
             "enabled": True,
@@ -476,6 +486,7 @@ class GhostMicApp:
         self._hotkey_manager = None
         self._tray = None
         self._window = None
+        self._settings_dialog = None
         self._transcript_history: List = []
         self._ai_context_history: List = []
         self._last_ai_response_text: str = ""
@@ -497,6 +508,9 @@ class GhostMicApp:
         self._question_normalization_worker = None
         self._follow_up_suggestion_worker = None
         self._resume_upload_worker = None
+        self._screenshot_email_worker = None
+        self._screenshot_email_lock = threading.Lock()
+        self._screenshot_email_busy = False
         self._ui_dispatcher = None
         self._audio_backends_prewarmed = False
         self._mic_prime_in_progress = False
@@ -580,6 +594,17 @@ class GhostMicApp:
             app.setOverrideCursor(Qt.CursorShape.ArrowCursor)
             _write_startup_trace("run.qapplication.ok")
 
+            # Python normally replaces SIGINT handling in console applications.
+            # Route Ctrl+C to Qt's normal shutdown path instead of raising
+            # KeyboardInterrupt while the event loop is running.
+            previous_sigint_handler = signal.getsignal(signal.SIGINT)
+
+            def _handle_terminal_sigint(_signum, _frame) -> None:
+                self._logger.info("Ctrl+C received; requesting Qt application shutdown")
+                app.quit()
+
+            signal.signal(signal.SIGINT, _handle_terminal_sigint)
+
             startup_step = "apply_stylesheet"
             from ghostmic.ui.styles import MAIN_STYLE
 
@@ -642,6 +667,7 @@ class GhostMicApp:
             startup_step = "event_loop_exec"
             _write_startup_trace("run.event_loop.begin")
             exit_code = app.exec()
+            signal.signal(signal.SIGINT, previous_sigint_handler)
             self._logger.info("Qt event loop exited with code %s", exit_code)
             _write_startup_trace("run.event_loop.end", exit_code=exit_code)
             return exit_code
@@ -667,6 +693,7 @@ class GhostMicApp:
             copy_response_requested = pyqtSignal()
             clear_transcript_requested = pyqtSignal()
             win_h_dictation_requested = pyqtSignal()
+            screenshot_email_requested = pyqtSignal()
 
         self._window = MainWindow(self._config, config_path=self._config_path)
         self._ui_dispatcher = UiActionDispatcher()
@@ -677,6 +704,7 @@ class GhostMicApp:
         self._ui_dispatcher.copy_response_requested.connect(self._copy_last_response)
         self._ui_dispatcher.clear_transcript_requested.connect(self._clear_transcript)
         self._ui_dispatcher.win_h_dictation_requested.connect(self._on_win_h_dictation)
+        self._ui_dispatcher.screenshot_email_requested.connect(self._start_screenshot_email)
         self._window.dock_state_changed.connect(self._on_window_dock_state_changed)
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
@@ -1961,6 +1989,11 @@ class GhostMicApp:
                     if dispatcher
                     else self._on_win_h_dictation
                 ),
+                "screenshot_email": (
+                    (lambda: dispatcher.screenshot_email_requested.emit())
+                    if dispatcher
+                    else self._start_screenshot_email
+                ),
             }
             self._hotkey_manager = HotkeyManager(
                 self._config.get("hotkeys", {}), callbacks
@@ -2567,11 +2600,18 @@ class GhostMicApp:
         if self._window:
             if getattr(self._window, "_camera_mode", False):
                 self._window.set_camera_mode(False)
+            if self._settings_dialog is not None:
+                self._settings_dialog.raise_()
+                self._settings_dialog.activateWindow()
+                self._settings_dialog.setFocus()
+                return
+
             dlg = SettingsDialog(
                 self._config,
                 resume_status=self._resume_service.get_status(),
                 parent=self._window,
             )
+            self._settings_dialog = dlg
             dlg.settings_saved.connect(self._on_settings_saved)
             dlg.resume_context_saved.connect(self._on_resume_context_saved)
             dlg.resume_upload_requested.connect(
@@ -2584,7 +2624,15 @@ class GhostMicApp:
             dlg.resume_remove_requested.connect(
                 lambda dialog=dlg: self._on_resume_remove_requested(dialog)
             )
-            dlg.exec()
+            dlg.finished.connect(lambda _result, dialog=dlg: self._clear_settings_dialog(dialog))
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            dlg.setFocus()
+
+    def _clear_settings_dialog(self, dialog) -> None:
+        if self._settings_dialog is dialog:
+            self._settings_dialog = None
 
     def _on_resume_context_saved(self, context: str) -> None:
         self._resume_service.update_context(context)
@@ -2940,6 +2988,93 @@ class GhostMicApp:
     # ------------------------------------------------------------------
     # Actions (called by hotkeys or tray)
     # ------------------------------------------------------------------
+
+    def _notify_screenshot_status(self, title: str, message: str) -> None:
+        if self._tray:
+            try:
+                self._tray.showMessage(title, message)
+            except Exception:
+                pass
+        if self._window:
+            self._window.controls.set_status(message, "#58a6ff")
+
+    def _start_screenshot_email(self) -> None:
+        cfg = dict(self._config.get("screenshot_email", {}))
+        if not bool(cfg.get("enabled", False)):
+            self._notify_screenshot_status(
+                "Screenshot to Email",
+                "Screenshot-to-email is disabled in Settings",
+            )
+            return
+
+        recipient = str(cfg.get("recipient", "")).strip()
+        if "@" not in recipient or "." not in recipient.rsplit("@", 1)[-1]:
+            self._notify_screenshot_status(
+                "Screenshot to Email",
+                "A valid recipient address is required",
+            )
+            return
+
+        with self._screenshot_email_lock:
+            if self._screenshot_email_busy:
+                self._notify_screenshot_status(
+                    "Screenshot to Email",
+                    "Capture/email operation already in progress",
+                )
+                return
+            self._screenshot_email_busy = True
+
+        self._notify_screenshot_status(
+            "Screenshot to Email",
+            "Screenshot capture started",
+        )
+
+        from ghostmic.services.screenshot_email_service import ScreenshotEmailWorker
+
+        worker = ScreenshotEmailWorker(cfg)
+        self._screenshot_email_worker = worker
+        worker.capture_started.connect(
+            lambda: self._notify_screenshot_status(
+                "Screenshot to Email",
+                "Capturing desktop",
+            )
+        )
+        worker.captured.connect(
+            lambda: self._notify_screenshot_status(
+                "Screenshot to Email",
+                "Screenshot captured; email sending started",
+            )
+        )
+        worker.sent.connect(self._on_screenshot_email_sent)
+        worker.authentication_required.connect(self._on_screenshot_email_auth_required)
+        worker.failed.connect(self._on_screenshot_email_failed)
+        worker.finished.connect(self._clear_screenshot_email_worker)
+        worker.start()
+
+    def _clear_screenshot_email_worker(self) -> None:
+        with self._screenshot_email_lock:
+            self._screenshot_email_busy = False
+
+    def _on_screenshot_email_sent(self, message_id: str) -> None:
+        self._logger.info("Desktop screenshot email submitted successfully")
+        self._notify_screenshot_status(
+            "Screenshot to Email",
+            "Email sent successfully",
+        )
+
+    def _on_screenshot_email_auth_required(self, detail: str) -> None:
+        self._logger.warning("Screenshot email authentication required")
+        self._notify_screenshot_status(
+            "Screenshot to Email",
+            "Authentication required",
+        )
+
+    def _on_screenshot_email_failed(self, detail: str) -> None:
+        self._logger.error("Screenshot email delivery failed")
+        self._notify_screenshot_status(
+            "Screenshot to Email",
+            "Email delivery failed",
+        )
 
     def _toggle_window(self) -> None:
         if self._window:
@@ -4626,6 +4761,10 @@ class GhostMicApp:
         if orphans:
             self._logger.warning("Threads that did not stop cleanly: %s", orphans)
 
+        if self._screenshot_email_worker and self._screenshot_email_worker.isRunning():
+            self._screenshot_email_worker.requestInterruption()
+            self._screenshot_email_worker.wait(5000)
+
         if self._hotkey_manager:
             self._hotkey_manager.stop()
 
@@ -4653,6 +4792,9 @@ class GhostMicApp:
             ui_cfg["window_height"] = geo.height()
             ui_cfg["compact_mode"] = getattr(
                 self._window, "_compact_mode", False
+            )
+            ui_cfg["active_workspace"] = getattr(
+                self._window, "active_workspace", "standard"
             )
 
             if self._window.pre_dock_geometry is not None:

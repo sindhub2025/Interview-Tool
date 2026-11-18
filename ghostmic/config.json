@@ -87,6 +87,7 @@
     "compact_mode": false,
     "stealth_enabled": true,
     "docked": false,
+    "active_workspace": "standard",
     "dock_height": 56,
     "pre_dock_x": 215,
     "pre_dock_y": 30,
@@ -99,7 +100,15 @@
     "generate_response": "ctrl+g",
     "copy_response": "ctrl+shift+c",
     "clear_transcript": "ctrl+shift+x",
-    "win_h_dictation": "win+h"
+    "win_h_dictation": "win+h",
+    "screenshot_email": "ctrl+shift+e"
+  },
+  "screenshot_email": {
+    "enabled": false,
+    "recipient": "",
+    "subject": "Desktop screenshot",
+    "message": "Desktop screenshot attached.",
+    "oauth_credentials_file": ""
   },
   "dictation": {
     "enabled": true,

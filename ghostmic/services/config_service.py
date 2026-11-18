@@ -33,6 +33,11 @@ SUPPORTED_GROQ_MODELS = (
 
 # Full schema — dotted key path → (type, default, validator | None)
 CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
+    "screenshot_email.enabled": (bool, False, None),
+    "screenshot_email.recipient": (str, "", lambda v: not v or ("@" in v and "." in v.rsplit("@", 1)[-1])),
+    "screenshot_email.subject": (str, "Desktop screenshot", lambda v: bool(v.strip())),
+    "screenshot_email.message": (str, "Desktop screenshot attached.", None),
+    "screenshot_email.oauth_credentials_file": (str, "", None),
     # AI
     "ai.backend":              (str,   "groq",   lambda v: v in ("groq", "openai")),
     "ai.main_backend":         (str,   "groq",   lambda v: v in ("groq", "openai")),

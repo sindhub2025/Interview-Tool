@@ -53,3 +53,22 @@ def test_controls_bar_no_longer_exposes_a_stealth_toggle() -> None:
 
     assert not hasattr(controls, "stealth_toggled")
     assert not hasattr(controls, "is_stealth_enabled")
+
+
+def test_workspace_selector_has_two_explicit_presentation_states() -> None:
+    app = _qt_app()
+    assert app is not None
+    controls = ControlsBar()
+    emitted: list[str] = []
+    controls.workspace_changed.connect(emitted.append)
+
+    controls._teleprompter_workspace_btn.click()
+
+    assert controls.current_workspace() == "teleprompter"
+    assert emitted == ["teleprompter"]
+    assert controls._teleprompter_workspace_btn.isChecked()
+    assert not controls._standard_workspace_btn.isChecked()
+
+    controls.set_workspace("standard")
+    assert controls.current_workspace() == "standard"
+    assert controls._standard_workspace_btn.isChecked()
