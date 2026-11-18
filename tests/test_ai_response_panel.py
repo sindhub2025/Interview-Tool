@@ -10,6 +10,7 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from ghostmic.ui.ai_response_panel import AIResponseCard, AIResponsePanel, render_response_html
+from ghostmic.ui.presentation import Workspace
 
 
 def _qt_app() -> QApplication:
@@ -173,3 +174,48 @@ def test_copy_keeps_original_plain_answer() -> None:
     card._copy_btn.click()
 
     assert app.clipboard().text() == answer
+
+
+def test_new_and_reused_cards_inherit_teleprompter_workspace() -> None:
+    app = _qt_app()
+    panel = AIResponsePanel()
+    panel.show()
+    panel.set_workspace(Workspace.TELEPROMPTER)
+
+    panel.start_response()
+    card = panel._active_card
+    assert card is not None
+    app.processEvents()
+    assert card.is_teleprompter_active()
+    assert card._reading_view.isVisible()
+    assert card._teleprompter_toolbar.isVisible()
+    assert card._start_scroll_btn.isVisible()
+    assert card._speed_up_btn.isVisible()
+    assert card._speed_down_btn.isVisible()
+
+    panel.start_response()
+    assert panel._active_card is card
+    assert card.is_teleprompter_active()
+    assert card._teleprompter_toolbar.isVisible()
+
+
+def test_streaming_and_repeated_workspace_changes_keep_one_scroll_timer() -> None:
+    app = _qt_app()
+    panel = AIResponsePanel()
+    panel.show()
+    panel.set_workspace(Workspace.TELEPROMPTER)
+    panel.start_response()
+    card = panel._active_card
+    assert card is not None
+
+    for _ in range(4):
+        panel.append_chunk("A readable response. ")
+        panel.set_workspace(Workspace.STANDARD)
+        panel.set_workspace(Workspace.TELEPROMPTER)
+    app.processEvents()
+
+    assert card.is_teleprompter_active()
+    assert card._reading_view.isVisible()
+    assert card._teleprompter_toolbar.isVisible()
+    assert card._scroll_timer is not None
+    assert len(card._camera_shortcuts) == 10

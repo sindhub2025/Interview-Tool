@@ -33,6 +33,7 @@ from ghostmic.ui.styles import (
     TEXT_PRIMARY,
     TEXT_SECONDARY,
 )
+from ghostmic.ui.presentation import Workspace, coerce_workspace
 
 QWIDGETSIZE_MAX = 16_777_215
 
@@ -170,12 +171,12 @@ class AIResponseCard(QFrame):
         super().__init__(parent)
         self._text = text
         self._title = title
-        self._teleprompter_active = False
+        self._workspace = Workspace.STANDARD
         self._reading_font_size = 24
         self._scroll_speed = 2.0
         self._scroll_remainder = 0.0
         self._scrolling = False
-        self._camera_mode_active = False
+        self._camera_overlay_active = False
         self._camera_shortcuts = []
         self._tooltips_before_camera = {}
         self._scroll_timer = QTimer(self)
@@ -252,6 +253,7 @@ class AIResponseCard(QFrame):
         self._font_down_btn = QPushButton("A−")
         self._font_up_btn = QPushButton("A+")
         self._start_scroll_btn = QPushButton("Start")
+        self._reset_scroll_btn = QPushButton("Reset")
         self._camera_btn = QPushButton("Camera Mode")
         self._speed_down_btn = QPushButton("−")
         self._speed_up_btn = QPushButton("+")
@@ -260,15 +262,18 @@ class AIResponseCard(QFrame):
         self._font_down_btn.setToolTip("Decrease reading text size")
         self._font_up_btn.setToolTip("Increase reading text size")
         self._start_scroll_btn.setToolTip("Start or pause auto-scroll")
+        self._reset_scroll_btn.setToolTip("Reset reading position")
         self._speed_down_btn.setToolTip("Decrease scroll speed")
         self._speed_up_btn.setToolTip("Increase scroll speed")
         self._font_down_btn.setAccessibleName("Decrease reading text size")
         self._font_up_btn.setAccessibleName("Increase reading text size")
         self._start_scroll_btn.setAccessibleName("Start or pause auto-scroll")
+        self._reset_scroll_btn.setAccessibleName("Reset reading position")
         self._speed_down_btn.setAccessibleName("Decrease scroll speed")
         self._speed_up_btn.setAccessibleName("Increase scroll speed")
         for button in (self._font_down_btn, self._font_up_btn,
-                       self._start_scroll_btn, self._speed_down_btn,
+                       self._start_scroll_btn, self._reset_scroll_btn,
+                       self._speed_down_btn,
                        self._speed_up_btn):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setMinimumWidth(30)
@@ -281,6 +286,7 @@ class AIResponseCard(QFrame):
         self._font_down_btn.clicked.connect(lambda: self._change_font_size(-2))
         self._font_up_btn.clicked.connect(lambda: self._change_font_size(2))
         self._start_scroll_btn.clicked.connect(self._toggle_scrolling)
+        self._reset_scroll_btn.clicked.connect(self._scroll_home)
         self._speed_down_btn.clicked.connect(lambda: self._change_speed(-1))
         self._speed_up_btn.clicked.connect(lambda: self._change_speed(1))
         self._camera_btn.clicked.connect(self.toggle_camera_mode)
@@ -345,7 +351,8 @@ class AIResponseCard(QFrame):
             "QPushButton:disabled { color: #687687; background: #151b23; }"
         )
         for button in (self._font_down_btn, self._font_up_btn,
-                       self._speed_down_btn, self._speed_up_btn):
+                       self._reset_scroll_btn, self._speed_down_btn,
+                       self._speed_up_btn):
             button.setFixedSize(30, 28)
             button.setStyleSheet(button_style)
         self._start_scroll_btn.setFixedSize(70, 28)
@@ -378,7 +385,7 @@ class AIResponseCard(QFrame):
         self._font_size_label.setText(f"{self._reading_font_size} pt")
         self._font_down_btn.setEnabled(self._reading_font_size > 16)
         self._font_up_btn.setEnabled(self._reading_font_size < 40)
-        if self._teleprompter_active:
+        if self._workspace is Workspace.TELEPROMPTER:
             self._render_reading_view()
 
     def _change_speed(self, delta: int) -> None:
@@ -400,13 +407,13 @@ class AIResponseCard(QFrame):
     def _update_scroll_button_label(self) -> None:
         scrollbar = self._reading_view.verticalScrollBar()
         if self._scrolling:
-            label = "Ⅱ" if self._camera_mode_active else "Pause"
+            label = "Ⅱ" if self._camera_overlay_active else "Pause"
         elif scrollbar.value() >= scrollbar.maximum() and scrollbar.maximum() > 0:
-            label = "↻" if self._camera_mode_active else "Replay"
+            label = "↻" if self._camera_overlay_active else "Replay"
         elif scrollbar.value() > scrollbar.minimum():
-            label = "▶" if self._camera_mode_active else "Resume"
+            label = "▶" if self._camera_overlay_active else "Resume"
         else:
-            label = "▶" if self._camera_mode_active else "Start"
+            label = "▶" if self._camera_overlay_active else "Start"
         self._start_scroll_btn.setText(label)
 
     def _advance_scroll(self) -> None:
@@ -424,21 +431,45 @@ class AIResponseCard(QFrame):
             self._update_scroll_button_label()
 
     def toggle_camera_mode(self) -> None:
-        requested = not self._camera_mode_active
+        requested = not self._camera_overlay_active
         self.camera_mode_requested.emit(requested)
 
-    def set_camera_mode(self, active: bool) -> None:
-        """Synchronize the card's presentation with MainWindow camera mode."""
-        self._camera_mode_active = active
+    def set_workspace(self, workspace: Workspace | str) -> None:
+        """Apply the content presentation without changing the response text."""
+        normalized = coerce_workspace(workspace)
+        entering = normalized is Workspace.TELEPROMPTER and (
+            self._workspace is not Workspace.TELEPROMPTER
+        )
+        self._workspace = normalized
+        if entering:
+            self._render_reading_view()
+        active = normalized is Workspace.TELEPROMPTER
+        self._text_edit.setVisible(not active)
+        self._reading_view.setVisible(active)
+        self._teleprompter_toolbar.setVisible(active)
+        self._teleprompter_btn.setText("Normal View" if active else "Teleprompter")
+        if not active:
+            self._scrolling = False
+            self._scroll_timer.stop()
+        self._update_scroll_button_label()
+        if active:
+            self._install_camera_shortcuts()
+        else:
+            self._remove_camera_shortcuts()
+
+    def apply_workspace(self, workspace: Workspace | str) -> None:
+        """Compatibility alias for callers that apply presentation state."""
+        self.set_workspace(workspace)
+
+    def set_camera_overlay(self, active: bool) -> None:
+        """Apply camera-overlay styling independently of workspace selection."""
+        self._camera_overlay_active = bool(active)
         if active:
             self._style_before_camera = self.styleSheet()
             camera_buttons = (
-                self._font_down_btn,
-                self._font_up_btn,
-                self._start_scroll_btn,
-                self._speed_down_btn,
-                self._speed_up_btn,
-                self._camera_btn,
+                self._font_down_btn, self._font_up_btn, self._start_scroll_btn,
+                self._reset_scroll_btn, self._speed_down_btn,
+                self._speed_up_btn, self._camera_btn,
             )
             self._tooltips_before_camera = {
                 button: button.toolTip() for button in camera_buttons
@@ -453,8 +484,6 @@ class AIResponseCard(QFrame):
         self._camera_btn.setAccessibleName(
             "Exit Camera Mode" if active else "Camera Mode"
         )
-        if not active:
-            self._camera_btn.setToolTip("Compact the window below your camera")
         self._card_header.setVisible(not active)
         if active:
             self.setStyleSheet(
@@ -462,10 +491,7 @@ class AIResponseCard(QFrame):
             )
         else:
             self.setStyleSheet(self._style_before_camera)
-        if active:
-            self.layout().setContentsMargins(10, 2, 10, 4)
-        else:
-            self.layout().setContentsMargins(10, 8, 10, 10)
+        self.layout().setContentsMargins(10, 2 if active else 8, 10, 4 if active else 10)
         self.layout().setSpacing(5 if active else 6)
         self._teleprompter_toolbar.setStyleSheet(
             "QWidget#teleprompter_toolbar { background: transparent; "
@@ -477,45 +503,38 @@ class AIResponseCard(QFrame):
         toolbar_layout.setSpacing(4 if active else 5)
         if active:
             self._camera_btn.setFixedSize(30, 28)
-            self._camera_btn.setStyleSheet(
-                "QPushButton { background: transparent; color: #9ba9b9; "
-                "border: 1px solid rgba(148,163,184,0.18); border-radius: 14px; "
-                "padding: 0; font-size: 16pt; font-weight: 400; }"
-                "QPushButton:hover { color: #f1f5f9; "
-                "background: rgba(255,255,255,0.08); "
-                "border-color: rgba(203,213,225,0.36); }"
-            )
             self._start_scroll_btn.setFixedSize(34, 28)
-            self._start_scroll_btn.setStyleSheet(
-                "QPushButton { background: rgba(46,160,67,0.13); color: #b7e4c0; "
-                "border: 1px solid rgba(63,185,80,0.24); border-radius: 14px; "
-                "padding: 0; font-size: 10pt; font-weight: 700; }"
-                "QPushButton:hover { background: rgba(46,160,67,0.24); }"
-            )
+            self._reset_scroll_btn.setFixedSize(52, 28)
             self._update_scroll_button_label()
         else:
             self._camera_btn.setFixedSize(78, 28)
             self._apply_teleprompter_toolbar_style()
             self._update_scroll_button_label()
-        if active:
-            layout = self.layout()
-            layout.removeWidget(self._teleprompter_toolbar)
-            layout.removeWidget(self._reading_view)
+        self._reorder_reading_widgets(active)
+
+    def _reorder_reading_widgets(self, camera_overlay: bool) -> None:
+        layout = self.layout()
+        layout.removeWidget(self._teleprompter_toolbar)
+        layout.removeWidget(self._reading_view)
+        if camera_overlay:
             layout.addWidget(self._reading_view, 1)
             layout.addWidget(self._teleprompter_toolbar)
         else:
-            layout = self.layout()
-            layout.removeWidget(self._reading_view)
-            layout.removeWidget(self._teleprompter_toolbar)
             layout.insertWidget(2, self._teleprompter_toolbar)
             layout.insertWidget(3, self._reading_view, 1)
-        if active:
-            self._install_camera_shortcuts()
-        else:
-            for shortcut in self._camera_shortcuts:
-                shortcut.setEnabled(False)
-                shortcut.deleteLater()
-            self._camera_shortcuts.clear()
+
+    def _remove_camera_shortcuts(self) -> None:
+        for shortcut in self._camera_shortcuts:
+            shortcut.setEnabled(False)
+            shortcut.deleteLater()
+        self._camera_shortcuts.clear()
+
+    def set_camera_mode(self, active: bool) -> None:
+        """Backward-compatible camera presentation entry point."""
+        self.set_workspace(
+            Workspace.TELEPROMPTER if active else Workspace.STANDARD
+        )
+        self.set_camera_overlay(active)
 
     def _install_camera_shortcuts(self) -> None:
         if self._camera_shortcuts:
@@ -553,25 +572,19 @@ class AIResponseCard(QFrame):
         self._start_scroll_btn.setText("Replay")
 
     def toggle_teleprompter(self) -> None:
-        active = not self._teleprompter_active
         self.show()
-        if active:
-            self._render_reading_view()
-        self._teleprompter_active = active
-        self._text_edit.setVisible(not active)
-        self._reading_view.setVisible(active)
-        self._teleprompter_toolbar.setVisible(active)
-        self._teleprompter_btn.setText("Normal View" if active else "Teleprompter")
-        if not active:
-            self._scrolling = False
-            self._scroll_timer.stop()
+        self.set_workspace(
+            Workspace.STANDARD
+            if self._workspace is Workspace.TELEPROMPTER
+            else Workspace.TELEPROMPTER
+        )
 
     def is_teleprompter_active(self) -> bool:
-        return self._teleprompter_active
+        return self._workspace is Workspace.TELEPROMPTER
 
     def _render_text(self, *, scroll_to_end: bool) -> None:
         self._text_edit.setHtml(render_response_html(self._text))
-        if self._teleprompter_active:
+        if self._workspace is Workspace.TELEPROMPTER:
             self._render_reading_view(scroll_to_end=scroll_to_end)
         cursor = self._text_edit.textCursor()
         cursor.movePosition(
@@ -585,7 +598,9 @@ class AIResponseCard(QFrame):
     def append_text(self, chunk: str) -> None:
         """Append a streaming chunk to the response."""
         self._text += chunk
-        self._render_text(scroll_to_end=not self._teleprompter_active)
+        self._render_text(
+            scroll_to_end=self._workspace is not Workspace.TELEPROMPTER
+        )
 
     def set_text(self, text: str) -> None:
         from ghostmic.utils.logger import get_logger
@@ -595,7 +610,7 @@ class AIResponseCard(QFrame):
         self._scroll_timer.stop()
         self._text = text
         self._render_text(scroll_to_end=False)
-        if self._teleprompter_active:
+        if self._workspace is Workspace.TELEPROMPTER:
             self._reading_view.verticalScrollBar().setValue(
                 self._reading_view.verticalScrollBar().minimum()
             )
@@ -627,7 +642,8 @@ class AIResponsePanel(QWidget):
         self._active_card: AIResponseCard | None = None
         self._thinking_label: QLabel | None = None
         self._collapsed = False
-        self._camera_mode = False
+        self._workspace = Workspace.STANDARD
+        self._camera_overlay = False
 
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -735,13 +751,19 @@ class AIResponsePanel(QWidget):
 
     def _wire_camera_mode(self, card: AIResponseCard) -> None:
         card.camera_mode_requested.connect(self.camera_mode_requested.emit)
-        card.set_camera_mode(self._camera_mode)
+        card.set_workspace(self._workspace)
+        card.set_camera_overlay(self._camera_overlay)
 
-    def set_camera_mode(self, active: bool) -> None:
-        """Compact the answer panel while keeping its response card in place."""
-        if active == self._camera_mode:
-            return
-        self._camera_mode = active
+    def set_workspace(self, workspace: Workspace | str) -> None:
+        """Propagate the authoritative workspace to every response card."""
+        normalized = coerce_workspace(workspace)
+        self._workspace = normalized
+        for card in self._cards:
+            card.set_workspace(normalized)
+
+    def set_camera_overlay(self, active: bool) -> None:
+        """Apply camera-overlay styling without changing the workspace."""
+        self._camera_overlay = bool(active)
         if active:
             self._prompt_row_was_hidden = self._prompt_row.isHidden()
             self._style_before_camera = self.styleSheet()
@@ -758,7 +780,14 @@ class AIResponsePanel(QWidget):
             self._content.layout().setSpacing(8)
             self.setStyleSheet(self._style_before_camera)
         for card in self._cards:
-            card.set_camera_mode(active)
+            card.set_camera_overlay(active)
+
+    def set_camera_mode(self, active: bool) -> None:
+        """Backward-compatible camera presentation entry point."""
+        self.set_workspace(
+            Workspace.TELEPROMPTER if active else Workspace.STANDARD
+        )
+        self.set_camera_overlay(active)
 
     def start_response(self, title: str = "Answer") -> None:
         """Create a new blank response card ready for streaming."""
@@ -774,6 +803,8 @@ class AIResponsePanel(QWidget):
         if card is not None and card.parent() is self._responses_container:
             self._active_card = card
             self._cards = [card]
+            card.set_workspace(self._workspace)
+            card.set_camera_overlay(self._camera_overlay)
             card.set_text("")
             self._responses_layout.setStretchFactor(card, 1)
             self._scroll_to_bottom()

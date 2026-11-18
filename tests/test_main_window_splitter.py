@@ -402,6 +402,16 @@ def test_workspace_switch_preserves_session_content_and_recording_state() -> Non
     )
     assert "preserve state" in window._question_text.toPlainText()
     assert window.controls.is_recording
+    window.controls.set_mic_enabled(True)
+    window.controls.set_recording(False)
+    window.controls.set_recording(True)
+    card = window.ai_panel._cards[-1]
+    assert window.active_workspace == "teleprompter"
+    assert card._reading_view.isVisible()
+    assert card._teleprompter_toolbar.isVisible()
+    assert card._start_scroll_btn.isVisible()
+    assert card._speed_up_btn.isVisible()
+    assert card._speed_down_btn.isVisible()
 
     for _ in range(4):
         window.set_workspace("standard")

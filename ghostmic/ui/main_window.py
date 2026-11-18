@@ -60,6 +60,7 @@ from ghostmic.ui.ai_response_panel import AIResponsePanel
 from ghostmic.ui.controls_bar import ControlsBar
 from ghostmic.ui.styles import MAIN_STYLE
 from ghostmic.ui.transcript_panel import TranscriptPanel
+from ghostmic.ui.presentation import Workspace, coerce_workspace
 from ghostmic.utils.logger import get_logger
 from ghostmic.utils.text_processing import ensure_question_format
 
@@ -312,7 +313,7 @@ class MainWindow(QMainWindow):
         self._config = config
         self._config_path = config_path
         self._compact_mode = False
-        self._camera_mode = False
+        self._camera_overlay_active = False
         self._active_workspace = "standard"
         self._qa_revealed = False
         self._qa_animation: QParallelAnimationGroup | None = None
@@ -771,19 +772,20 @@ class MainWindow(QMainWindow):
         """Return the current presentation workspace."""
         return self._active_workspace
 
-    def set_workspace(self, workspace: str) -> None:
+    def set_workspace(self, workspace: Workspace | str) -> None:
         """Switch presentation without changing session, recording, or content."""
-        normalized = workspace.strip().lower()
-        if normalized not in {"standard", "teleprompter"}:
+        try:
+            normalized = coerce_workspace(workspace)
+        except ValueError:
             logger.warning("Ignoring invalid workspace: %r", workspace)
             return
-        if normalized == self._active_workspace:
-            self._controls.set_workspace(normalized)
-            return
-        self._active_workspace = normalized
-        self._config.setdefault("ui", {})["active_workspace"] = normalized
-        self._controls.set_workspace(normalized)
-        self.set_camera_mode(normalized == "teleprompter")
+        workspace_value = normalized.value
+        self._active_workspace = workspace_value
+        self._config.setdefault("ui", {})["active_workspace"] = workspace_value
+        self._controls.set_workspace(workspace_value)
+        self.ai_panel.set_workspace(normalized)
+        if (normalized is Workspace.TELEPROMPTER) != self._camera_overlay_active:
+            self._set_camera_overlay(normalized is Workspace.TELEPROMPTER)
 
     def _apply_startup_collapsed_layout(self) -> None:
         """Start as a toolbar-only rectangle."""
@@ -1505,15 +1507,12 @@ class MainWindow(QMainWindow):
     # Slots
     # ------------------------------------------------------------------
 
-    def set_camera_mode(self, active: bool) -> None:
-        """Transform this MainWindow into the compact teleprompter view."""
-        if active == getattr(self, "_camera_mode", False):
+    def _set_camera_overlay(self, active: bool) -> None:
+        """Apply the camera overlay layout without owning workspace state."""
+        if active == self._camera_overlay_active:
             return
-        self._active_workspace = "teleprompter" if active else "standard"
-        self._config.setdefault("ui", {})["active_workspace"] = self._active_workspace
-        self._controls.set_workspace(self._active_workspace)
         if active:
-            self._camera_mode = True
+            self._camera_overlay_active = True
             self._qa_revealed = True
             self._qa_container.setMaximumHeight(QWIDGETSIZE_MAX)
             root_layout = self._root.layout()
@@ -1548,7 +1547,7 @@ class MainWindow(QMainWindow):
             self._title_bar.hide()
             self._title_separator.hide()
             self._controls.show()
-            self._controls.set_camera_mode(True)
+            self._controls.set_camera_overlay(True)
             self._controls.adjustSize()
             root_layout.setContentsMargins(8, 7, 8, 8)
             self._root.setStyleSheet(
@@ -1560,7 +1559,7 @@ class MainWindow(QMainWindow):
             qa_layout.setContentsMargins(0, 0, 0, 0)
             qa_layout.setSpacing(0)
             self._question_card.hide()
-            self.ai_panel.set_camera_mode(True)
+            self.ai_panel.set_camera_overlay(True)
             root_layout.removeWidget(self._controls)
             root_layout.addWidget(
                 self._controls, alignment=Qt.AlignmentFlag.AlignHCenter
@@ -1576,11 +1575,11 @@ class MainWindow(QMainWindow):
                 y = area.y() + min(top_offset, max(0, area.height() - height))
                 self.setGeometry(x, y, width, height)
         else:
-            self._camera_mode = False
-            self.ai_panel.set_camera_mode(False)
+            self._camera_overlay_active = False
+            self.ai_panel.set_camera_overlay(False)
             restore = getattr(self, "_camera_restore", None)
             if restore:
-                self._controls.set_camera_mode(False)
+                self._controls.set_camera_overlay(False)
                 root_layout = self._root.layout()
                 root_layout.removeWidget(self._controls)
                 root_layout.insertWidget(
@@ -1603,6 +1602,12 @@ class MainWindow(QMainWindow):
                 self._splitter.setVisible(restore["splitter"])
         # Reapply capture exclusion after the compact-window geometry settles.
         QTimer.singleShot(100, self._apply_stealth)
+
+    def set_camera_mode(self, active: bool) -> None:
+        """Backward-compatible entry point for the former camera workspace."""
+        self.set_workspace(
+            Workspace.TELEPROMPTER if active else Workspace.STANDARD
+        )
 
     def _on_close(self) -> None:
         QApplication.instance().quit()
@@ -1736,8 +1741,8 @@ class MainWindow(QMainWindow):
         logger.info("Mode changed to: %s", mode)
 
     def _show_settings(self) -> None:
-        if getattr(self, "_camera_mode", False):
-            self.set_camera_mode(False)
+        if self._active_workspace == Workspace.TELEPROMPTER.value:
+            self.set_workspace(Workspace.STANDARD)
         from ghostmic.ui.settings_dialog import SettingsDialog
         if self._settings_dialog is not None:
             self._settings_dialog.raise_()

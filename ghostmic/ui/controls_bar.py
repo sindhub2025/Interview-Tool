@@ -222,7 +222,7 @@ class ControlsBar(QWidget):
         self._mic_enabled = False
         self._api_connected = False
         self._api_backend = "Groq"
-        self._camera_mode = False
+        self._camera_overlay = False
         self._workspace = "standard"
         self._build_ui()
 
@@ -350,9 +350,9 @@ class ControlsBar(QWidget):
         self._record_btn.setAccessibleDescription(
             "Recording is active" if recording else "Recording is stopped"
         )
-        if self._camera_mode:
+        if self._camera_overlay:
             self._record_btn.setToolTip("")
-        if self._camera_mode:
+        if self._camera_overlay:
             self._record_btn.setStyleSheet("")
         elif recording:
             self._record_btn.setText("Stop")
@@ -372,12 +372,12 @@ class ControlsBar(QWidget):
         prev = self._mic_btn.blockSignals(True)
         self._mic_btn.setChecked(self._mic_enabled)
         self._mic_btn.blockSignals(prev)
-        if not self._camera_mode:
+        if not self._camera_overlay:
             self._apply_mic_button_state()
         self._mic_btn.setAccessibleDescription(
             "Microphone is on" if self._mic_enabled else "Microphone is off"
         )
-        if self._camera_mode:
+        if self._camera_overlay:
             self._mic_btn.setToolTip("")
         self._mic_btn.update()
 
@@ -399,9 +399,9 @@ class ControlsBar(QWidget):
         self._screenshot_btn.setEnabled(not busy)
         self._screenshot_btn.setText("Analyzing" if busy else "Capture")
 
-    def set_camera_mode(self, active: bool) -> None:
-        """Use a compact icon toolbar while Camera Mode is active."""
-        self._camera_mode = active
+    def set_camera_overlay(self, active: bool) -> None:
+        """Use a compact icon toolbar while the camera overlay is active."""
+        self._camera_overlay = active
         layout = self.layout()
         if active:
             self.setStyleSheet(
@@ -489,6 +489,10 @@ class ControlsBar(QWidget):
     def current_mode(self) -> str:
         return self._mode_combo.currentText()
 
+    def set_camera_mode(self, active: bool) -> None:
+        """Backward-compatible alias for camera-overlay presentation."""
+        self.set_camera_overlay(active)
+
     def current_workspace(self) -> str:
         """Return the active presentation workspace."""
         return self._workspace
@@ -554,7 +558,7 @@ class ControlsBar(QWidget):
                 "QPushButton:hover { background-color: rgba(63, 185, 80, 0.30); }"
             )
             self._mic_btn.setAccessibleDescription("Microphone is on")
-            if self._camera_mode:
+            if self._camera_overlay:
                 self._mic_btn.setToolTip("Turn microphone off")
             return
 
@@ -571,7 +575,7 @@ class ControlsBar(QWidget):
             "QPushButton:hover { background-color: rgba(139, 148, 158, 0.24); }"
         )
         self._mic_btn.setAccessibleDescription("Microphone is off")
-        if self._camera_mode:
+        if self._camera_overlay:
             self._mic_btn.setToolTip("Turn microphone on")
 
     # ------------------------------------------------------------------
