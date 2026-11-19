@@ -355,7 +355,8 @@ class MainWindow(QMainWindow):
         self._settings_dialog = None
 
         self._setup_window()
-        self._quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
+        hotkey_quit = self._config.get("hotkeys", {}).get("quit_app", "ctrl+q")
+        self._quit_shortcut = QShortcut(QKeySequence(hotkey_quit), self)
         self._quit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._quit_shortcut.activated.connect(self._on_close)
         self._build_ui()
@@ -1300,6 +1301,9 @@ class MainWindow(QMainWindow):
         (GhostMicApp._on_settings_saved) to avoid double writes.
         """
         self._config = config
+        hotkey_quit = config.get("hotkeys", {}).get("quit_app", "ctrl+q")
+        if getattr(self, "_quit_shortcut", None):
+            self._quit_shortcut.setKey(QKeySequence(hotkey_quit))
         ui = config.get("ui", {})
         self.setWindowOpacity(ui.get("opacity", 0.95))
         self._expanded_window_size = QSize(

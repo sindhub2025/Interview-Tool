@@ -277,7 +277,7 @@ class ConfigService:
         if not os.path.exists(self._path):
             return {}
         try:
-            with open(self._path, "r", encoding="utf-8") as fh:
+            with open(self._path, "r", encoding="utf-8-sig") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
                 return data

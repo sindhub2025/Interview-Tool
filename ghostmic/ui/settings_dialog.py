@@ -145,6 +145,9 @@ class SettingsDialog(QDialog):
         self._hotkey_screenshot_email = QLineEdit()
         form.addRow("Screenshot-to-email hotkey:", self._hotkey_screenshot_email)
 
+        self._hotkey_quit = QLineEdit()
+        form.addRow("Quit app hotkey:", self._hotkey_quit)
+
         self._screenshot_email_enabled = QCheckBox(
             "Enable desktop screenshot capture and Gmail delivery"
         )
@@ -487,14 +490,15 @@ class SettingsDialog(QDialog):
         if idx >= 0:
             self._lang_combo.setCurrentIndex(idx)
         self._hotkey_toggle.setText(hotkeys.get("toggle_recording", "ctrl+shift+g"))
-        self._hotkey_window.setText(hotkeys.get("toggle_window", "ctrl+shift+h"))
+        self._hotkey_window.setText(hotkeys.get("toggle_window", "ctrl+a"))
         self._hotkey_ai.setText(hotkeys.get("generate_response", "ctrl+g"))
         self._hotkey_copy.setText(hotkeys.get("copy_response", "ctrl+shift+c"))
         self._hotkey_clear.setText(hotkeys.get("clear_transcript", "ctrl+shift+x"))
         self._hotkey_dictation.setText(hotkeys.get("win_h_dictation", "win+h"))
         self._hotkey_screenshot_email.setText(
-            hotkeys.get("screenshot_email", "ctrl+shift+e")
+            hotkeys.get("screenshot_email", "ctrl+z")
         )
+        self._hotkey_quit.setText(hotkeys.get("quit_app", "ctrl+q"))
         self._screenshot_email_enabled.setChecked(
             bool(screenshot_email.get("enabled", False))
         )
@@ -588,14 +592,19 @@ class SettingsDialog(QDialog):
         # General / hotkeys
         cfg.setdefault("hotkeys", {})
         cfg["hotkeys"]["toggle_recording"] = self._hotkey_toggle.text()
-        cfg["hotkeys"]["toggle_window"] = self._hotkey_window.text()
+        cfg["hotkeys"]["toggle_window"] = (
+            self._hotkey_window.text().strip().lower() or "ctrl+a"
+        )
         cfg["hotkeys"]["generate_response"] = self._hotkey_ai.text()
         cfg["hotkeys"]["copy_response"] = self._hotkey_copy.text()
         cfg["hotkeys"]["clear_transcript"] = self._hotkey_clear.text()
         cfg["hotkeys"]["win_h_dictation"] = self._hotkey_dictation.text()
         cfg["hotkeys"]["screenshot_email"] = (
             self._hotkey_screenshot_email.text().strip().lower()
-            or "ctrl+shift+e"
+            or "ctrl+z"
+        )
+        cfg["hotkeys"]["quit_app"] = (
+            self._hotkey_quit.text().strip().lower() or "ctrl+q"
         )
 
         recipient = self._screenshot_email_recipient.text().strip()

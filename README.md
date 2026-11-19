@@ -15,7 +15,7 @@
 | 📝 Real-time transcription  | `faster-whisper` (base.en by default, CPU int8 or CUDA float16)                                                           |
 | 🤖 AI suggestions           | Groq API (active provider)                                                                                                |
 | 📄 Active interview profile | Enter person/role/experience, upload a resume, and build local profile terms for transcript normalization and personalized answers |
-| ⌨ Global hotkeys            | `Ctrl+Shift+G` record · `Ctrl+Shift+H` hide · `Ctrl+G` AI generate                                                        |
+| ⌨ Global hotkeys            | `Ctrl+Shift+G` record · `Ctrl+A` minimize/restore · `Ctrl+Z` screenshot to Gmail · `Ctrl+Q` quit · `Ctrl+G` AI generate |
 | 🔧 Settings dialog          | Tabs for Audio, AI, Appearance, Hotkeys — also stealthed                                                                  |
 | 💾 Auto-save                | Transcript saved to `~/.ghostmic/` on exit                                                                                |
 
@@ -131,7 +131,7 @@ Runtime settings, including API keys, are stored outside the repository config f
 ## Screenshot-to-Email (Gmail)
 
 The application captures the entire virtual desktop only when
-`Ctrl+Shift+E` is pressed (or the configured hotkey). Enable and configure
+`Ctrl+Z` is pressed (or the configured hotkey). Enable and configure
 it under **Settings → General**.
 
 ### Gmail OAuth setup
@@ -142,7 +142,7 @@ it under **Settings → General**.
 4. Download the OAuth client JSON file.
 5. In GhostMic Settings, set **Gmail OAuth JSON** to that file's full path.
 6. Enable screenshot email and enter the recipient, subject, and message.
-7. Press `Ctrl+Shift+E`. A browser window will open for Google authorization.
+7. Press `Ctrl+Z`. A browser window will open for Google authorization.
 
 OAuth refresh credentials are stored by `keyring` in the Windows Credential
 Manager. The OAuth client JSON should remain outside the application

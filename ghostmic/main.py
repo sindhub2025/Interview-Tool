@@ -311,12 +311,13 @@ def _default_config() -> dict:
         },
         "hotkeys": {
             "toggle_recording": "ctrl+shift+g",
-            "toggle_window": "ctrl+shift+h",
+            "toggle_window": "ctrl+a",
             "generate_response": "ctrl+g",
             "copy_response": "ctrl+shift+c",
             "clear_transcript": "ctrl+shift+x",
             "win_h_dictation": "win+h",
-            "screenshot_email": "ctrl+shift+e",
+            "screenshot_email": "ctrl+z",
+            "quit_app": "ctrl+q",
         },
         "screenshot_email": {
             "enabled": False,
@@ -357,7 +358,7 @@ def _load_config(path: str) -> dict:
         else:
             default_path = BUNDLED_CONFIG_PATH
             if os.path.exists(default_path):
-                with open(default_path, encoding="utf-8") as fh:
+                with open(default_path, encoding="utf-8-sig") as fh:
                     cfg = json.load(fh)
             else:
                 cfg = _default_config()
@@ -372,10 +373,18 @@ def _load_config(path: str) -> dict:
                 _early_logger.warning("Could not create config file %s: %s", path, exc)
         return cfg
 
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8-sig") as fh:
         cfg = json.load(fh)
 
     cfg = _merge_defaults(cfg, _default_config())
+    hotkeys_cfg = cfg.get("hotkeys", {})
+    if isinstance(hotkeys_cfg, dict):
+        if hotkeys_cfg.get("toggle_window") == "ctrl+shift+h":
+            hotkeys_cfg["toggle_window"] = "ctrl+a"
+        if hotkeys_cfg.get("screenshot_email") == "ctrl+shift+e":
+            hotkeys_cfg["screenshot_email"] = "ctrl+z"
+        if "quit_app" not in hotkeys_cfg:
+            hotkeys_cfg["quit_app"] = "ctrl+q"
     ai_cfg = cfg.get("ai", {})
     if isinstance(ai_cfg, dict):
         ai_cfg.pop("ollama_model", None)
@@ -701,6 +710,7 @@ class GhostMicApp:
             clear_transcript_requested = pyqtSignal()
             win_h_dictation_requested = pyqtSignal()
             screenshot_email_requested = pyqtSignal()
+            quit_app_requested = pyqtSignal()
 
         self._window = MainWindow(self._config, config_path=self._config_path)
         self._ui_dispatcher = UiActionDispatcher()
@@ -712,6 +722,7 @@ class GhostMicApp:
         self._ui_dispatcher.clear_transcript_requested.connect(self._clear_transcript)
         self._ui_dispatcher.win_h_dictation_requested.connect(self._on_win_h_dictation)
         self._ui_dispatcher.screenshot_email_requested.connect(self._start_screenshot_email)
+        self._ui_dispatcher.quit_app_requested.connect(self._quit_app)
         self._window.dock_state_changed.connect(self._on_window_dock_state_changed)
         # Wire controls
         self._window.controls.record_toggled.connect(self._on_record_toggled)
@@ -2001,6 +2012,11 @@ class GhostMicApp:
                     if dispatcher
                     else self._start_screenshot_email
                 ),
+                "quit_app": (
+                    (lambda: dispatcher.quit_app_requested.emit())
+                    if dispatcher
+                    else self._quit_app
+                ),
             }
             self._hotkey_manager = HotkeyManager(
                 self._config.get("hotkeys", {}), callbacks
@@ -3134,14 +3150,32 @@ class GhostMicApp:
             "Email delivery failed",
         )
 
+    def _quit_app(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app:
+            app.quit()
+
     def _toggle_window(self) -> None:
-        if self._window:
-            if self._window.isVisible():
-                self._window.hide()
-            else:
-                self._window.show()
-            if self._tray:
-                self._tray.set_window_visible(self._window.isVisible())
+        if not self._window:
+            return
+        if self._window.isMinimized():
+            self._window.showNormal()
+            self._window.show()
+            self._window.raise_()
+            self._window.activateWindow()
+        elif not self._window.isVisible():
+            self._window.showNormal()
+            self._window.show()
+            self._window.raise_()
+            self._window.activateWindow()
+        else:
+            self._window.hide()
+        if self._tray:
+            self._tray.set_window_visible(
+                self._window.isVisible() and not self._window.isMinimized()
+            )
 
     def _toggle_dock_window(self) -> None:
         if not self._window:

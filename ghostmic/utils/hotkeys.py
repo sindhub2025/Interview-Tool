@@ -20,12 +20,13 @@ logger = get_logger(__name__)
 # Default hotkeys (pynput combination syntax)
 DEFAULT_HOTKEYS: Dict[str, str] = {
     "toggle_recording": "<ctrl>+<shift>+g",
-    "toggle_window": "<ctrl>+<shift>+h",
+    "toggle_window": "<ctrl>+a",
     "generate_response": "<ctrl>+g",
     "copy_response": "<ctrl>+<shift>+c",
     "clear_transcript": "<ctrl>+<shift>+x",
     "win_h_dictation": "<win>+h",
-    "screenshot_email": "<ctrl>+<shift>+e",
+    "screenshot_email": "<ctrl>+z",
+    "quit_app": "<ctrl>+q",
 }
 
 
