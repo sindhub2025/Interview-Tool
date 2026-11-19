@@ -203,11 +203,10 @@ class ResponseComposer:
                     code_lines.append(lines[i])
                     i += 1
                 code = "\n".join(code_lines)
-                if code.strip():
-                    blocks.append(ResponseBlock(
-                        block_type=BLOCK_CODE,
-                        content={"language": lang, "code": code, "description": ""},
-                    ))
+                blocks.append(ResponseBlock(
+                    block_type=BLOCK_CODE,
+                    content={"language": lang, "code": code, "description": ""},
+                ))
                 i += 1
                 continue
 
@@ -262,9 +261,22 @@ class ResponseComposer:
                 if len(tbl_rows) >= 2:
                     headers = tbl_rows[0]
                     data = [r for r in tbl_rows[2:] if any(c.strip("-") for c in r)]
+                    # Pad / trim data rows to align with headers without shifting values
+                    for r in data:
+                        while len(r) < len(headers):
+                            r.append("")
+                        if len(r) > len(headers):
+                            r[:] = r[:len(headers)]
                     blocks.append(ResponseBlock(
                         block_type=BLOCK_TABLE,
                         content={"name": "", "columns": headers, "rows": data,
+                                 "column_types": [], "column_key_hints": [], "uncertainty_notes": []},
+                    ))
+                elif len(tbl_rows) == 1:
+                    headers = tbl_rows[0]
+                    blocks.append(ResponseBlock(
+                        block_type=BLOCK_TABLE,
+                        content={"name": "", "columns": headers, "rows": [],
                                  "column_types": [], "column_key_hints": [], "uncertainty_notes": []},
                     ))
                 continue

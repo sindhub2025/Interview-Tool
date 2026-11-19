@@ -42,3 +42,28 @@ class ScreenUnderstanding:
     suggested_answer: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     raw_text: str = ""   # original provider text before parsing
+
+
+@dataclass
+class ScreenAnalysisResult:
+    """Atomic result of a single screen analysis request.
+
+    Associates raw analysis text with its structured understanding (if any),
+    capture metadata, and the request ID that produced it.
+
+    ``screen_understanding`` is ``None`` when:
+    - The structured pipeline failed and the legacy fallback was used.
+    - The pipeline explicitly could not parse structured output.
+    It is never borrowed from a previous capture.
+
+    ``used_legacy_fallback`` is ``True`` when the new structured pipeline
+    failed and the old Groq direct-call path produced ``raw_text``.
+    """
+    request_id: str                               # unique per analysis request
+    capture_id: str                               # ID from CaptureRequest / PreparedCapture
+    raw_text: str
+    screen_understanding: Optional[ScreenUnderstanding] = None
+    capture_metadata: Optional[Any] = None
+    analysis_metadata: Optional[Dict[str, Any]] = None
+    used_legacy_fallback: bool = False
+

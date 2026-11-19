@@ -38,10 +38,12 @@ class ResponseRenderer:
         self,
         font_size: int = 11,
         line_spacing: float = 1.45,
+        reading_width: str = "comfortable",
         teleprompter: bool = False,
     ) -> None:
         self._font_size = font_size
         self._line_spacing = line_spacing
+        self._reading_width = reading_width if reading_width in {"comfortable", "wide", "full"} else "comfortable"
         self._teleprompter = teleprompter
 
     def render(self, document: ResponseDocument) -> str:
@@ -61,11 +63,22 @@ class ResponseRenderer:
 
         fs = self._font_size
         ls = self._line_spacing
+
+        # Respect reading_width in teleprompter mode
+        container_style = "padding:2px 4px 4px 4px;"
+        if self._teleprompter:
+            if self._reading_width == "comfortable":
+                container_style = "padding:2px 10px 10px 10px; max-width:640px; margin:0 auto;"
+            elif self._reading_width == "wide":
+                container_style = "padding:2px 10px 10px 10px; max-width:920px; margin:0 auto;"
+            else:  # "full"
+                container_style = "padding:2px 8px 8px 8px; width:100%; margin:0;"
+
         return (
             f"<html><body style='margin:0; padding:0; background:transparent; "
             f"color:{TEXT_PRIMARY}; font-family:\"Segoe UI\"; font-size:{fs}pt; "
             f"line-height:{ls};'>"
-            f"<div style='padding:2px 4px 4px 4px;'>"
+            f"<div style='{container_style}'>"
             f"{body}"
             f"</div></body></html>"
         )
@@ -101,8 +114,12 @@ class ResponseRenderer:
         return ""
 
     def _render_heading(self, level: int, text: str) -> str:
-        sizes = {1: 14, 2: 13, 3: 12, 4: 11}
-        size = sizes.get(level, 11)
+        if self._teleprompter:
+            scale_offset = {1: 5, 2: 3, 3: 1, 4: 0}.get(level, 0)
+            size = max(14, self._font_size + scale_offset)
+        else:
+            sizes = {1: 14, 2: 13, 3: 12, 4: 11}
+            size = sizes.get(level, 11)
         margin_top = "16px" if level <= 2 else "10px"
         return (
             f"<div style='margin:{margin_top} 0 6px 0; color:{ACCENT_BLUE}; "
@@ -128,7 +145,7 @@ class ResponseRenderer:
             for item in items
         )
         return (
-            f"<ul style='margin:0 0 12px 20px; padding:0 0 0 16px;'>"
+            f"<ul style='margin:0 0 12px 20px; padding:0 0 0 16px; line-height:{self._line_spacing};'>"
             f"{items_html}</ul>"
         )
 
@@ -138,7 +155,7 @@ class ResponseRenderer:
             for item in items
         )
         return (
-            f"<ol style='margin:0 0 12px 20px; padding:0 0 0 16px;'>"
+            f"<ol style='margin:0 0 12px 20px; padding:0 0 0 16px; line-height:{self._line_spacing};'>"
             f"{items_html}</ol>"
         )
 
@@ -152,13 +169,13 @@ class ResponseRenderer:
             label = language.strip().upper() or "Code"
             accent, bg = TEXT_SECONDARY, _CODE_BLOCK_BG
 
-        fs_code = max(10, self._font_size - 2) if self._teleprompter else 11
+        fs_code = max(11, min(22, int(self._font_size * 0.78))) if self._teleprompter else 11
 
         return (
             f"<div style='margin:12px 0 16px 0;'>"
             f"<div style='margin:0 0 6px 0; color:{accent}; font-size:10pt; "
             f"font-weight:700; letter-spacing:0.1px;'>{escape(label)}</div>"
-            f"<pre style='margin:0; padding:12px 14px; line-height:1.5; "
+            f"<pre style='margin:0; padding:12px 14px; line-height:1.45; "
             f"border:1px solid {accent}; border-radius:8px; background-color:{bg}; "
             f"color:{TEXT_PRIMARY}; "
             f"font-family:\"Consolas\",\"Cascadia Mono\",\"Courier New\",monospace; "
@@ -170,35 +187,107 @@ class ResponseRenderer:
         name = content.get("name", "")
         columns = content.get("columns", [])
         rows = content.get("rows", [])
-        
+        column_types = content.get("column_types", [])
+        column_key_hints = content.get("column_key_hints", [])
+        uncertainty_notes = content.get("uncertainty_notes", [])
+
         if not columns:
             return ""
 
-        header_cells = "".join(
-            f"<th style='padding:4px 8px; text-align:left; border-bottom:1px solid {BORDER}; "
-            f"color:{ACCENT_BLUE}; font-weight:600;'>{escape(str(c))}</th>"
-            for c in columns
-        )
-        body_rows = ""
-        for row in rows:
-            cells = "".join(
-                f"<td style='padding:4px 8px; border-bottom:1px solid rgba(100,116,139,0.15); "
-                f"color:{TEXT_PRIMARY};'>{escape(str(c))}</td>"
-                for c in row
-            )
-            body_rows += f"<tr>{cells}</tr>"
-
         title_html = (
-            f"<div style='margin:4px 0 6px 0; color:{TEXT_SECONDARY}; "
-            f"font-size:9pt; font-weight:600;'>{escape(name)}</div>"
+            f"<div style='margin:4px 0 6px 0; color:{ACCENT_BLUE}; "
+            f"font-size:10pt; font-weight:700;'>{escape(name)}</div>"
             if name else ""
         )
+
+        # -- Schema sub-table (columns / types / key hints) --
+        schema_html = ""
+        has_types = any(t for t in column_types if str(t).strip())
+        has_key_hints = any(h for h in column_key_hints if str(h).strip())
+        if has_types or has_key_hints:
+            schema_header = "<th style='padding:3px 7px; text-align:left; color:{c}; font-weight:600; border-bottom:1px solid {b};'>Column</th>".format(
+                c=ACCENT_BLUE, b=BORDER
+            )
+            if has_types:
+                schema_header += "<th style='padding:3px 7px; text-align:left; color:{c}; font-weight:600; border-bottom:1px solid {b};'>Type</th>".format(
+                    c=ACCENT_BLUE, b=BORDER
+                )
+            if has_key_hints:
+                schema_header += "<th style='padding:3px 7px; text-align:left; color:{c}; font-weight:600; border-bottom:1px solid {b};'>Key</th>".format(
+                    c=ACCENT_BLUE, b=BORDER
+                )
+
+            schema_body = ""
+            for i, col in enumerate(columns):
+                col_type = column_types[i] if i < len(column_types) else ""
+                col_key = column_key_hints[i] if i < len(column_key_hints) else ""
+                row_cells = (
+                    f"<td style='padding:3px 7px; border-bottom:1px solid rgba(100,116,139,0.12); "
+                    f"color:{TEXT_PRIMARY}; font-weight:600;'>{escape(str(col))}</td>"
+                )
+                if has_types:
+                    # Mark inferred types with a subtle italic style
+                    type_style = "font-style:italic; color:#8795a5;" if "[inferred]" in str(col_type).lower() else f"color:{TEXT_SECONDARY};"
+                    row_cells += (
+                        f"<td style='padding:3px 7px; border-bottom:1px solid rgba(100,116,139,0.12); "
+                        f"{type_style}'>{escape(str(col_type).replace('[inferred]', '').replace('[observed]', '').strip())}</td>"
+                    )
+                if has_key_hints:
+                    key_color = "#e3b341" if str(col_key).strip().upper() in {"PK", "FK"} else TEXT_SECONDARY
+                    row_cells += (
+                        f"<td style='padding:3px 7px; border-bottom:1px solid rgba(100,116,139,0.12); "
+                        f"color:{key_color}; font-weight:600;'>{escape(str(col_key))}</td>"
+                    )
+                schema_body += f"<tr>{row_cells}</tr>"
+
+            schema_html = (
+                f"<div style='margin:4px 0 2px 0; color:{TEXT_SECONDARY}; "
+                f"font-size:8pt; font-weight:600; letter-spacing:0.05em;'>SCHEMA</div>"
+                f"<table style='border-collapse:collapse; width:100%; font-size:{max(8, self._font_size - 2)}pt; margin-bottom:8px;'>"
+                f"<thead><tr>{schema_header}</tr></thead>"
+                f"<tbody>{schema_body}</tbody>"
+                f"</table>"
+            )
+
+        # -- Sample data table --
+        data_html = ""
+        if rows:
+            header_cells = "".join(
+                f"<th style='padding:4px 8px; text-align:left; border-bottom:1px solid {BORDER}; "
+                f"color:{ACCENT_BLUE}; font-weight:600;'>{escape(str(c))}</th>"
+                for c in columns
+            )
+            body_rows = ""
+            for row in rows:
+                cells = "".join(
+                    f"<td style='padding:4px 8px; border-bottom:1px solid rgba(100,116,139,0.15); "
+                    f"color:{TEXT_PRIMARY};'>{escape(str(c))}</td>"
+                    for c in row
+                )
+                body_rows += f"<tr>{cells}</tr>"
+            data_label = (
+                f"<div style='margin:4px 0 2px 0; color:{TEXT_SECONDARY}; "
+                f"font-size:8pt; font-weight:600; letter-spacing:0.05em;'>SAMPLE DATA</div>"
+                if schema_html else ""
+            )
+            data_html = (
+                f"{data_label}"
+                f"<table style='border-collapse:collapse; width:100%; font-size:{self._font_size - 1}pt;'>"
+                f"<thead><tr>{header_cells}</tr></thead>"
+                f"<tbody>{body_rows}</tbody>"
+                f"</table>"
+            )
+
+        # -- Uncertainty notes --
+        uncertainty_html = ""
+        for note in (uncertainty_notes or []):
+            if note:
+                uncertainty_html += self._render_uncertainty(str(note))
+
         return (
-            f"<div style='margin:10px 0 16px 0; overflow-x:auto;'>{title_html}"
-            f"<table style='border-collapse:collapse; width:100%; font-size:{self._font_size - 1}pt;'>"
-            f"<thead><tr>{header_cells}</tr></thead>"
-            f"<tbody>{body_rows}</tbody>"
-            f"</table></div>"
+            f"<div style='margin:10px 0 16px 0; overflow-x:auto;'>"
+            f"{title_html}{schema_html}{data_html}{uncertainty_html}"
+            f"</div>"
         )
 
     def _render_key_value(self, items: dict) -> str:

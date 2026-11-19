@@ -785,8 +785,10 @@ class MainWindow(QMainWindow):
         self._config.setdefault("ui", {})["active_workspace"] = workspace_value
         self._controls.set_workspace(workspace_value)
         self.ai_panel.set_workspace(normalized)
-        if (normalized is Workspace.TELEPROMPTER) != self._camera_overlay_active:
-            self._set_camera_overlay(normalized is Workspace.TELEPROMPTER)
+        # Selecting Teleprompter does not inherently force camera overlay on.
+        # However, exiting to Standard workspace clears camera overlay if active.
+        if normalized is not Workspace.TELEPROMPTER and self._camera_overlay_active:
+            self._set_camera_overlay(False)
 
     def _apply_startup_collapsed_layout(self) -> None:
         """Start as a toolbar-only rectangle."""
@@ -1608,10 +1610,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._apply_stealth)
 
     def set_camera_mode(self, active: bool) -> None:
-        """Backward-compatible entry point for the former camera workspace."""
-        self.set_workspace(
-            Workspace.TELEPROMPTER if active else Workspace.STANDARD
-        )
+        """Toggle camera overlay appearance independently of teleprompter playback."""
+        if active and self._active_workspace != Workspace.TELEPROMPTER.value:
+            self.set_workspace(Workspace.TELEPROMPTER)
+        self._set_camera_overlay(active)
 
     def _on_close(self) -> None:
         QApplication.instance().quit()

@@ -308,6 +308,12 @@ def _default_config() -> dict:
             "pre_dock_y": None,
             "pre_dock_width": None,
             "pre_dock_height": None,
+            "teleprompter": {
+                "font_size": 24,
+                "scroll_speed": 2.0,
+                "line_spacing": 1.45,
+                "reading_width": "comfortable",
+            },
         },
         "hotkeys": {
             "toggle_recording": "ctrl+shift+g",
@@ -509,6 +515,11 @@ class GhostMicApp:
         except Exception:
             self._screen_context_service = None
         self._last_screen_understanding = None
+        # Tracks the request_id of the most recent screen-analysis request.
+        # Results for an older request_id are discarded so that a stale
+        # ScreenUnderstanding from a previous capture can never leak into
+        # the result for a new one.
+        self._current_screen_request_id: Optional[str] = None
         self._transcript_lock = threading.Lock()
         self._model_ready = False
         self._model_error_message: Optional[str] = None
@@ -577,6 +588,14 @@ class GhostMicApp:
             self._config.get("ai", {}),
         )
         self._ensure_streaming_pipeline_initialized()
+
+        # Teleprompter preferences shared across cards and persistent in ui.teleprompter
+        try:
+            from ghostmic.ui.teleprompter_preferences import TeleprompterPreferences
+            self._teleprompter_prefs = TeleprompterPreferences.load_from_config(self._config)
+        except Exception:
+            from ghostmic.ui.teleprompter_preferences import TeleprompterPreferences
+            self._teleprompter_prefs = TeleprompterPreferences()
 
     def run(self) -> int:
         """Initialise everything and start the Qt event loop."""
@@ -749,6 +768,17 @@ class GhostMicApp:
         self._window.transcript_panel.speaker_send_requested.connect(
             self._on_speaker_send_requested
         )
+        if hasattr(self, "_teleprompter_prefs") and self._window.ai_panel:
+            self._window.ai_panel.set_shared_preferences(self._teleprompter_prefs)
+            self._window.ai_panel.preferences_changed.connect(
+                self._on_teleprompter_preferences_changed
+            )
+
+    def _on_teleprompter_preferences_changed(self, prefs) -> None:
+        """Persist updated Teleprompter preferences into config.json."""
+        self._teleprompter_prefs = prefs
+        prefs.save_to_config(self._config)
+        _save_config(self._config, self._config_path)
 
     def _test_api_startup_async(self) -> None:
         """Test API connectivity in a background thread (non-blocking)."""
@@ -2542,52 +2572,112 @@ class GhostMicApp:
         )
 
         worker = ScreenAnalysisWorker(ai_cfg, parent=None)
-        worker.analysis_ready.connect(self._on_screen_analysis_ready)
+
+        # Generate a request ID and invalidate any previous capture data so
+        # that an earlier ScreenUnderstanding can never leak into this result.
+        import uuid as _uuid_mod
+        new_request_id = worker.request_id  # unique ID generated at worker construction
+        self._current_screen_request_id = new_request_id
+        self._last_screen_understanding = None   # explicitly clear previous capture
+
+        # Connect the canonical atomic result signal.
+        worker.result_ready.connect(self._on_screen_analysis_result)
+        # Keep legacy error signal wired.
         worker.analysis_error.connect(self._on_screen_analysis_error)
         worker.finished.connect(self._cleanup_screen_analysis_worker)
-
-        # Try to wire the structured pipeline result
-        def _on_pipeline_understanding(understanding):
-            self._last_screen_understanding = understanding
-
-        if hasattr(worker, "understanding_ready"):
-            worker.understanding_ready.connect(_on_pipeline_understanding)
 
         self._screen_analysis_worker = worker
         worker.start()
 
-    def _on_screen_analysis_ready(self, full_text: str) -> None:
+
+    def _on_screen_analysis_result(self, result) -> None:
+        """Handle the atomic ScreenAnalysisResult emitted by ScreenAnalysisWorker.
+
+        This is the canonical result handler.  The worker emits a single
+        ScreenAnalysisResult containing both raw_text and screen_understanding
+        (or None), along with request_id and capture_id for coherence checks.
+
+        Steps:
+        1. Discard results from superseded requests.
+        2. If used_legacy_fallback=True, log it and do NOT use any structured
+           understanding — build the ResponseDocument from plain text only.
+        3. If structured understanding is present, verify its capture_id matches
+           the result's capture_id before accepting it.
+        4. Update ScreenContextService only after a fully accepted result.
+        """
         if not self._window:
             return
-        summary_text = str(full_text or "").strip()
-        if len(summary_text) > 8000:
-            summary_text = summary_text[:8000] + "..."
-        # Backward-compatible loose string fields (still used by normalization context)
+
+        # 1. Coherence check: discard stale results
+        current_req_id = getattr(self, "_current_screen_request_id", None)
+        if current_req_id is not None and result.request_id != current_req_id:
+            self._logger.warning(
+                "Discarding screen analysis result for obsolete request_id=%s "
+                "(current=%s). No stale data will be used.",
+                result.request_id,
+                current_req_id,
+            )
+            return
+
+        full_text = str(result.raw_text or "").strip()
+        summary_text = full_text[:8000] + ("..." if len(full_text) > 8000 else "")
         self._active_screen_summary_text = summary_text
         self._active_screen_anchor_question = ""
-        # Update structured context service
-        screen_understanding = getattr(self, "_last_screen_understanding", None)
+
+        screen_understanding = None
+
+        if result.used_legacy_fallback:
+            # 2. Legacy fallback — no structured understanding, never borrow from previous.
+            self._logger.info(
+                "Screen analysis completed via legacy fallback (request_id=%s). "
+                "screen_understanding is None for this result.",
+                result.request_id,
+            )
+        elif result.screen_understanding is not None:
+            # 3. Structured pipeline — verify capture-ID coherence.
+            u = result.screen_understanding
+            u_capture_id = getattr(u, "capture_id", "") or ""
+            if u_capture_id and result.capture_id and u_capture_id != result.capture_id:
+                self._logger.warning(
+                    "screen_understanding.capture_id=%r does not match "
+                    "result.capture_id=%r — discarding structured data to prevent "
+                    "stale-capture association.",
+                    u_capture_id,
+                    result.capture_id,
+                )
+            else:
+                screen_understanding = u
+                self._last_screen_understanding = screen_understanding
+                self._logger.debug(
+                    "Accepted structured screen_understanding capture_id=%s",
+                    result.capture_id,
+                )
+
+        # 4. Update ScreenContextService with the accepted result.
         if getattr(self, "_screen_context_service", None) is not None:
             if screen_understanding is not None:
                 self._screen_context_service.update(screen_understanding)
             else:
-                # Fallback: build a minimal understanding from raw text
+                # Fallback: build a minimal understanding from raw text only.
                 try:
                     from ghostmic.domain.screen_understanding import ScreenUnderstanding
-                    import uuid
-                    fallback = ScreenUnderstanding(
-                        capture_id=str(uuid.uuid4()),
+                    fallback_ctx = ScreenUnderstanding(
+                        capture_id=result.capture_id or "",
                         summary=summary_text[:500],
                         raw_text=summary_text,
                     )
-                    self._screen_context_service.update(fallback)
+                    self._screen_context_service.update(fallback_ctx)
                 except Exception as exc:
-                    self._logger.warning("Failed to create fallback ScreenUnderstanding: %s", exc)
+                    self._logger.warning(
+                        "Failed to create fallback ScreenUnderstanding for context: %s", exc
+                    )
+
         conversation_state = getattr(self, "_conversation_state", None)
         if conversation_state is not None:
             conversation_state.update_screen_context(summary_text)
         self._session_context_store.append_screen_summary(full_text)
-        # Present using ResponseDocument if composer available
+
+        # Present using ResponseDocument
         try:
             from ghostmic.services.response_composer import ResponseComposer
             from ghostmic.domain.response_document import RESPONSE_TYPE_SCREEN_ANALYSIS
@@ -2595,14 +2685,29 @@ class GhostMicApp:
             if screen_understanding is not None:
                 doc = composer.from_screen_understanding(screen_understanding, title="Screen Analysis")
             else:
-                doc = composer.from_plain_text(full_text, title="Screen Analysis",
-                                               response_type=RESPONSE_TYPE_SCREEN_ANALYSIS)
+                doc = composer.from_plain_text(
+                    full_text, title="Screen Analysis",
+                    response_type=RESPONSE_TYPE_SCREEN_ANALYSIS,
+                )
             self._window.ai_panel.set_response_document(doc, title="Screen Analysis")
         except Exception as exc:
             self._logger.warning("ResponseComposer unavailable, using plain text: %s", exc)
             self._window.ai_panel.finish_response(full_text)
+
         self._window.controls.set_screen_analysis_busy(False)
         self._window.controls.set_status("✓ Screen analysis ready", "#3fb950")
+
+    def _on_screen_analysis_ready(self, full_text: str) -> None:
+        """Legacy slot — kept for backward compatibility only.
+
+        The new primary path is ``_on_screen_analysis_result`` which handles
+        an atomic ``ScreenAnalysisResult``.  This slot is a no-op because the
+        worker now connects ``result_ready`` directly.
+        """
+        # No longer the primary handler; _on_screen_analysis_result handles everything.
+        # Retained so that any remaining callers do not raise AttributeError.
+        pass
+
 
     def _resolve_active_screen_summary_context(
         self,
@@ -4830,6 +4935,7 @@ class GhostMicApp:
                 if getattr(self, "_screen_context_service", None) is not None:
                     self._screen_context_service.clear()
                 self._last_screen_understanding = None
+                self._current_screen_request_id = None  # invalidate any pending analysis
             self._auto_speaker_silence_generation += 1
             self._auto_speaker_last_signature = ""
             self._auto_speaker_last_trigger_ts = 0.0
@@ -4901,6 +5007,12 @@ class GhostMicApp:
                 ui_cfg["pre_dock_y"] = pre_geo.y()
                 ui_cfg["pre_dock_width"] = pre_geo.width()
                 ui_cfg["pre_dock_height"] = pre_geo.height()
+
+            if hasattr(self, "_teleprompter_prefs") and self._window.ai_panel:
+                panel_prefs = getattr(self._window.ai_panel, "_shared_prefs", None)
+                if panel_prefs is not None:
+                    self._teleprompter_prefs = panel_prefs
+                self._teleprompter_prefs.save_to_config(self._config)
 
         _save_config(self._config, self._config_path)
         self._logger.info("GhostMic: shutdown complete.")

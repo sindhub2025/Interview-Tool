@@ -233,53 +233,97 @@ except ImportError:  # pragma: no cover - fallback for non-Qt environments
 
 
 class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
-    """Qt-only background worker for screen capture and provider analysis.
+    """Qt background worker for screen capture and provider analysis.
 
-    This class requires PyQt6 at import time so ``pyqtSignal`` is not ``None``;
-    only then do the ``analysis_ready`` and ``analysis_error`` signals exist.
-    In non-Qt environments the module falls back to a plain ``object`` base and
-    the signal attributes are not defined, so calling :meth:`run` is not safe and
-    will fail once the signal emits are reached, typically with ``AttributeError``.
+    Emits a single atomic ``result_ready`` signal carrying a
+    ``ScreenAnalysisResult`` that bundles raw text, structured understanding
+    (or ``None``), and the request ID.  The legacy ``analysis_ready`` /
+    ``understanding_ready`` signals are kept only for backward compatibility
+    with any remaining callers, but ``result_ready`` is the canonical path.
 
-    Expected environment: a Qt-enabled runtime with PyQt6 installed.
-    Guard usage by checking ``pyqtSignal`` or importing this class only when
-    PyQt6 is available.
+    A unique ``request_id`` is generated at construction time so that callers
+    can discard results that belong to a superseded request.
+
+    If the structured pipeline fails:
+    - ``screen_understanding`` is explicitly ``None`` (never borrowed from a
+      previous capture).
+    - ``used_legacy_fallback`` is set to ``True``.
+    - The legacy Groq call is attempted as the fallback text source.
     """
 
     if pyqtSignal is not None:
+        # Canonical signal — carries the whole atomic result.
+        result_ready = pyqtSignal(object)
+        # Legacy compat signals (still connected by existing slots).
         analysis_ready = pyqtSignal(str)
         analysis_error = pyqtSignal(str)
+        # Kept for any remaining callers but no longer the primary path.
         understanding_ready = pyqtSignal(object)
 
     def __init__(self, ai_config: dict, parent=None) -> None:
         super().__init__(parent)
         self._ai_config = dict(ai_config or {})
+        import uuid as _uuid
+        self._request_id: str = str(_uuid.uuid4())
+
+    @property
+    def request_id(self) -> str:
+        """Unique ID for this analysis request (set at construction)."""
+        return self._request_id
 
     def run(self) -> None:
+        from ghostmic.domain.screen_understanding import ScreenAnalysisResult
+
         timeout = float(self._ai_config.get("screen_analysis_timeout", 90.0))
+
+        # ── Structured pipeline ──────────────────────────────────────────
         try:
             raw_text, understanding = run_screen_analysis_pipeline(
                 self._ai_config, timeout=timeout
             )
+            # Verify capture-ID coherence before accepting the result.
+            capture_id = ""
+            if understanding is not None:
+                capture_id = getattr(understanding, "capture_id", "") or ""
+            result = ScreenAnalysisResult(
+                request_id=self._request_id,
+                capture_id=capture_id,
+                raw_text=raw_text,
+                screen_understanding=understanding,
+                used_legacy_fallback=False,
+            )
+            # Emit legacy compat signals so old slots still work.
             if understanding is not None and hasattr(self, "understanding_ready"):
                 self.understanding_ready.emit(understanding)
-            self.analysis_ready.emit(raw_text)
+            if hasattr(self, "analysis_ready"):
+                self.analysis_ready.emit(raw_text)
+            if hasattr(self, "result_ready"):
+                self.result_ready.emit(result)
             return
         except Exception as pipeline_exc:
             logger.warning(
-                "Structured screen analysis pipeline failed, falling back to legacy: %s",
+                "Structured screen analysis pipeline failed (request_id=%s), "
+                "falling back to legacy: %s",
+                self._request_id,
                 pipeline_exc,
             )
+
+        # ── Legacy fallback ──────────────────────────────────────────────
+        # Explicitly mark screen_understanding as unavailable so a previous
+        # capture's data can never leak into this result.
+        import uuid as _uuid
+        fallback_capture_id = str(_uuid.uuid4())
         try:
             image_bytes, metadata = capture_full_screen_png_bytes()
             logger.info(
-                "Captured full-screen screenshot for analysis: %dx%d, %d bytes",
+                "Legacy fallback: captured full-screen screenshot "
+                "%dx%d, %d bytes (request_id=%s)",
                 metadata["width"],
                 metadata["height"],
                 len(image_bytes),
+                self._request_id,
             )
-            timeout = float(self._ai_config.get("screen_analysis_timeout", 90.0))
-            result = analyze_screenshot_with_groq(
+            result_text = analyze_screenshot_with_groq(
                 image_bytes,
                 str(self._ai_config.get("groq_api_key", "")).strip(),
                 model=str(
@@ -288,8 +332,29 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
                 prompt=DEEP_ANALYSIS_SCREEN_PROMPT,
                 timeout=timeout,
             )
-
-            self.analysis_ready.emit(result)
+            logger.info(
+                "Legacy fallback succeeded (request_id=%s); "
+                "screen_understanding is None for this result.",
+                self._request_id,
+            )
+            result = ScreenAnalysisResult(
+                request_id=self._request_id,
+                capture_id=fallback_capture_id,
+                raw_text=result_text,
+                screen_understanding=None,   # never borrow from a previous capture
+                capture_metadata=metadata,
+                used_legacy_fallback=True,
+            )
+            if hasattr(self, "analysis_ready"):
+                self.analysis_ready.emit(result_text)
+            if hasattr(self, "result_ready"):
+                self.result_ready.emit(result)
         except Exception as exc:  # pylint: disable=broad-except
-            logger.exception("Screen analysis failed: %s", exc)
-            self.analysis_error.emit(str(exc))
+            logger.exception(
+                "Screen analysis failed (request_id=%s): %s",
+                self._request_id,
+                exc,
+            )
+            if hasattr(self, "analysis_error"):
+                self.analysis_error.emit(str(exc))
+
