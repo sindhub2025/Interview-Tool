@@ -11,11 +11,21 @@ class ScreenObservation:
     is_inferred: bool = False   # True -> inference, not direct observation
 
 @dataclass
+class ScreenTableColumn:
+    name: str
+    type: str = ""
+    type_is_inferred: bool = False
+    key_hint: str = ""   # "PK", "FK", ""
+    key_hint_is_inferred: bool = False
+    evidence: str = ""
+
+@dataclass
 class ScreenTable:
     name: str
     columns: List[str] = field(default_factory=list)
     column_types: List[str] = field(default_factory=list)
     column_key_hints: List[str] = field(default_factory=list)   # "PK", "FK", ""
+    columns_meta: List[ScreenTableColumn] = field(default_factory=list)
     visible_rows: List[List[str]] = field(default_factory=list)
     relationships: List[str] = field(default_factory=list)
     uncertainty_notes: List[str] = field(default_factory=list)

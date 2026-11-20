@@ -179,12 +179,18 @@ class AIResponseCard(QFrame):
     camera_mode_requested = pyqtSignal(bool)
     preferences_changed = pyqtSignal(object)  # emits TeleprompterPreferences
 
-    def __init__(self, text: str = "", title: str = "Answer", parent=None) -> None:
+    def __init__(
+        self,
+        text: str = "",
+        title: str = "Answer",
+        prefs: Optional[TeleprompterPreferences] = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._text = text
         self._title = title
         self._workspace = Workspace.STANDARD
-        self._prefs = TeleprompterPreferences(font_size=24, scroll_speed=2.0)
+        self._prefs = (prefs or TeleprompterPreferences()).clamp()
         self._teleprompter_ctrl: TeleprompterController | None = None
         self._response_document: ResponseDocument | None = None
         self._camera_overlay_active = False
@@ -336,26 +342,49 @@ class AIResponseCard(QFrame):
         self._teleprompter_ctrl.font_size_changed.connect(self._on_ctrl_font_size)
         self._teleprompter_ctrl.speed_changed.connect(self._on_ctrl_speed)
 
-    def set_response(self, document: ResponseDocument) -> None:
+    def set_response(
+        self,
+        document: ResponseDocument,
+        *,
+        stop_controller: bool = False,
+        preserve_position: bool = True,
+    ) -> None:
         """Set response from a structured ResponseDocument."""
         self._stream_render_timer.stop()
-        if self._teleprompter_ctrl:
+        if stop_controller and self._teleprompter_ctrl:
             self._teleprompter_ctrl.stop()
+        pos = None
+        if preserve_position and self._teleprompter_ctrl:
+            pos = self._teleprompter_ctrl.save_reading_position()
         self._response_document = document
         self._text = document.plain_text
         # Update title if document has a meaningful one
         if document.title and document.title not in {"Answer", ""}:
             self._title_label.setText(document.title)
         self._render_text(scroll_to_end=False)
+        if pos is not None and pos > 0 and self._teleprompter_ctrl:
+            self._teleprompter_ctrl.restore_reading_position(pos)
 
     def apply_preferences(self, prefs: TeleprompterPreferences) -> None:
         """Apply shared Teleprompter preferences to this card."""
+        old_prefs = self._prefs
         self._prefs = prefs.clamp()
         self._font_size_label.setText(f"{self._prefs.font_size} pt")
         speed_str = f"{self._prefs.scroll_speed:.1f}".rstrip("0").rstrip(".")
         self._speed_label.setText(f"{speed_str}x")
         if self._teleprompter_ctrl:
             self._teleprompter_ctrl.apply_preferences(self._prefs)
+        if self._workspace is Workspace.TELEPROMPTER and (
+            old_prefs.line_spacing != self._prefs.line_spacing
+            or old_prefs.reading_width != self._prefs.reading_width
+            or old_prefs.font_size != self._prefs.font_size
+        ):
+            pos = 0.0
+            if self._teleprompter_ctrl:
+                pos = self._teleprompter_ctrl.save_reading_position()
+            self._render_reading_view()
+            if self._teleprompter_ctrl and pos > 0:
+                self._teleprompter_ctrl.restore_reading_position(pos)
 
     def _on_ctrl_scroll_state(self, scrolling: bool) -> None:
         """Sync UI button state from TeleprompterController."""
@@ -506,7 +535,18 @@ class AIResponseCard(QFrame):
         self._start_scroll_btn.setText(label)
 
     def _on_stream_render_timer(self) -> None:
-        """Throttled streaming render: called at most every 150 ms during streaming."""
+        """Throttled streaming render: called at most every 150 ms during streaming.
+
+        Composes the accumulated text into the canonical ResponseDocument using
+        ResponseComposer (which handles incomplete code blocks and partial tables)
+        and renders both views without scroll jumping.
+        """
+        try:
+            from ghostmic.services.response_composer import ResponseComposer
+            composer = ResponseComposer()
+            self._response_document = composer.from_plain_text(self._text, title=self._title)
+        except Exception:
+            pass
         self._render_text(scroll_to_end=self._workspace is not Workspace.TELEPROMPTER)
 
     def toggle_camera_mode(self) -> None:
@@ -527,12 +567,26 @@ class AIResponseCard(QFrame):
         self._workspace = normalized
 
         if leaving_teleprompter:
+            # Sync reading position to Standard text_edit if possible
+            if self._teleprompter_ctrl and self._reading_view:
+                pos = self._teleprompter_ctrl.save_reading_position()
+                std_bar = self._text_edit.verticalScrollBar()
+                if std_bar and std_bar.maximum() > 0:
+                    std_bar.setValue(int(pos * std_bar.maximum()))
             # Explicitly stop the controller timer when leaving the workspace.
             if self._teleprompter_ctrl:
                 self._teleprompter_ctrl.stop()
 
         if entering_teleprompter:
+            std_bar = self._text_edit.verticalScrollBar()
+            std_ratio = (
+                (std_bar.value() / std_bar.maximum())
+                if std_bar and std_bar.maximum() > 0
+                else 0.0
+            )
             self._render_reading_view()
+            if std_ratio > 0 and self._teleprompter_ctrl:
+                self._teleprompter_ctrl.restore_reading_position(std_ratio)
 
         active = normalized is Workspace.TELEPROMPTER
         self._text_edit.setVisible(not active)
@@ -711,18 +765,12 @@ class AIResponseCard(QFrame):
     def append_text(self, chunk: str) -> None:
         """Append a streaming chunk to the response.
 
-        Does not discard the in-progress document state.
-        Re-renders at a throttled cadence (150 ms) so that every incoming
-        token does not trigger a full HTML rebuild.
+        Maintains one canonical accumulated text response and updates
+        the ResponseDocument at a controlled refresh cadence (150 ms)
+        rather than on every token chunk.
         """
         self._text += chunk
-        # During streaming we don't have a finalized ResponseDocument yet.
-        # Keep _response_document as None so _render_text uses plain text path.
-        if self._response_document is not None:
-            # If a document was set before streaming started, clear it so we
-            # don't try to render an incomplete document during the stream.
-            self._response_document = None
-        # Throttle: only restart the timer if it is not already running.
+        # Throttle: coalesce incoming chunks before updating the UI
         if not self._stream_render_timer.isActive():
             self._stream_render_timer.start()
 
@@ -978,7 +1026,7 @@ class AIResponsePanel(QWidget):
             )
             return
 
-        card = AIResponseCard(title=title, parent=self._responses_container)
+        card = AIResponseCard(title=title, prefs=self._shared_prefs, parent=self._responses_container)
         self._wire_camera_mode(card)
         self._active_card = card
         self._cards = [card]
@@ -1025,7 +1073,7 @@ class AIResponsePanel(QWidget):
                 self._active_card = self._cards[-1]
             else:
                 logger.warning("AIResponsePanel.finish_response() - no active card, creating one")
-                card = AIResponseCard(title="Answer", parent=self._responses_container)
+                card = AIResponseCard(title="Answer", prefs=self._shared_prefs, parent=self._responses_container)
                 self._wire_camera_mode(card)
                 self._active_card = card
                 self._cards = [card]
@@ -1058,7 +1106,7 @@ class AIResponsePanel(QWidget):
         """Set response from a structured ResponseDocument."""
         self._remove_thinking()
         self.clear_responses()
-        card = AIResponseCard(title=title, parent=self._responses_container)
+        card = AIResponseCard(title=title, prefs=self._shared_prefs, parent=self._responses_container)
         self._wire_camera_mode(card)
         self._active_card = card
         self._cards = [card]
@@ -1097,7 +1145,7 @@ class AIResponsePanel(QWidget):
         self.activity_started.emit()
         self._remove_thinking()
         self.clear_responses()
-        card = AIResponseCard(f"⚠ {message}", title=title, parent=self._responses_container)
+        card = AIResponseCard(f"⚠ {message}", title=title, prefs=self._shared_prefs, parent=self._responses_container)
         self._wire_camera_mode(card)
         card.setStyleSheet(
             "background-color: #3d0000; border: 1px solid #f85149; "
@@ -1142,11 +1190,6 @@ class AIResponsePanel(QWidget):
         while self._responses_layout.count() > 0:
             item = self._responses_layout.takeAt(0)
             if item and item.widget():
-                widget = item.widget()
-                self._responses_layout.removeWidget(widget)
-                widget.setParent(None)
-                widget.close()
-                widget.deleteLater()
                 widget = item.widget()
                 self._responses_layout.removeWidget(widget)
                 widget.setParent(None)

@@ -283,13 +283,23 @@ class ScreenAnalysisWorker(QThread):  # type: ignore[misc]
             )
             # Verify capture-ID coherence before accepting the result.
             capture_id = ""
+            capture_meta = None
+            analysis_meta = None
             if understanding is not None:
                 capture_id = getattr(understanding, "capture_id", "") or ""
+                meta = getattr(understanding, "metadata", {}) or {}
+                capture_meta = meta.get("capture_metadata", None)
+                analysis_meta = {
+                    "model": meta.get("model", ""),
+                    "provider": meta.get("provider", ""),
+                }
             result = ScreenAnalysisResult(
                 request_id=self._request_id,
                 capture_id=capture_id,
                 raw_text=raw_text,
                 screen_understanding=understanding,
+                capture_metadata=capture_meta,
+                analysis_metadata=analysis_meta,
                 used_legacy_fallback=False,
             )
             # Emit legacy compat signals so old slots still work.

@@ -84,8 +84,79 @@ class ResponseRenderer:
         )
 
     def render_plain_text(self, document: ResponseDocument) -> str:
-        """Return plain text suitable for clipboard copy."""
-        return document.plain_text or ""
+        """Return clean, readable plain text suitable for clipboard copy."""
+        if not document.blocks:
+            return document.plain_text or ""
+
+        lines = []
+        if document.title and document.title != "Answer":
+            lines.append(f"# {document.title}")
+            lines.append("")
+
+        for block in document.blocks:
+            t = block.block_type
+            c = block.content
+            if t == BLOCK_HEADING:
+                level = c.get("level", 2)
+                prefix = "#" * level
+                lines.append(f"{prefix} {c.get('text', '')}")
+                lines.append("")
+            elif t == BLOCK_PARAGRAPH:
+                lines.append(c.get("text", ""))
+                lines.append("")
+            elif t == BLOCK_BULLET_LIST:
+                for item in c.get("items", []):
+                    lines.append(f"- {item}")
+                lines.append("")
+            elif t == BLOCK_NUMBERED_LIST:
+                for i, item in enumerate(c.get("items", []), 1):
+                    lines.append(f"{i}. {item}")
+                lines.append("")
+            elif t == BLOCK_CODE:
+                lang = c.get("language", "")
+                code = c.get("code", "")
+                lines.append(f"```{lang}\n{code}\n```")
+                lines.append("")
+            elif t == BLOCK_TABLE:
+                name = c.get("name", "")
+                if name:
+                    lines.append(f"### Table: {name}")
+                cols = c.get("columns", [])
+                types = c.get("column_types", [])
+                keys = c.get("column_key_hints", [])
+                if cols and (any(types) or any(keys)):
+                    lines.append("| Column | Type | Key |")
+                    lines.append("| --- | --- | --- |")
+                    for i, col in enumerate(cols):
+                        t_val = types[i] if i < len(types) else ""
+                        k_val = keys[i] if i < len(keys) else ""
+                        lines.append(f"| {col} | {t_val} | {k_val} |")
+                    lines.append("")
+                rows = c.get("rows", [])
+                if cols and rows:
+                    lines.append("Visible rows:")
+                    lines.append("| " + " | ".join(str(x) for x in cols) + " |")
+                    lines.append("| " + " | ".join("---" for _ in cols) + " |")
+                    for row in rows:
+                        lines.append("| " + " | ".join(str(x) for x in row) + " |")
+                    lines.append("")
+                for note in c.get("uncertainty_notes", []):
+                    lines.append(f"- [Uncertainty] {note}")
+                lines.append("")
+            elif t == BLOCK_KEY_VALUE:
+                for k, v in c.get("items", {}).items():
+                    lines.append(f"- {k}: {v}")
+                lines.append("")
+            elif t == BLOCK_UNCERTAINTY:
+                lines.append(f"- [Uncertainty] {c.get('text', '')}")
+                lines.append("")
+            elif t == BLOCK_RELATIONSHIP:
+                for item in c.get("items", []):
+                    lines.append(f"- {item}")
+                lines.append("")
+
+        result = "\n".join(lines).strip()
+        return result or document.plain_text or ""
 
     def _render_block(self, block: ResponseBlock) -> str:
         t = block.block_type
@@ -200,11 +271,14 @@ class ResponseRenderer:
             if name else ""
         )
 
-        # -- Schema sub-table (columns / types / key hints) --
+        columns_meta = content.get("columns_meta") or []
+        has_evidence = any(bool(c.get("evidence")) for c in columns_meta if isinstance(c, dict))
+
+        # -- Schema sub-table (columns / types / key hints / evidence) --
         schema_html = ""
         has_types = any(t for t in column_types if str(t).strip())
         has_key_hints = any(h for h in column_key_hints if str(h).strip())
-        if has_types or has_key_hints:
+        if has_types or has_key_hints or has_evidence:
             schema_header = "<th style='padding:3px 7px; text-align:left; color:{c}; font-weight:600; border-bottom:1px solid {b};'>Column</th>".format(
                 c=ACCENT_BLUE, b=BORDER
             )
@@ -214,6 +288,10 @@ class ResponseRenderer:
                 )
             if has_key_hints:
                 schema_header += "<th style='padding:3px 7px; text-align:left; color:{c}; font-weight:600; border-bottom:1px solid {b};'>Key</th>".format(
+                    c=ACCENT_BLUE, b=BORDER
+                )
+            if has_evidence:
+                schema_header += "<th style='padding:3px 7px; text-align:left; color:{c}; font-weight:600; border-bottom:1px solid {b};'>Evidence</th>".format(
                     c=ACCENT_BLUE, b=BORDER
                 )
 
@@ -237,6 +315,13 @@ class ResponseRenderer:
                     row_cells += (
                         f"<td style='padding:3px 7px; border-bottom:1px solid rgba(100,116,139,0.12); "
                         f"color:{key_color}; font-weight:600;'>{escape(str(col_key))}</td>"
+                    )
+                if has_evidence:
+                    meta = columns_meta[i] if i < len(columns_meta) else {}
+                    ev_text = meta.get("evidence", "") if isinstance(meta, dict) else ""
+                    row_cells += (
+                        f"<td style='padding:3px 7px; border-bottom:1px solid rgba(100,116,139,0.12); "
+                        f"color:#8795a5; font-size:{max(8, self._font_size - 3)}pt;'>{escape(str(ev_text))}</td>"
                     )
                 schema_body += f"<tr>{row_cells}</tr>"
 
@@ -275,6 +360,17 @@ class ResponseRenderer:
                 f"<table style='border-collapse:collapse; width:100%; font-size:{self._font_size - 1}pt;'>"
                 f"<thead><tr>{header_cells}</tr></thead>"
                 f"<tbody>{body_rows}</tbody>"
+                f"</table>"
+            )
+        elif not schema_html and columns:
+            header_cells = "".join(
+                f"<th style='padding:4px 8px; text-align:left; border-bottom:1px solid {BORDER}; "
+                f"color:{ACCENT_BLUE}; font-weight:600;'>{escape(str(c))}</th>"
+                for c in columns
+            )
+            data_html = (
+                f"<table style='border-collapse:collapse; width:100%; font-size:{self._font_size - 1}pt;'>"
+                f"<thead><tr>{header_cells}</tr></thead>"
                 f"</table>"
             )
 

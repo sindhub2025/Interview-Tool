@@ -10,7 +10,7 @@ import requests
 from ghostmic.utils.logger import get_logger
 from ghostmic.domain.captured_screen import PreparedCapture
 from ghostmic.domain.screen_understanding import (
-    ScreenUnderstanding, ScreenObservation, ScreenTable, ScreenCodeBlock,
+    ScreenUnderstanding, ScreenObservation, ScreenTable, ScreenTableColumn, ScreenCodeBlock,
 )
 from ghostmic.services.vision_provider_router import VisionProviderConfig
 from ghostmic.services.image_preprocessor import encode_image_data_url
@@ -146,6 +146,11 @@ class ScreenUnderstandingService:
         )
         raw_text = self._call_provider(prepared, prompt)
         understanding = self._parse_response(raw_text, prepared.capture_id)
+        understanding.metadata = {
+            "capture_metadata": getattr(prepared, "metadata", {}) or {},
+            "model": self._provider.model,
+            "provider": self._provider.provider,
+        }
         return understanding
 
     def _call_provider(self, prepared: PreparedCapture, prompt: str) -> str:
@@ -291,11 +296,23 @@ class ScreenUnderstandingService:
                             else:
                                 key_hint = raw_key
 
+                            col_meta = ScreenTableColumn(
+                                name=col_name,
+                                type=raw_type,
+                                type_is_inferred=type_inferred,
+                                key_hint=raw_key,
+                                key_hint_is_inferred=key_inferred,
+                                evidence=str(col.get("evidence", "") or "").strip(),
+                            )
+                            table.columns_meta.append(col_meta)
                             table.columns.append(col_name)
                             table.column_types.append(col_type)
                             table.column_key_hints.append(key_hint)
                         elif isinstance(col, str) and col.strip():
-                            table.columns.append(col.strip())
+                            col_name = col.strip()
+                            col_meta = ScreenTableColumn(name=col_name)
+                            table.columns_meta.append(col_meta)
+                            table.columns.append(col_name)
                             table.column_types.append("")
                             table.column_key_hints.append("")
 
@@ -572,16 +589,29 @@ class ScreenUnderstandingService:
                     # Each data row corresponds to one column in the schema table
                     types = []
                     key_hints = []
-                    for row in schema_data_rows:
+                    table.columns_meta = []
+                    for i, row in enumerate(schema_data_rows):
                         col_type = row[1].strip() if len(row) > 1 else ""
                         key_hint = row[2].strip() if len(row) > 2 else ""
                         # Strip [observed]/[inferred] tags from type for cleanliness
                         col_type_clean = re.sub(r"\[(observed|inferred)\]", "", col_type, flags=re.IGNORECASE).strip()
                         types.append(col_type_clean)
                         key_hints.append(key_hint)
+                        col_name = table.columns[i] if i < len(table.columns) else ""
+                        table.columns_meta.append(
+                            ScreenTableColumn(
+                                name=col_name,
+                                type=col_type_clean,
+                                type_is_inferred="[inferred]" in col_type.lower(),
+                                key_hint=key_hint,
+                                key_hint_is_inferred="[inferred]" in key_hint.lower(),
+                            )
+                        )
                     table.column_types = types
                     table.column_key_hints = key_hints
                 else:
+                    if not table.columns_meta and table.columns:
+                        table.columns_meta = [ScreenTableColumn(name=c) for c in table.columns]
                     # Data rows are actual sample rows, not per-column metadata.
                     # Visible rows from schema section (no explicit sample marker).
                     if not data_text:

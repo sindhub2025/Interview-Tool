@@ -70,6 +70,17 @@ class ResponseComposer:
                 content={"level": 2, "text": "Tables Detected"},
             ))
             for tbl in understanding.tables:
+                columns_meta_data = [
+                    {
+                        "name": c.name,
+                        "type": c.type,
+                        "type_is_inferred": getattr(c, "type_is_inferred", False),
+                        "key_hint": getattr(c, "key_hint", ""),
+                        "key_hint_is_inferred": getattr(c, "key_hint_is_inferred", False),
+                        "evidence": getattr(c, "evidence", ""),
+                    }
+                    for c in getattr(tbl, "columns_meta", [])
+                ]
                 doc.blocks.append(ResponseBlock(
                     block_type=BLOCK_TABLE,
                     content={
@@ -77,6 +88,7 @@ class ResponseComposer:
                         "columns": tbl.columns,
                         "column_types": tbl.column_types,
                         "column_key_hints": tbl.column_key_hints,
+                        "columns_meta": columns_meta_data,
                         "rows": tbl.visible_rows,
                         "uncertainty_notes": tbl.uncertainty_notes,
                     },
