@@ -103,6 +103,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._make_ai_tab(), "AI")
         tabs.addTab(self._make_appearance_tab(), "Appearance")
         tabs.addTab(self._make_resume_tab(), "Resume")
+        tabs.addTab(self._make_browser_input_tab(), "Browser Input")
         tabs.addTab(self._make_about_tab(), "About")
         layout.addWidget(tabs)
 
@@ -450,6 +451,43 @@ class SettingsDialog(QDialog):
 
         return w
 
+    # ── Tab: Browser Input ────────────────────────────────────────────
+
+    def _make_browser_input_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        form = QFormLayout()
+
+        self._bb_enabled_check = QCheckBox("Enable remote Browser Input panel")
+        form.addRow(self._bb_enabled_check)
+
+        self._bb_supabase_url_edit = QLineEdit()
+        self._bb_supabase_url_edit.setPlaceholderText("https://<project-ref>.supabase.co")
+        form.addRow("Supabase URL:", self._bb_supabase_url_edit)
+
+        self._bb_publishable_key_edit = QLineEdit()
+        self._bb_publishable_key_edit.setPlaceholderText("sb_publishable_... or anon key")
+        form.addRow("Client API Key:", self._bb_publishable_key_edit)
+
+        key_note = QLabel(
+            "Use the public client/anon key only — never enter the service_role key."
+        )
+        key_note.setStyleSheet("color: #8b949e; font-size: 11px;")
+        key_note.setWordWrap(True)
+        form.addRow("", key_note)
+
+        self._bb_sender_url_edit = QLineEdit()
+        self._bb_sender_url_edit.setPlaceholderText("https://your-sender-app.netlify.app")
+        form.addRow("Sender Webpage URL:", self._bb_sender_url_edit)
+
+        self._bb_max_messages_spin = QSpinBox()
+        self._bb_max_messages_spin.setRange(10, 1000)
+        form.addRow("Max in-memory messages:", self._bb_max_messages_spin)
+
+        layout.addLayout(form)
+        layout.addStretch()
+        return w
+
     # ── Tab: About ────────────────────────────────────────────────────
 
     def _make_about_tab(self) -> QWidget:
@@ -586,6 +624,14 @@ class SettingsDialog(QDialog):
         self._height_spin.setValue(ui.get("window_height", 650))
         self._stealth_enabled_check.setChecked(bool(ui.get("stealth_enabled", True)))
 
+        # Browser Input
+        bb = self._config.get("browser_bridge", {})
+        self._bb_enabled_check.setChecked(bool(bb.get("enabled", True)))
+        self._bb_supabase_url_edit.setText(str(bb.get("supabase_url", "")))
+        self._bb_publishable_key_edit.setText(str(bb.get("publishable_key", "")))
+        self._bb_sender_url_edit.setText(str(bb.get("sender_url", "")))
+        self._bb_max_messages_spin.setValue(int(bb.get("max_messages", 100)))
+
     def _save(self) -> None:
         cfg = dict(self._config)
 
@@ -686,6 +732,14 @@ class SettingsDialog(QDialog):
         cfg["ui"]["window_width"] = self._width_spin.value()
         cfg["ui"]["window_height"] = self._height_spin.value()
         cfg["ui"]["stealth_enabled"] = self._stealth_enabled_check.isChecked()
+
+        # Browser Input
+        cfg.setdefault("browser_bridge", {})
+        cfg["browser_bridge"]["enabled"] = self._bb_enabled_check.isChecked()
+        cfg["browser_bridge"]["supabase_url"] = self._bb_supabase_url_edit.text().strip()
+        cfg["browser_bridge"]["publishable_key"] = self._bb_publishable_key_edit.text().strip()
+        cfg["browser_bridge"]["sender_url"] = self._bb_sender_url_edit.text().strip()
+        cfg["browser_bridge"]["max_messages"] = int(self._bb_max_messages_spin.value())
 
         self.settings_saved.emit(cfg)
         self.accept()

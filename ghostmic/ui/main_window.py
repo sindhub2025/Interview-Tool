@@ -64,6 +64,14 @@ from ghostmic.ui.presentation import Workspace, coerce_workspace
 from ghostmic.utils.logger import get_logger
 from ghostmic.utils.text_processing import ensure_question_format
 
+# Browser Input panel (optional — app starts normally if unavailable)
+try:
+    from ghostmic.ui.browser_input_panel import BrowserInputPanel as _BrowserInputPanel
+    _BROWSER_INPUT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _BrowserInputPanel = None  # type: ignore[assignment,misc]
+    _BROWSER_INPUT_AVAILABLE = False
+
 logger = get_logger(__name__)
 
 RESIZE_MARGIN = 12  # pixels from edge that trigger resize
@@ -144,6 +152,7 @@ class TitleBar(QWidget):
     dock_toggle_requested = pyqtSignal()
     pin_toggled = pyqtSignal(bool)
     double_clicked = pyqtSignal()
+    browser_input_toggled = pyqtSignal(bool)  # True = expand
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -177,6 +186,35 @@ class TitleBar(QWidget):
             "QPushButton:checked { color: #58a6ff; }"
         )
         layout.addWidget(self._pin_btn)
+
+        # Browser Input toggle button
+        self._browser_input_btn = QPushButton("📡 Remote")
+        self._browser_input_btn.setFixedSize(90, 26)
+        self._browser_input_btn.setCheckable(True)
+        self._browser_input_btn.setChecked(False)
+        self._browser_input_btn.setObjectName("browser_input_toggle_btn")
+        self._browser_input_btn.setStyleSheet(
+            "QPushButton#browser_input_toggle_btn {"
+            "  background-color: rgba(121,192,255,0.12);"
+            "  border: 1px solid rgba(121,192,255,0.5);"
+            "  border-radius: 6px;"
+            "  color: #79c0ff;"
+            "  font-size: 9.5pt;"
+            "  font-weight: 600;"
+            "  padding: 0px 8px;"
+            "}"
+            "QPushButton#browser_input_toggle_btn:checked {"
+            "  background-color: rgba(121,192,255,0.28);"
+            "  border-color: rgba(121,192,255,0.90);"
+            "}"
+            "QPushButton#browser_input_toggle_btn:hover {"
+            "  background-color: rgba(121,192,255,0.22);"
+            "}"
+        )
+        self._browser_input_btn.clicked.connect(
+            lambda checked: self.browser_input_toggled.emit(checked)
+        )
+        layout.addWidget(self._browser_input_btn)
 
         # Dock toggle button
         self._dock_btn = QPushButton("⤓ Dock")
@@ -241,6 +279,16 @@ class TitleBar(QWidget):
     def set_docked(self, docked: bool) -> None:
         self._docked = docked
         self._dock_btn.setText("⤒ Undock" if docked else "⤓ Dock")
+
+    def set_browser_input_badge(self, unread: int) -> None:
+        """Update the remote button with an unread indicator."""
+        if unread > 0:
+            self._browser_input_btn.setText(f"📡 Remote 🔴{unread}")
+        else:
+            self._browser_input_btn.setText("📡 Remote")
+
+    def set_browser_input_checked(self, checked: bool) -> None:
+        self._browser_input_btn.setChecked(checked)
 
 
 class DockIndicator(QPushButton):
@@ -354,6 +402,16 @@ class MainWindow(QMainWindow):
         self._dictation_timer.timeout.connect(self._commit_dictation_text)
         self._settings_dialog = None
 
+        # Browser Input state
+        self._browser_panel: Optional["_BrowserInputPanel"] = None  # type: ignore[name-defined]
+        self._browser_panel_visible = bool(
+            self._config.get("ui", {}).get("browser_panel_visible", False)
+        )
+        self._browser_panel_width = int(
+            self._config.get("ui", {}).get("browser_panel_width", 380)
+        )
+        self._h_splitter: Optional[QSplitter] = None  # horizontal content splitter
+
         self._setup_window()
         hotkey_quit = self._config.get("hotkeys", {}).get("quit_app", "ctrl+q")
         self._quit_shortcut = QShortcut(QKeySequence(hotkey_quit), self)
@@ -461,6 +519,7 @@ class MainWindow(QMainWindow):
         self._title_bar.dock_toggle_requested.connect(self.toggle_dock_mode)
         self._title_bar.pin_toggled.connect(self._on_pin_toggled)
         self._title_bar.double_clicked.connect(self.toggle_compact_mode)
+        self._title_bar.browser_input_toggled.connect(self.toggle_browser_input_panel)
         root_layout.addWidget(self._title_bar)
 
         # Separator
@@ -665,7 +724,34 @@ class MainWindow(QMainWindow):
         self.ai_panel.activity_started.connect(self._reveal_question_answer_area)
         self.ai_panel.camera_mode_requested.connect(self.set_camera_mode)
         self._splitter.addWidget(self.ai_panel)
-        root_layout.addWidget(self._qa_container, stretch=1)
+
+        # ── Horizontal content splitter (left = QA area, right = Browser Input) ──
+        # We wrap the existing _qa_container in a horizontal splitter so the
+        # Browser Input panel can appear to its right without altering the
+        # vertical splitter that owns question/AI panels.
+        self._h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._h_splitter.setHandleWidth(4)
+        self._h_splitter.setStyleSheet(
+            "QSplitter::handle { background: rgba(139, 148, 158, 0.18); }"
+        )
+        self._h_splitter.setChildrenCollapsible(False)
+
+        # Left pane: original QA content
+        self._h_splitter.addWidget(self._qa_container)
+
+        # Right pane: Browser Input panel (created if module is available)
+        if _BROWSER_INPUT_AVAILABLE and _BrowserInputPanel is not None:
+            self._browser_panel = _BrowserInputPanel(self._config, parent=self)
+            self._browser_panel.setMinimumWidth(300)
+            self._browser_panel.setMaximumWidth(700)
+            self._h_splitter.addWidget(self._browser_panel)
+            self._browser_panel.setVisible(False)
+            # Wire browser panel signals
+            self._title_bar.browser_input_toggled.connect(self.toggle_browser_input_panel)
+        else:
+            self._browser_panel = None
+
+        root_layout.addWidget(self._h_splitter, stretch=1)
         self._qa_container.setMaximumHeight(0)
         self._qa_container.hide()
 
@@ -1532,6 +1618,7 @@ class MainWindow(QMainWindow):
                 "settings": self._controls._settings_btn.isVisible(),
                 "qa": self._qa_container.isVisible(),
                 "splitter": self._splitter.isVisible(),
+                "browser_panel": self._browser_panel.isVisible() if self._browser_panel is not None else False,
                 "question_hidden": self._question_card.isHidden(),
                 "splitter_sizes": self._splitter.sizes(),
                 "controls_index": root_layout.indexOf(self._controls),
@@ -1562,6 +1649,8 @@ class MainWindow(QMainWindow):
             )
             self._qa_container.show()
             self._splitter.show()
+            if self._browser_panel is not None:
+                self._browser_panel.hide()
             qa_layout.setContentsMargins(0, 0, 0, 0)
             qa_layout.setSpacing(0)
             self._question_card.hide()
@@ -1606,6 +1695,8 @@ class MainWindow(QMainWindow):
                 self._controls._settings_btn.setVisible(restore["settings"])
                 self._qa_container.setVisible(restore["qa"])
                 self._splitter.setVisible(restore["splitter"])
+                if self._browser_panel is not None:
+                    self._browser_panel.setVisible(restore.get("browser_panel", False))
         # Reapply capture exclusion after the compact-window geometry settles.
         QTimer.singleShot(100, self._apply_stealth)
 
@@ -1614,6 +1705,91 @@ class MainWindow(QMainWindow):
         if active and self._active_workspace != Workspace.TELEPROMPTER.value:
             self.set_workspace(Workspace.TELEPROMPTER)
         self._set_camera_overlay(active)
+
+    # ------------------------------------------------------------------
+    # Browser Input panel
+    # ------------------------------------------------------------------
+
+    def toggle_browser_input_panel(self, show: bool) -> None:
+        """
+        Expand or collapse the Browser Input panel to the right of the main content.
+
+        When expanding:
+          - Make the panel visible inside the horizontal splitter.
+          - Grow the window width by the panel's saved/default width.
+          - Keep the original GhostMic content area width unchanged.
+
+        When collapsing:
+          - Hide the panel.
+          - Restore the window to the original GhostMic width.
+          - Keep received messages in memory.
+        """
+        if self._browser_panel is None:
+            logger.warning("MainWindow: Browser Input panel not available.")
+            return
+
+        if show:
+            panel_w = max(300, self._browser_panel_width)
+            self._browser_panel.setVisible(True)
+            self._browser_panel.set_collapsed(False)
+            if self._h_splitter is not None:
+                current_left = self._h_splitter.sizes()[0] if self._h_splitter.sizes() else self.width()
+                if current_left <= 0:
+                    current_left = self.width()
+                self._h_splitter.setSizes([current_left, panel_w])
+            # Grow window width and ensure enough vertical space for message list
+            new_w = self.width() + panel_w
+            target_h = self.height()
+            if not self._qa_revealed:
+                target_h = max(target_h, self._expanded_window_size.height())
+            self.resize(new_w, target_h)
+        else:
+            # Persist the panel width before hiding
+            if self._h_splitter is not None and len(self._h_splitter.sizes()) > 1 and self._h_splitter.sizes()[1] > 0:
+                self._browser_panel_width = max(300, self._h_splitter.sizes()[1])
+
+            self._browser_panel.setVisible(False)
+            self._browser_panel.set_collapsed(True)
+            # Restore original GhostMic width (and height if QA area was not revealed)
+            left_w = self._h_splitter.sizes()[0] if (self._h_splitter and self._h_splitter.sizes() and self._h_splitter.sizes()[0] > 0) else self._expanded_window_size.width()
+            target_h = self.height() if self._qa_revealed else self._collapsed_window_height
+            self.resize(left_w, target_h)
+
+        self._browser_panel_visible = show
+        self._title_bar.set_browser_input_checked(show)
+        # Persist preferences
+        self._config.setdefault("ui", {})["browser_panel_visible"] = show
+        self._config.setdefault("ui", {})["browser_panel_width"] = self._browser_panel_width
+
+    def setup_browser_input_service(self, service) -> None:
+        """
+        Connect a BrowserBridgeService to the browser input panel.
+        Called from main.py after the service is created.
+        """
+        if self._browser_panel is None:
+            return
+        # Connect service → panel signals
+        service.message_received.connect(self._browser_panel.append_message)
+        service.connection_state_changed.connect(self._browser_panel.on_state_changed)
+        service.pairing_code_ready.connect(self._browser_panel.on_pairing_code_ready)
+        service.session_closed.connect(self._browser_panel.on_session_closed)
+        # Connect panel → service signals
+        self._browser_panel.start_session_requested.connect(service.start_session)
+        self._browser_panel.stop_session_requested.connect(service.stop_session)
+        # Unread badge
+        service.message_received.connect(self._on_browser_message_for_badge)
+
+    def _on_browser_message_for_badge(self, _msg=None) -> None:
+        """Update title bar unread badge when a new browser message arrives."""
+        if self._browser_panel and not self._browser_panel.is_panel_expanded:
+            self._title_bar.set_browser_input_badge(self._browser_panel.unread_count)
+        else:
+            self._title_bar.set_browser_input_badge(0)
+
+    @property
+    def browser_panel(self):
+        """Return the BrowserInputPanel instance, or None if unavailable."""
+        return self._browser_panel
 
     def _on_close(self) -> None:
         QApplication.instance().quit()
@@ -1717,6 +1893,8 @@ class MainWindow(QMainWindow):
         self._controls.setVisible(not docked)
         self._qa_container.setVisible(not docked and self._qa_revealed)
         self._splitter.setVisible(not docked and self._qa_revealed)
+        if self._browser_panel is not None:
+            self._browser_panel.setVisible(not docked and self._browser_panel_visible)
         self._dictation_input.setVisible(False)
 
     def _persist_pre_dock_geometry(self, geo: QRect) -> None:

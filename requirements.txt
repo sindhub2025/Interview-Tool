@@ -16,3 +16,5 @@ google-api-python-client>=2.150.0
 google-auth-oauthlib>=1.2.1
 google-auth>=2.35.0
 keyring>=24.3.1
+supabase>=2.0.0,<3.0.0
+pygments>=2.15.0

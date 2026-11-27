@@ -46,11 +46,24 @@ hiddenimports = [
     "google_auth_oauthlib",
     "google.oauth2",
     "keyring",
+    "supabase",
+    "realtime",
+    "gotrue",
+    "postgrest",
+    "storage3",
+    "websockets",
+    "httpx",
+    "httpcore",
+    "pygments",
+    "pygments.lexers",
+    "pygments.formatters",
+    "pygments.styles",
 ]
 
 # faster_whisper relies on dynamic imports; include submodules explicitly.
 hiddenimports += collect_submodules("faster_whisper")
 hiddenimports += collect_submodules("ctranslate2")
+hiddenimports += collect_submodules("pygments")
 
 binaries = []
 binaries += collect_dynamic_libs("torch")

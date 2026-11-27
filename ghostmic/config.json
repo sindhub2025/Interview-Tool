@@ -92,7 +92,18 @@
     "pre_dock_x": 215,
     "pre_dock_y": 30,
     "pre_dock_width": 1200,
-    "pre_dock_height": 700
+    "pre_dock_height": 700,
+    "browser_panel_visible": false,
+    "browser_panel_width": 380
+  },
+  "browser_bridge": {
+    "enabled": true,
+    "supabase_url": "https://lhffcmefliaptsijuyay.supabase.co",
+    "publishable_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxoZmZjbWVmbGlhcHRzaWp1eWF5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM4NjAxOTMsImV4cCI6MjA2OTQzNjE5M30.HKGrEokNOl6EJnClwTZ-oITGLkZhoIzpQ4sda2JeCxw",
+    "sender_url": "",
+    "session_ttl_minutes": 10,
+    "max_message_bytes": 102400,
+    "max_messages": 100
   },
   "hotkeys": {
     "toggle_recording": "ctrl+shift+g",

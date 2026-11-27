@@ -308,6 +308,8 @@ def _default_config() -> dict:
             "pre_dock_y": None,
             "pre_dock_width": None,
             "pre_dock_height": None,
+            "browser_panel_visible": False,
+            "browser_panel_width": 380,
             "teleprompter": {
                 "font_size": 24,
                 "scroll_speed": 2.0,
@@ -335,6 +337,15 @@ def _default_config() -> dict:
         "dictation": {
             "enabled": True,
             "commit_idle_ms": 1200,
+        },
+        "browser_bridge": {
+            "enabled": True,
+            "supabase_url": "",
+            "publishable_key": "",
+            "sender_url": "",
+            "session_ttl_minutes": 10,
+            "max_message_bytes": 102400,
+            "max_messages": 100,
         },
     }
 
@@ -502,6 +513,7 @@ class GhostMicApp:
         self._tray = None
         self._window = None
         self._settings_dialog = None
+        self._browser_bridge_service = None
         self._transcript_history: List = []
         self._ai_context_history: List = []
         self._last_ai_response_text: str = ""
@@ -773,6 +785,42 @@ class GhostMicApp:
             self._window.ai_panel.preferences_changed.connect(
                 self._on_teleprompter_preferences_changed
             )
+
+        self._setup_browser_input_service()
+
+    def _setup_browser_input_service(self) -> None:
+        """Initialize the independent Browser Input bridge service (never touches AI)."""
+        bb_cfg = self._config.get("browser_bridge", {})
+        if not bb_cfg.get("enabled", True):
+            return
+        supabase_url = str(bb_cfg.get("supabase_url", "") or "").strip()
+        pub_key = str(bb_cfg.get("publishable_key", "") or "").strip()
+        sender_url = str(bb_cfg.get("sender_url", "") or "").strip()
+
+        try:
+            if supabase_url and pub_key:
+                from ghostmic.services.supabase_realtime_transport import SupabaseRealtimeTransport
+                transport = SupabaseRealtimeTransport(
+                    supabase_url=supabase_url,
+                    publishable_key=pub_key,
+                    session_ttl_minutes=int(bb_cfg.get("session_ttl_minutes", 10)),
+                    max_message_bytes=int(bb_cfg.get("max_message_bytes", 102400)),
+                )
+            else:
+                from ghostmic.services.browser_transport import NullBrowserTransport
+                transport = NullBrowserTransport()
+
+            from ghostmic.services.browser_bridge_service import BrowserBridgeService
+            self._browser_bridge_service = BrowserBridgeService(
+                transport, sender_url=sender_url, parent=None
+            )
+            if self._window:
+                self._window.setup_browser_input_service(self._browser_bridge_service)
+                if self._config.get("ui", {}).get("browser_panel_visible", False):
+                    if self._window.browser_panel:
+                        self._window.toggle_browser_input_panel(True)
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.warning("Browser Input: could not initialize: %s", exc)
 
     def _on_teleprompter_preferences_changed(self, prefs) -> None:
         """Persist updated Teleprompter preferences into config.json."""
@@ -4950,6 +4998,11 @@ class GhostMicApp:
         from PyQt6.QtWidgets import QApplication
 
         QApplication.restoreOverrideCursor()
+        if self._browser_bridge_service is not None:
+            try:
+                self._browser_bridge_service.shutdown()
+            except Exception:
+                pass
         if self._question_normalization_worker and self._question_normalization_worker.isRunning():
             self._question_normalization_worker.requestInterruption()
             self._question_normalization_worker.wait(1500)
@@ -4992,7 +5045,14 @@ class GhostMicApp:
 
             ui_cfg["window_x"] = geo.x()
             ui_cfg["window_y"] = geo.y()
-            ui_cfg["window_width"] = geo.width()
+            win_w = geo.width()
+            if getattr(self._window, "_browser_panel_visible", False):
+                h_splitter = getattr(self._window, "_h_splitter", None)
+                if h_splitter is not None and h_splitter.sizes() and h_splitter.sizes()[0] > 0:
+                    win_w = h_splitter.sizes()[0]
+                else:
+                    win_w = max(420, win_w - int(getattr(self._window, "_browser_panel_width", 380)))
+            ui_cfg["window_width"] = win_w
             ui_cfg["window_height"] = geo.height()
             ui_cfg["compact_mode"] = getattr(
                 self._window, "_compact_mode", False

@@ -96,6 +96,16 @@ CONFIG_SCHEMA: Dict[str, SchemaEntry] = {
     "ui.pre_dock_y":           (int,   0,        None),
     "ui.pre_dock_width":       (int,   420,      lambda v: 200 <= v <= 3000),
     "ui.pre_dock_height":      (int,   650,      lambda v: 200 <= v <= 3000),
+    "ui.browser_panel_visible": (bool, False,    None),
+    "ui.browser_panel_width":  (int,   380,      lambda v: 300 <= v <= 700),
+    # Browser Bridge (Remote Browser Input)
+    "browser_bridge.enabled":             (bool, True,   None),
+    "browser_bridge.supabase_url":        (str,  "",     None),
+    "browser_bridge.publishable_key":     (str,  "",     None),
+    "browser_bridge.sender_url":          (str,  "",     None),
+    "browser_bridge.session_ttl_minutes": (int,  10,     lambda v: 1 <= v <= 30),
+    "browser_bridge.max_message_bytes":   (int,  102400, lambda v: 1024 <= v <= 1048576),
+    "browser_bridge.max_messages":        (int,  100,    lambda v: 10 <= v <= 1000),
     # Dictation
     "dictation.enabled":       (bool,  True,     None),
     "dictation.commit_idle_ms": (int,  1200,     lambda v: 300 <= v <= 10000),

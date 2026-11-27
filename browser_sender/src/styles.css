@@ -1,0 +1,244 @@
+/* GhostMic Browser Sender — dark theme matching the desktop application */
+
+:root {
+  --bg-deep: #0d1117;
+  --bg-mid: #161b22;
+  --bg-card: #21262d;
+  --border: #333366;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-red: #f85149;
+  --accent-yellow: #f2cc60;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --font: 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Consolas', 'Courier New', monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font);
+  background-color: var(--bg-deep);
+  color: var(--text-primary);
+  min-height: 100vh;
+  font-size: 15px;
+}
+
+.app {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.app-header h1 {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--accent-blue);
+}
+.app-header .subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.app-footer {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.app-footer strong { color: var(--text-primary); }
+
+/* ── Connection status ───────────────────────────────────── */
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-mid);
+  font-size: 13px;
+}
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  flex-shrink: 0;
+}
+.status-ok .status-dot   { background: var(--accent-green); }
+.status-error .status-dot { background: var(--accent-red); }
+.status-busy .status-dot  { background: var(--accent-yellow); animation: pulse 1.2s infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+.btn-disconnect {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid rgba(248,81,73,0.55);
+  border-radius: 5px;
+  color: var(--accent-red);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.btn-disconnect:hover { background: rgba(248,81,73,0.12); }
+
+/* ── Pairing form ────────────────────────────────────────── */
+.pairing-form {
+  background: var(--bg-mid);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.pairing-form h2 { font-size: 17px; font-weight: 700; }
+.hint { color: var(--text-secondary); font-size: 13px; }
+.input-row { display: flex; gap: 10px; }
+.pairing-input {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--accent-yellow);
+  padding: 8px 14px;
+  flex: 1;
+  min-width: 0;
+}
+.pairing-input:focus { outline: none; border-color: var(--accent-blue); }
+.pairing-input:disabled { opacity: 0.5; }
+
+/* ── Buttons ─────────────────────────────────────────────── */
+.btn-primary {
+  background: rgba(88,166,255,0.18);
+  border: 1px solid rgba(88,166,255,0.65);
+  border-radius: 7px;
+  color: var(--accent-blue);
+  font-size: 14px;
+  font-weight: 700;
+  padding: 8px 20px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.btn-primary:hover:not(:disabled) { background: rgba(88,166,255,0.28); }
+.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+.btn-secondary:hover:not(:disabled) { border-color: var(--accent-blue); color: var(--text-primary); }
+
+/* ── Message composer ────────────────────────────────────── */
+.message-composer {
+  background: var(--bg-mid);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.type-selector {
+  display: flex;
+  gap: 8px;
+}
+.type-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.type-btn.active {
+  background: rgba(88,166,255,0.22);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+.type-btn:hover:not(.active) { border-color: var(--accent-blue); color: var(--text-primary); }
+
+.language-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.language-row select {
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-size: 13px;
+}
+.language-row select:focus { outline: none; border-color: var(--accent-blue); }
+
+.content-editor {
+  width: 100%;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-primary);
+  font-size: 14px;
+  padding: 10px 12px;
+  resize: vertical;
+  font-family: var(--font);
+}
+.content-editor.code-editor {
+  font-family: var(--mono);
+  font-size: 13px;
+  white-space: pre;
+  overflow-x: auto;
+}
+.content-editor:focus { outline: none; border-color: var(--accent-blue); }
+
+.byte-counter {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+.byte-counter.over-limit { color: var(--accent-red); font-weight: 700; }
+
+.error-msg {
+  color: var(--accent-red);
+  font-size: 13px;
+  background: rgba(248,81,73,0.08);
+  border: 1px solid rgba(248,81,73,0.4);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.status-hint { color: var(--text-secondary); font-size: 13px; }
+
+.action-row {
+  display: flex;
+  gap: 10px;
+}
