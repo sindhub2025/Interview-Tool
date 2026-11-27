@@ -44,3 +44,9 @@ startup-logs/
 
 # Compiled assets
 *.qrc.py
+
+# Netlify
+.netlify/
+
+# Browser sender dependencies
+browser_sender/node_modules/

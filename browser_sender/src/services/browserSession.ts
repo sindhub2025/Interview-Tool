@@ -31,7 +31,6 @@ export interface SessionResult {
 
 class BrowserSession {
   private channel: RealtimeChannel | null = null;
-  private sessionId: string | null = null;
   private channelTopic: string | null = null;
   private _state: SessionState = 'idle';
   private stateListeners: Array<(s: SessionState, detail: string) => void> = [];
@@ -74,7 +73,6 @@ class BrowserSession {
       throw new Error(msg);
     }
 
-    this.sessionId = sessionData.session_id;
     this.channelTopic = sessionData.channel_topic;
     this.setState('connecting', 'Joining channel…');
 
@@ -131,7 +129,6 @@ class BrowserSession {
       this.channel = null;
     }
     await supabase.auth.signOut();
-    this.sessionId = null;
     this.channelTopic = null;
   }
 }
