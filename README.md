@@ -92,7 +92,8 @@ python ghostmic/main.py --minimized
 The repository includes a Windows build workflow at
 `.github/workflows/build-windows.yml`.
 
-- Every push/PR builds `dist/InterviewTool.exe` and uploads it as a workflow artifact.
+- Pushes to `main` and `interview-tool-changes`, and every pull request, build
+  `dist/InterviewTool.exe` and upload it as a workflow artifact.
 - Pushing a tag like `v1.0.0` also creates a GitHub Release asset:
   `InterviewTool-v1.0.0-windows-x64.zip`.
 

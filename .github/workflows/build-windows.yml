@@ -2,7 +2,7 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, interview-tool-changes ]
     tags: [ "v*" ]
   pull_request:
 
