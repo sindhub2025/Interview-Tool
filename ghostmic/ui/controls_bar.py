@@ -1,5 +1,10 @@
 """
-Controls bar: compact record, mic, capture, and settings actions.
+Controls bar: compact two-row layout with primary actions and context selectors.
+
+Row 1 (primary):  [Record]  [Mic]  ─stretch─  [Capture]  [Settings]
+Row 2 (context):  [Standard]  [Teleprompter]  ─stretch─  Context: [▼ mode]
+
+Camera-overlay mode compresses both rows into a single icon toolbar.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpacerItem,
     QSizePolicy,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -198,7 +204,10 @@ class APIStatusIndicator(QWidget):
 
 
 class ControlsBar(QWidget):
-    """Top bar with recording controls.
+    """Top bar with recording controls in a two-row compact layout.
+
+    Row 1: Record | Mic | ─── | Capture | Settings
+    Row 2: Standard | Teleprompter | ─── | Context: [mode ▼]
 
     Signals:
         record_toggled(bool): Emitted when recording is toggled.
@@ -228,43 +237,78 @@ class ControlsBar(QWidget):
 
     def _build_ui(self) -> None:
         self.setObjectName("controls_bar")
-        self.setFixedHeight(58)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setStyleSheet(
             "QWidget#controls_bar {"
-            " background-color: transparent;"
-            " border: none;"
+            " background-color: rgba(22, 27, 34, 0.55);"
+            " border-bottom: 1px solid rgba(48, 54, 61, 0.7);"
             "}"
         )
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(8)
+
+        # Outer vertical layout holding two rows
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 8, 12, 8)
+        outer.setSpacing(6)
+
+        # ── Row 1: primary actions ────────────────────────────────────
+        self._row1 = QWidget()
+        self._row1.setObjectName("controls_row1")
+        row1 = QHBoxLayout(self._row1)
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.setSpacing(6)
 
         # Record button
         self._record_btn = _CameraActionButton("record", "Record")
         self._record_btn.setObjectName("record_btn")
-        self._record_btn.setFixedSize(86, 38)
+        self._record_btn.setFixedSize(86, 34)
         self._record_btn.setCheckable(True)
         self._record_btn.clicked.connect(self._on_record_clicked)
-        layout.addWidget(self._record_btn)
+        row1.addWidget(self._record_btn)
 
         # Optional microphone capture toggle (speaker-only by default)
         self._mic_btn = _CameraActionButton("mic", "Mic Off")
         self._mic_btn.setObjectName("mic_btn")
-        self._mic_btn.setFixedSize(78, 38)
+        self._mic_btn.setFixedSize(76, 34)
         self._mic_btn.setCheckable(True)
         self._mic_btn.clicked.connect(self._on_mic_clicked)
-        layout.addWidget(self._mic_btn)
+        row1.addWidget(self._mic_btn)
         self._camera_drag_handle = _CameraDragHandle(self)
         self._camera_drag_handle.hide()
-        layout.addWidget(self._camera_drag_handle)
+        row1.addWidget(self._camera_drag_handle)
         self._apply_mic_button_state()
 
-        workspace_label = QLabel("Workspace")
-        workspace_label.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 8pt; font-weight: 600;"
+        self._row1_spacer = QSpacerItem(
+            0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
-        layout.addWidget(workspace_label)
+        row1.addItem(self._row1_spacer)
+
+        # Screen analysis button
+        self._screenshot_btn = _CameraActionButton("capture", "Capture")
+        self._screenshot_btn.setObjectName("screenshot_btn")
+        self._screenshot_btn.setFixedSize(84, 34)
+        self._screenshot_btn.clicked.connect(self._on_screenshot_clicked)
+        row1.addWidget(self._screenshot_btn)
+
+        # Settings button
+        self._settings_btn = _CameraActionButton("settings", "Settings")
+        self._settings_btn.setObjectName("settings_btn")
+        self._settings_btn.setFixedSize(80, 34)
+        self._settings_btn.clicked.connect(self._on_settings_clicked)
+        row1.addWidget(self._settings_btn)
+
+        outer.addWidget(self._row1)
+
+        # ── Row 2: workspace and context selectors ────────────────────
+        self._row2 = QWidget()
+        self._row2.setObjectName("controls_row2")
+        row2 = QHBoxLayout(self._row2)
+        row2.setContentsMargins(0, 0, 0, 0)
+        row2.setSpacing(6)
+
+        seg_container = QWidget()
+        seg_layout = QHBoxLayout(seg_container)
+        seg_layout.setContentsMargins(0, 0, 0, 0)
+        seg_layout.setSpacing(0)
 
         self._workspace_group = QButtonGroup(self)
         self._workspace_group.setExclusive(True)
@@ -276,34 +320,38 @@ class ControlsBar(QWidget):
         ):
             button.setCheckable(True)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setMinimumHeight(30)
+            button.setFixedHeight(28)
             self._workspace_group.addButton(button)
-            layout.addWidget(button)
+            seg_layout.addWidget(button)
         self._standard_workspace_btn.setChecked(True)
         self._workspace_group.idClicked.connect(self._on_workspace_clicked)
         self._apply_workspace_style()
+        row2.addWidget(seg_container)
 
-        self._controls_spacer = QSpacerItem(
+        row2.addItem(QSpacerItem(
             0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
-        )
-        layout.addItem(self._controls_spacer)
+        ))
 
-        # API status, mode, and status text are kept as hidden state sinks so
-        # controller calls remain UI-only and do not need to change.
+        # API status (hidden state sink)
         self._api_status = APIStatusIndicator(self)
         self._api_status.setVisible(False)
 
-        self._mode_combo = QComboBox(self)
-        self._mode_combo.addItems(self.MODES)
-        self._mode_combo.setFixedWidth(118)
-        self._mode_combo.currentTextChanged.connect(self.mode_changed)
         context_label = QLabel("Context")
         context_label.setStyleSheet(
             f"color: {TEXT_SECONDARY}; font-size: 8pt; font-weight: 600;"
         )
-        layout.addWidget(context_label)
-        layout.addWidget(self._mode_combo)
+        row2.addWidget(context_label)
 
+        self._mode_combo = QComboBox(self)
+        self._mode_combo.addItems(self.MODES)
+        self._mode_combo.setFixedWidth(118)
+        self._mode_combo.setFixedHeight(28)
+        self._mode_combo.currentTextChanged.connect(self.mode_changed)
+        row2.addWidget(self._mode_combo)
+
+        outer.addWidget(self._row2)
+
+        # Kept as hidden state sink so controller calls remain UI-only
         self._status_label = QLabel("Ready", self)
         self._status_label.setObjectName("status_label")
         self._status_label.setStyleSheet(
@@ -311,19 +359,8 @@ class ControlsBar(QWidget):
         )
         self._status_label.setVisible(False)
 
-        # Screen analysis button
-        self._screenshot_btn = _CameraActionButton("capture", "Capture")
-        self._screenshot_btn.setObjectName("screenshot_btn")
-        self._screenshot_btn.setFixedSize(88, 38)
-        self._screenshot_btn.clicked.connect(self._on_screenshot_clicked)
-        layout.addWidget(self._screenshot_btn)
-
-        # Settings button
-        self._settings_btn = _CameraActionButton("settings", "Settings")
-        self._settings_btn.setObjectName("settings_btn")
-        self._settings_btn.setFixedSize(86, 38)
-        self._settings_btn.clicked.connect(self._on_settings_clicked)
-        layout.addWidget(self._settings_btn)
+        # Legacy spacer reference used by set_camera_overlay
+        self._controls_spacer = self._row1_spacer
 
     # ------------------------------------------------------------------
     # Public API
@@ -402,27 +439,40 @@ class ControlsBar(QWidget):
     def set_camera_overlay(self, active: bool) -> None:
         """Use a compact icon toolbar while the camera overlay is active."""
         self._camera_overlay = active
-        layout = self.layout()
         if active:
-            self.setStyleSheet(
-                "QWidget#controls_bar { background: transparent; "
-                "border-top: 1px solid rgba(203,213,225,0.12); }"
-            )
-            layout.setContentsMargins(8, 4, 8, 4)
-            self._controls_spacer.changeSize(
-                0, 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-            )
-        else:
+            # Collapse into a single-row icon toolbar
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self.setStyleSheet(
                 "QWidget#controls_bar { background-color: transparent; border: none; }"
             )
-            layout.setContentsMargins(10, 8, 10, 8)
-            self._controls_spacer.changeSize(
+            self._row2.hide()
+            row1_layout = self._row1.layout()
+            row1_layout.setContentsMargins(4, 2, 4, 2)
+            self._row1_spacer.changeSize(
+                0, 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
+            row1_layout.setSpacing(5)
+            self.layout().setContentsMargins(4, 2, 4, 2)
+            self.layout().setSpacing(0)
+        else:
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.setStyleSheet(
+                "QWidget#controls_bar {"
+                " background-color: rgba(22, 27, 34, 0.55);"
+                " border-bottom: 1px solid rgba(48, 54, 61, 0.7);"
+                "}"
+            )
+            self._row2.show()
+            row1_layout = self._row1.layout()
+            row1_layout.setContentsMargins(0, 0, 0, 0)
+            self._row1_spacer.changeSize(
                 0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
             )
-        layout.setSpacing(5 if active else 8)
-        layout.invalidate()
-        self.setFixedHeight(46 if active else 58)
+            row1_layout.setSpacing(6)
+            self.layout().setContentsMargins(12, 8, 12, 8)
+            self.layout().setSpacing(6)
+
+        row1_layout = self._row1.layout()
         self._record_btn.setVisible(True)
         self._mic_btn.setVisible(True)
         self._screenshot_btn.setVisible(True)
@@ -431,16 +481,16 @@ class ControlsBar(QWidget):
         self._camera_drag_handle.setToolTip(
             "" if active else "Drag to align below your camera"
         )
-        layout.removeWidget(self._record_btn)
-        layout.removeWidget(self._mic_btn)
-        layout.removeWidget(self._camera_drag_handle)
+        row1_layout.removeWidget(self._record_btn)
+        row1_layout.removeWidget(self._mic_btn)
+        row1_layout.removeWidget(self._camera_drag_handle)
         if active:
-            layout.insertWidget(0, self._camera_drag_handle)
-            layout.insertWidget(1, self._mic_btn)
-            layout.insertWidget(2, self._record_btn)
+            row1_layout.insertWidget(0, self._camera_drag_handle)
+            row1_layout.insertWidget(1, self._mic_btn)
+            row1_layout.insertWidget(2, self._record_btn)
         else:
-            layout.insertWidget(0, self._record_btn)
-            layout.insertWidget(1, self._mic_btn)
+            row1_layout.insertWidget(0, self._record_btn)
+            row1_layout.insertWidget(1, self._mic_btn)
         buttons = (
             (self._mic_btn, "Microphone"),
             (self._record_btn, "Record"),
@@ -471,10 +521,10 @@ class ControlsBar(QWidget):
             self._settings_btn.setText("Settings")
             for button, _ in buttons:
                 button.set_camera_mode(False)
-            self._record_btn.setFixedSize(86, 38)
-            self._mic_btn.setFixedSize(78, 38)
-            self._screenshot_btn.setFixedSize(88, 38)
-            self._settings_btn.setFixedSize(86, 38)
+            self._record_btn.setFixedSize(86, 34)
+            self._mic_btn.setFixedSize(76, 34)
+            self._screenshot_btn.setFixedSize(84, 34)
+            self._settings_btn.setFixedSize(80, 34)
             self._record_btn.setToolTip("")
             self._mic_btn.setToolTip("")
             self._screenshot_btn.setToolTip("")
@@ -527,21 +577,20 @@ class ControlsBar(QWidget):
         self.workspace_changed.emit(workspace)
 
     def _apply_workspace_style(self) -> None:
-        base = (
-            "QPushButton { background: rgba(139,148,158,0.12); color: #c9d1d9;"
-            " border: 1px solid rgba(139,148,158,0.35); padding: 0 9px;"
+        common = (
+            "QPushButton { background: rgba(139,148,158,0.10); color: #8b949e;"
+            " border: 1px solid rgba(139,148,158,0.30); padding: 0 10px;"
             " font-size: 9pt; font-weight: 600; }"
-            "QPushButton:hover { background: rgba(88,166,255,0.20); }"
-        )
-        active = (
-            "QPushButton:checked { background: rgba(88,166,255,0.32);"
+            "QPushButton:hover { background: rgba(88,166,255,0.16); color: #e6edf3; }"
+            "QPushButton:checked { background: rgba(88,166,255,0.28);"
             " color: #f0f6fc; border-color: #58a6ff; }"
         )
-        for button in (
-            self._standard_workspace_btn,
-            self._teleprompter_workspace_btn,
-        ):
-            button.setStyleSheet(base + active)
+        self._standard_workspace_btn.setStyleSheet(
+            common + "QPushButton { border-top-left-radius: 6px; border-bottom-left-radius: 6px; border-top-right-radius: 0px; border-bottom-right-radius: 0px; }"
+        )
+        self._teleprompter_workspace_btn.setStyleSheet(
+            common + "QPushButton { border-top-right-radius: 6px; border-bottom-right-radius: 6px; border-top-left-radius: 0px; border-bottom-left-radius: 0px; border-left: none; }"
+        )
 
     def _apply_mic_button_state(self) -> None:
         if self._mic_enabled:

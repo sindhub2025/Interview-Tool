@@ -21,7 +21,7 @@ def test_capture_button_is_before_settings_button() -> None:
     assert app is not None
 
     controls = ControlsBar()
-    layout = controls.layout()
+    layout = controls._row1.layout()
 
     capture_index = None
     settings_index = None

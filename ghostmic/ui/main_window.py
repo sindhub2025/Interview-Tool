@@ -366,7 +366,7 @@ class MainWindow(QMainWindow):
         self._qa_revealed = False
         self._qa_animation: QParallelAnimationGroup | None = None
         self._expanded_window_size = QSize(420, 650)
-        self._collapsed_window_height = 90
+        self._collapsed_window_height = 108
         self._latest_question_text = ""
         self._question_history: list[str] = []
         self._question_text_locked = False
@@ -546,7 +546,7 @@ class MainWindow(QMainWindow):
         self._controls.record_toggled.connect(self._on_record_toggled)
         self._controls.mode_changed.connect(self._on_mode_changed)
         self._controls.workspace_changed.connect(self.set_workspace)
-        root_layout.addWidget(self._controls, alignment=Qt.AlignmentFlag.AlignHCenter)
+        root_layout.addWidget(self._controls)
 
         # Hidden transcript store remains wired for app logic; the visible Q&A
         # view mirrors its latest speaker question.
@@ -903,7 +903,11 @@ class MainWindow(QMainWindow):
         self._title_separator.show()
         self._dictation_input.hide()
         collapsed_width = max(420, self._controls.sizeHint().width() + 4)
-        self.resize(collapsed_width, self._collapsed_window_height)
+        collapsed_height = max(
+            self._collapsed_window_height,
+            self._title_bar.height() + self._controls.sizeHint().height() + 4,
+        )
+        self.resize(collapsed_width, collapsed_height)
 
     def _set_question_text(self, text: str, *, force: bool = False) -> None:
         if self._question_text_locked and not force:
@@ -1692,8 +1696,7 @@ class MainWindow(QMainWindow):
                 root_layout = self._root.layout()
                 root_layout.removeWidget(self._controls)
                 root_layout.insertWidget(
-                    restore["controls_index"], self._controls, 0,
-                    Qt.AlignmentFlag.AlignHCenter,
+                    restore["controls_index"], self._controls, 0
                 )
                 root_layout.setContentsMargins(*restore["root_margins"])
                 self._root.setStyleSheet(restore["root_style"])

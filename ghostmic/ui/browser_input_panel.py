@@ -176,16 +176,16 @@ class MessageCard(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setStyleSheet(
             "QFrame#message_card {"
-            f"  background-color: {BG_CARD};"
-            f"  border: 1px solid {BORDER};"
-            "  border-radius: 8px;"
+            "  background-color: rgba(33, 38, 45, 0.88);"
+            "  border: 1px solid rgba(48, 54, 61, 0.9);"
+            "  border-radius: 10px;"
             "  margin: 2px 0px;"
             "}"
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
         # Header row
         header = QHBoxLayout()
@@ -197,7 +197,10 @@ class MessageCard(QFrame):
         )
         type_label = QLabel(label_text)
         type_label.setStyleSheet(
-            f"color: {label_color}; font-size: 9pt; font-weight: 700; border: none; background: transparent;"
+            f"color: {label_color}; font-size: 9pt; font-weight: 700;"
+            " border: 1px solid rgba(139, 148, 158, 0.22);"
+            " border-radius: 6px; padding: 2px 8px;"
+            " background-color: rgba(13, 17, 23, 0.45);"
         )
         header.addWidget(type_label)
 
@@ -205,8 +208,8 @@ class MessageCard(QFrame):
             lang_label = QLabel(self._message.language)
             lang_label.setStyleSheet(
                 f"color: {TEXT_SECONDARY}; font-size: 8pt; font-weight: 600;"
-                f" border: 1px solid {BORDER}; border-radius: 4px; padding: 1px 5px;"
-                " background: transparent;"
+                " border: 1px solid rgba(48, 54, 61, 0.9); border-radius: 5px; padding: 2px 6px;"
+                " background-color: #0d1117;"
             )
             header.addWidget(lang_label)
 
@@ -232,28 +235,28 @@ class MessageCard(QFrame):
         header.addWidget(time_label)
 
         copy_btn = QPushButton("Copy")
-        copy_btn.setFixedHeight(22)
+        copy_btn.setFixedHeight(24)
         copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_btn.setStyleSheet(
             "QPushButton {"
-            f"  color: {ACCENT_BLUE}; font-size: 8pt; font-weight: 600;"
-            f"  border: 1px solid rgba(88,166,255,0.5); border-radius: 4px;"
-            "  padding: 1px 8px; background: transparent;"
+            f"  color: {ACCENT_BLUE}; font-size: 8.5pt; font-weight: 600;"
+            "  border: 1px solid rgba(88,166,255,0.45); border-radius: 6px;"
+            "  padding: 0px 9px; background: rgba(88,166,255,0.08);"
             "}"
-            "QPushButton:hover { background: rgba(88,166,255,0.15); }"
+            "QPushButton:hover { background: rgba(88,166,255,0.20); }"
         )
         copy_btn.clicked.connect(self._on_copy)
         header.addWidget(copy_btn)
 
         del_btn = QPushButton("✕")
-        del_btn.setFixedSize(22, 22)
+        del_btn.setFixedSize(24, 24)
         del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         del_btn.setStyleSheet(
             "QPushButton {"
             f"  color: {TEXT_SECONDARY}; font-size: 9pt;"
-            "  border: none; background: transparent;"
+            "  border: none; border-radius: 6px; background: transparent;"
             "}"
-            "QPushButton:hover { color: #f85149; }"
+            "QPushButton:hover { color: #f85149; background: rgba(248,81,73,0.12); }"
         )
         del_btn.clicked.connect(self._on_delete)
         header.addWidget(del_btn)
@@ -263,7 +266,8 @@ class MessageCard(QFrame):
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {BORDER}; border: none; border-top: 1px solid {BORDER};")
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("border: none; background-color: rgba(48, 54, 61, 0.7);")
         layout.addWidget(sep)
 
         # Content
@@ -378,8 +382,8 @@ class BrowserInputPanel(QWidget):
         self.setMinimumWidth(300)
         self.setStyleSheet(
             "QWidget#browser_input_panel {"
-            f"  background-color: rgba(17,19,24,242);"
-            f"  border-left: 1px solid {BORDER};"
+            "  background-color: rgba(17, 19, 24, 244);"
+            "  border-left: 1px solid rgba(48, 54, 61, 0.85);"
             "  border-radius: 0px;"
             "}"
         )
@@ -391,13 +395,22 @@ class BrowserInputPanel(QWidget):
         # ── Header ──────────────────────────────────────────────────
         self._header_widget = QWidget()
         self._header_widget.setObjectName("bi_header")
-        self._header_widget.setFixedHeight(32)
+        self._header_widget.setFixedHeight(38)
         self._header_widget.setStyleSheet(
-            f"QWidget#bi_header {{ background-color: {BG_MID}; border-bottom: 1px solid {BORDER}; }}"
+            "QWidget#bi_header {"
+            "  background-color: rgba(22, 27, 34, 0.85);"
+            "  border-bottom: 1px solid rgba(48, 54, 61, 0.8);"
+            "}"
         )
         header_layout = QHBoxLayout(self._header_widget)
-        header_layout.setContentsMargins(10, 0, 8, 0)
-        header_layout.setSpacing(6)
+        header_layout.setContentsMargins(12, 0, 10, 0)
+        header_layout.setSpacing(8)
+
+        self._status_dot = QLabel("●")
+        self._status_dot.setStyleSheet(
+            "color: #666666; font-size: 9pt; border: none; background: transparent;"
+        )
+        header_layout.addWidget(self._status_dot)
 
         self._title_label = QLabel("📡 Browser Input")
         self._title_label.setStyleSheet(
@@ -405,42 +418,37 @@ class BrowserInputPanel(QWidget):
         )
         header_layout.addWidget(self._title_label)
 
-        self._status_dot = QLabel("●")
-        self._status_dot.setStyleSheet(
-            f"color: #666666; font-size: 8pt; border: none; background: transparent;"
-        )
-        header_layout.addWidget(self._status_dot)
-
         self._msg_count_label = QLabel("")
         self._msg_count_label.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 8pt; border: none; background: transparent;"
+            f"color: {TEXT_SECONDARY}; font-size: 8.5pt; font-weight: 600;"
+            " border: none; background: transparent;"
         )
         header_layout.addWidget(self._msg_count_label)
 
         header_layout.addStretch()
 
         self._clear_btn = QPushButton("Clear")
-        self._clear_btn.setFixedHeight(22)
+        self._clear_btn.setFixedHeight(26)
         self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._clear_btn.setStyleSheet(
             "QPushButton {"
-            f"  color: {ACCENT_RED}; font-size: 8pt; font-weight: 600;"
-            f"  border: 1px solid rgba(248,81,73,0.5); border-radius: 4px;"
-            "  padding: 1px 8px; background: transparent;"
+            f"  color: {ACCENT_RED}; font-size: 8.5pt; font-weight: 600;"
+            "  border: 1px solid rgba(248,81,73,0.45); border-radius: 6px;"
+            "  padding: 0px 10px; background: rgba(248,81,73,0.08);"
             "}"
-            "QPushButton:hover { background: rgba(248,81,73,0.15); }"
+            "QPushButton:hover { background: rgba(248,81,73,0.18); }"
         )
         self._clear_btn.clicked.connect(self._on_clear_all)
         header_layout.addWidget(self._clear_btn)
 
         self._collapse_btn = QPushButton("«")
         self._collapse_btn.setObjectName("bi_collapse_btn")
-        self._collapse_btn.setFixedSize(24, 22)
+        self._collapse_btn.setFixedSize(26, 26)
         self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._collapse_btn.setStyleSheet(
             "QPushButton#bi_collapse_btn {"
             f"  color: {TEXT_SECONDARY}; font-size: 11pt; font-weight: 700;"
-            f"  border: 1px solid {BORDER}; border-radius: 4px;"
+            "  border: 1px solid rgba(48, 54, 61, 0.9); border-radius: 6px;"
             "  padding: 0px 4px; background: transparent;"
             "}"
             "QPushButton#bi_collapse_btn:hover {"
@@ -455,8 +463,8 @@ class BrowserInputPanel(QWidget):
         # ── Collapsible body ─────────────────────────────────────────
         self._body_widget = QWidget()
         body_layout = QVBoxLayout(self._body_widget)
-        body_layout.setContentsMargins(8, 8, 8, 8)
-        body_layout.setSpacing(8)
+        body_layout.setContentsMargins(10, 10, 10, 10)
+        body_layout.setSpacing(10)
 
         # Session area
         self._session_widget = self._build_session_area()
@@ -468,20 +476,22 @@ class BrowserInputPanel(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._scroll.setStyleSheet(
-            f"QScrollArea {{ border: none; background-color: transparent; }}"
+            "QScrollArea { border: none; background-color: transparent; }"
         )
 
         self._messages_widget = QWidget()
         self._messages_widget.setStyleSheet("background-color: transparent;")
         self._messages_layout = QVBoxLayout(self._messages_widget)
         self._messages_layout.setContentsMargins(0, 0, 0, 0)
-        self._messages_layout.setSpacing(6)
+        self._messages_layout.setSpacing(8)
         self._messages_layout.addStretch()
 
-        self._empty_label = QLabel("No messages yet.\nConnect a sender to begin.")
+        self._empty_label = QLabel("📡\n\nNo messages yet\nStart a session and connect a sender to begin.")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
         self._empty_label.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 9pt; border: none; background: transparent;"
+            f"color: {TEXT_SECONDARY}; font-size: 9.5pt; padding: 24px 12px;"
+            " border: none; background: transparent;"
         )
         self._messages_layout.insertWidget(0, self._empty_label)
 
@@ -495,47 +505,71 @@ class BrowserInputPanel(QWidget):
         w = QWidget()
         w.setObjectName("bi_session")
         w.setStyleSheet(
-            f"QWidget#bi_session {{ background-color: {BG_MID}; border: 1px solid {BORDER};"
-            " border-radius: 6px; }}"
+            "QWidget#bi_session {"
+            "  background-color: rgba(22, 27, 34, 0.78);"
+            "  border: 1px solid rgba(48, 54, 61, 0.85);"
+            "  border-radius: 10px;"
+            "}"
         )
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
         # Status label
         self._conn_status_label = QLabel("Not connected")
         self._conn_status_label.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 9pt; border: none; background: transparent;"
+            f"color: {TEXT_SECONDARY}; font-size: 9.5pt; font-weight: 600;"
+            " border: none; background: transparent;"
         )
         layout.addWidget(self._conn_status_label)
 
         # Pairing code area (hidden until session starts)
         self._pairing_widget = QWidget()
-        self._pairing_widget.setStyleSheet("background: transparent;")
+        self._pairing_widget.setObjectName("bi_pairing_card")
+        self._pairing_widget.setStyleSheet(
+            "QWidget#bi_pairing_card {"
+            "  background-color: rgba(242, 204, 96, 0.08);"
+            "  border: 1px solid rgba(242, 204, 96, 0.35);"
+            "  border-radius: 8px;"
+            "}"
+        )
         pairing_layout = QHBoxLayout(self._pairing_widget)
-        pairing_layout.setContentsMargins(0, 0, 0, 0)
+        pairing_layout.setContentsMargins(12, 8, 10, 8)
         pairing_layout.setSpacing(8)
+
+        code_col = QVBoxLayout()
+        code_col.setContentsMargins(0, 0, 0, 0)
+        code_col.setSpacing(1)
+        code_hint = QLabel("PAIRING CODE")
+        code_hint.setStyleSheet(
+            "color: rgba(242, 204, 96, 0.75); font-size: 7.5pt; font-weight: 700;"
+            " letter-spacing: 1px; border: none; background: transparent;"
+        )
+        code_col.addWidget(code_hint)
 
         self._pairing_code_label = QLabel("")
         self._pairing_code_label.setStyleSheet(
             "color: #f2cc60; font-size: 18pt; font-weight: 800; letter-spacing: 3px;"
             " border: none; background: transparent;"
         )
-        pairing_layout.addWidget(self._pairing_code_label)
+        code_col.addWidget(self._pairing_code_label)
+        pairing_layout.addLayout(code_col)
+
+        pairing_layout.addStretch()
 
         self._copy_code_btn = QPushButton("Copy Code")
+        self._copy_code_btn.setFixedHeight(28)
         self._copy_code_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._copy_code_btn.setStyleSheet(
             "QPushButton {"
-            f"  color: #f2cc60; font-size: 9pt; font-weight: 600;"
-            "  border: 1px solid rgba(242,204,96,0.5); border-radius: 4px;"
-            "  padding: 2px 10px; background: transparent;"
+            "  color: #f2cc60; font-size: 9pt; font-weight: 600;"
+            "  border: 1px solid rgba(242,204,96,0.5); border-radius: 6px;"
+            "  padding: 0px 12px; background: rgba(242,204,96,0.10);"
             "}"
-            "QPushButton:hover { background: rgba(242,204,96,0.12); }"
+            "QPushButton:hover { background: rgba(242,204,96,0.20); }"
         )
         self._copy_code_btn.clicked.connect(self._on_copy_pairing_code)
         pairing_layout.addWidget(self._copy_code_btn)
-        pairing_layout.addStretch()
 
         self._pairing_widget.hide()
         layout.addWidget(self._pairing_widget)
@@ -543,7 +577,7 @@ class BrowserInputPanel(QWidget):
         # Sender URL hint
         self._sender_url_label = QLabel("")
         self._sender_url_label.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 8pt; border: none; background: transparent;"
+            f"color: {TEXT_SECONDARY}; font-size: 8.5pt; border: none; background: transparent;"
         )
         self._sender_url_label.setTextFormat(Qt.TextFormat.PlainText)
         self._sender_url_label.setWordWrap(True)
@@ -555,34 +589,35 @@ class BrowserInputPanel(QWidget):
         btn_row.setSpacing(8)
 
         self._start_btn = QPushButton("▶ Start Session")
+        self._start_btn.setFixedHeight(32)
         self._start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._start_btn.setStyleSheet(
             "QPushButton {"
             f"  color: {ACCENT_GREEN}; font-size: 9.5pt; font-weight: 700;"
-            f"  border: 1px solid rgba(63,185,80,0.65); border-radius: 5px;"
-            "  padding: 4px 12px; background: rgba(63,185,80,0.12);"
+            "  border: 1px solid rgba(63,185,80,0.65); border-radius: 6px;"
+            "  padding: 0px 14px; background: rgba(63,185,80,0.14);"
             "}"
-            "QPushButton:hover { background: rgba(63,185,80,0.22); }"
-            "QPushButton:disabled { color: #555; border-color: #333; background: transparent; }"
+            "QPushButton:hover { background: rgba(63,185,80,0.24); }"
+            "QPushButton:disabled { color: #555; border-color: #30363d; background: transparent; }"
         )
         self._start_btn.clicked.connect(self.start_session_requested)
-        btn_row.addWidget(self._start_btn)
+        btn_row.addWidget(self._start_btn, 1)
 
         self._stop_btn = QPushButton("■ Stop Session")
+        self._stop_btn.setFixedHeight(32)
         self._stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._stop_btn.setStyleSheet(
             "QPushButton {"
             f"  color: {ACCENT_RED}; font-size: 9.5pt; font-weight: 700;"
-            f"  border: 1px solid rgba(248,81,73,0.65); border-radius: 5px;"
-            "  padding: 4px 12px; background: rgba(248,81,73,0.12);"
+            "  border: 1px solid rgba(248,81,73,0.65); border-radius: 6px;"
+            "  padding: 0px 14px; background: rgba(248,81,73,0.14);"
             "}"
-            "QPushButton:hover { background: rgba(248,81,73,0.22); }"
-            "QPushButton:disabled { color: #555; border-color: #333; background: transparent; }"
+            "QPushButton:hover { background: rgba(248,81,73,0.24); }"
+            "QPushButton:disabled { color: #555; border-color: #30363d; background: transparent; }"
         )
         self._stop_btn.clicked.connect(self.stop_session_requested)
         self._stop_btn.setEnabled(False)
-        btn_row.addWidget(self._stop_btn)
-        btn_row.addStretch()
+        btn_row.addWidget(self._stop_btn, 1)
 
         layout.addLayout(btn_row)
         return w
