@@ -1,6 +1,11 @@
 """
-Settings dialog with tabs for General, Audio, AI, Appearance, About.
+Settings dialog with tabs for General, Audio & Transcription, AI, Appearance, Resume, About.
 Stealth (WDA_EXCLUDEFROMCAPTURE) is applied to this window too.
+
+Revamped layout: each tab wraps its content in a QScrollArea so everything
+is accessible even in small windows.  Related settings are grouped inside
+QGroupBox containers with clear section headings, generous spacing, and
+consistent margins.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -33,6 +39,56 @@ from ghostmic.ui.styles import ACCENT_BLUE, MAIN_STYLE
 from ghostmic.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ── Shared layout constants ───────────────────────────────────────────
+_GROUP_SPACING = 10        # spacing inside a group box form
+_SECTION_SPACING = 16      # spacing between group boxes
+_TAB_MARGINS = (16, 16, 16, 16)  # (left, top, right, bottom)
+
+# Extra QSS applied to the settings dialog on top of the global theme.
+_SETTINGS_QSS = """
+QGroupBox {
+    font-weight: 600;
+    padding-top: 20px;
+    margin-top: 12px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+}
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════════════
+
+def _scrollable(inner: QWidget) -> QScrollArea:
+    """Wrap *inner* in a transparent QScrollArea that stretches to fill."""
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    area.setWidget(inner)
+    return area
+
+
+def _make_group(title: str) -> tuple[QGroupBox, QFormLayout]:
+    """Return a titled QGroupBox with a QFormLayout ready for addRow."""
+    grp = QGroupBox(title)
+    form = QFormLayout()
+    form.setSpacing(_GROUP_SPACING)
+    form.setContentsMargins(12, 12, 12, 12)
+    grp.setLayout(form)
+    return grp, form
+
+
+def _section_label(text: str) -> QLabel:
+    """Small muted description label below a group heading."""
+    lbl = QLabel(text)
+    lbl.setWordWrap(True)
+    lbl.setStyleSheet("color: #8b949e; font-size: 10pt; margin-bottom: 2px;")
+    return lbl
 
 
 class ApiConnectivityWorker(QThread):
@@ -80,8 +136,8 @@ class SettingsDialog(QDialog):
             self._config.get("ai", {}).get("expose_openai_provider", False)
         )
         self.setWindowTitle("GhostMic — Settings")
-        self.setMinimumSize(520, 460)
-        self.setStyleSheet(MAIN_STYLE)
+        self.setMinimumSize(540, 480)
+        self.setStyleSheet(MAIN_STYLE + _SETTINGS_QSS)
         self._stealth_enabled_check = QCheckBox("Hide from Windows capture (stealth mode)")
         self._stealth_enabled_check.setChecked(True)
         self._build_ui()
@@ -96,10 +152,11 @@ class SettingsDialog(QDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setSpacing(8)
 
         tabs = QTabWidget()
         tabs.addTab(self._make_general_tab(), "General")
-        tabs.addTab(self._make_audio_tab(), "Audio")
+        tabs.addTab(self._make_audio_tab(), "Audio & Transcription")
         tabs.addTab(self._make_ai_tab(), "AI")
         tabs.addTab(self._make_appearance_tab(), "Appearance")
         tabs.addTab(self._make_resume_tab(), "Resume")
@@ -118,76 +175,102 @@ class SettingsDialog(QDialog):
     # ── Tab: General ──────────────────────────────────────────────────
 
     def _make_general_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setSpacing(_SECTION_SPACING)
+        outer.setContentsMargins(*_TAB_MARGINS)
 
+        # ── Language & App ────────────────────────────────────────────
+        grp_app, form_app = _make_group("Language & App")
         self._lang_combo = QComboBox()
         self._lang_combo.addItems(["en", "es", "fr", "de", "zh", "ja", "auto"])
-        form.addRow("Language:", self._lang_combo)
+        form_app.addRow("Language:", self._lang_combo)
+
+        form_app.addRow("Stealth mode:", self._stealth_enabled_check)
+        outer.addWidget(grp_app)
+
+        # ── Keyboard shortcuts ────────────────────────────────────────
+        grp_keys, form_keys = _make_group("Keyboard Shortcuts")
 
         self._hotkey_toggle = QLineEdit()
-        form.addRow("Toggle recording hotkey:", self._hotkey_toggle)
+        form_keys.addRow("Toggle recording:", self._hotkey_toggle)
 
         self._hotkey_window = QLineEdit()
-        form.addRow("Toggle window hotkey:", self._hotkey_window)
+        form_keys.addRow("Toggle window:", self._hotkey_window)
 
         self._hotkey_ai = QLineEdit()
-        form.addRow("Generate AI response hotkey:", self._hotkey_ai)
+        form_keys.addRow("Generate AI response:", self._hotkey_ai)
 
         self._hotkey_copy = QLineEdit()
-        form.addRow("Copy response hotkey:", self._hotkey_copy)
+        form_keys.addRow("Copy response:", self._hotkey_copy)
 
         self._hotkey_clear = QLineEdit()
-        form.addRow("Clear transcript hotkey:", self._hotkey_clear)
+        form_keys.addRow("Clear transcript:", self._hotkey_clear)
 
         self._hotkey_dictation = QLineEdit()
-        form.addRow("Win+H dictation hotkey:", self._hotkey_dictation)
+        form_keys.addRow("Win+H dictation:", self._hotkey_dictation)
 
         self._hotkey_screenshot_email = QLineEdit()
-        form.addRow("Screenshot-to-email hotkey:", self._hotkey_screenshot_email)
+        form_keys.addRow("Screenshot-to-email:", self._hotkey_screenshot_email)
 
         self._hotkey_quit = QLineEdit()
-        form.addRow("Quit app hotkey:", self._hotkey_quit)
+        form_keys.addRow("Quit app:", self._hotkey_quit)
+
+        outer.addWidget(grp_keys)
+
+        # ── Screenshot Email ──────────────────────────────────────────
+        grp_email, form_email = _make_group("Screenshot Email")
 
         self._screenshot_email_enabled = QCheckBox(
             "Enable desktop screenshot capture and Gmail delivery"
         )
-        form.addRow("Screenshot email:", self._screenshot_email_enabled)
+        form_email.addRow(self._screenshot_email_enabled)
 
         self._screenshot_email_recipient = QLineEdit()
-        form.addRow("Email recipient:", self._screenshot_email_recipient)
+        form_email.addRow("Recipient:", self._screenshot_email_recipient)
 
         self._screenshot_email_subject = QLineEdit()
-        form.addRow("Email subject:", self._screenshot_email_subject)
+        form_email.addRow("Subject:", self._screenshot_email_subject)
 
         self._screenshot_email_message = QTextEdit()
-        self._screenshot_email_message.setFixedHeight(70)
-        form.addRow("Email message:", self._screenshot_email_message)
+        self._screenshot_email_message.setFixedHeight(60)
+        form_email.addRow("Message:", self._screenshot_email_message)
 
         self._screenshot_oauth_credentials = QLineEdit()
         self._screenshot_oauth_credentials.setPlaceholderText(
             "Path to downloaded Gmail OAuth desktop client JSON"
         )
-        form.addRow("Gmail OAuth JSON:", self._screenshot_oauth_credentials)
+        form_email.addRow("OAuth JSON:", self._screenshot_oauth_credentials)
+
+        outer.addWidget(grp_email)
+
+        # ── Dictation ─────────────────────────────────────────────────
+        grp_dict, form_dict = _make_group("Dictation")
 
         self._dictation_enabled = QCheckBox("Enable Win+H dictation capture")
-        form.addRow("Dictation:", self._dictation_enabled)
+        form_dict.addRow(self._dictation_enabled)
 
         self._dictation_idle_spin = QSpinBox()
         self._dictation_idle_spin.setRange(300, 5000)
         self._dictation_idle_spin.setSingleStep(100)
         self._dictation_idle_spin.setSuffix(" ms")
-        form.addRow("Dictation commit idle:", self._dictation_idle_spin)
+        form_dict.addRow("Commit idle:", self._dictation_idle_spin)
 
-        form.addRow("Stealth mode:", self._stealth_enabled_check)
+        outer.addWidget(grp_dict)
 
-        return w
+        outer.addStretch()
+        return _scrollable(page)
 
-    # ── Tab: Audio ────────────────────────────────────────────────────
+    # ── Tab: Audio & Transcription ────────────────────────────────────
 
     def _make_audio_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setSpacing(_SECTION_SPACING)
+        outer.setContentsMargins(*_TAB_MARGINS)
+
+        # ── Input Devices ─────────────────────────────────────────────
+        grp_dev, form_dev = _make_group("Input Devices")
 
         self._input_combo = QComboBox()
         self._refresh_input_devices()
@@ -199,7 +282,7 @@ class SettingsDialog(QDialog):
         rl.setContentsMargins(0, 0, 0, 0)
         rl.addWidget(self._input_combo)
         rl.addWidget(btn_refresh)
-        form.addRow("Microphone:", row)
+        form_dev.addRow("Microphone:", row)
 
         self._loopback_combo = QComboBox()
         self._refresh_loopback_devices()
@@ -211,35 +294,48 @@ class SettingsDialog(QDialog):
         rl2.setContentsMargins(0, 0, 0, 0)
         rl2.addWidget(self._loopback_combo)
         rl2.addWidget(btn_lb)
-        form.addRow("System audio (loopback):", row2)
+        form_dev.addRow("System audio (loopback):", row2)
+
+        outer.addWidget(grp_dev)
+
+        # ── Whisper Model ─────────────────────────────────────────────
+        grp_model, form_model = _make_group("Transcription Model")
 
         self._model_combo = QComboBox()
         self._model_combo.addItems(
             ["tiny.en", "base.en", "small.en", "medium.en", "large-v3"]
         )
-        form.addRow("Whisper model:", self._model_combo)
+        form_model.addRow("Whisper model:", self._model_combo)
 
         self._compute_combo = QComboBox()
         self._compute_combo.addItems(["int8", "float16", "float32"])
-        form.addRow("Compute type:", self._compute_combo)
+        form_model.addRow("Compute type:", self._compute_combo)
 
         self._beam_size_spin = QSpinBox()
         self._beam_size_spin.setRange(1, 10)
         self._beam_size_spin.setValue(5)
-        form.addRow("Beam size:", self._beam_size_spin)
+        form_model.addRow("Beam size:", self._beam_size_spin)
 
         self._remote_fallback_check = QCheckBox(
             "Use cloud transcription while local model loads/fails"
         )
-        form.addRow("Cloud fallback:", self._remote_fallback_check)
+        form_model.addRow("Cloud fallback:", self._remote_fallback_check)
 
-        return w
+        outer.addWidget(grp_model)
+
+        outer.addStretch()
+        return _scrollable(page)
 
     # ── Tab: AI ───────────────────────────────────────────────────────
 
     def _make_ai_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setSpacing(_SECTION_SPACING)
+        outer.setContentsMargins(*_TAB_MARGINS)
+
+        # ── Provider & Keys ───────────────────────────────────────────
+        grp_prov, form_prov = _make_group("Provider & API Keys")
 
         self._backend_combo = QComboBox()
         backend_options = ["groq"]
@@ -247,8 +343,40 @@ class SettingsDialog(QDialog):
             backend_options.append("openai")
         self._backend_combo.addItems(backend_options)
         self._backend_combo.setEnabled(True)
-        form.addRow("Backend:", self._backend_combo)
+        form_prov.addRow("Backend:", self._backend_combo)
 
+        # Groq key
+        self._groq_api_key_edit = QLineEdit()
+        self._groq_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._groq_api_key_edit.setPlaceholderText("Get a free key at console.groq.com")
+        self._groq_key_toggle = QPushButton("👁")
+        self._groq_key_toggle.setFixedSize(28, 28)
+        self._groq_key_toggle.setCheckable(True)
+        self._groq_key_toggle.setStyleSheet("QPushButton { background: transparent; border: none; }")
+        self._groq_key_toggle.toggled.connect(
+            lambda checked: self._groq_api_key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        groq_key_row = QWidget()
+        groq_key_layout = QHBoxLayout(groq_key_row)
+        groq_key_layout.setContentsMargins(0, 0, 0, 0)
+        groq_key_layout.addWidget(self._groq_api_key_edit)
+        groq_key_layout.addWidget(self._groq_key_toggle)
+        form_prov.addRow("Groq API key:", groq_key_row)
+
+        self._groq_model_combo = QComboBox()
+        self._groq_model_combo.addItems(
+            [
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.8-27b",
+                "qwen/qwen3.6-27b",
+            ]
+        )
+        form_prov.addRow("Groq model:", self._groq_model_combo)
+
+        # OpenAI key (only when exposed)
         self._openai_api_key_edit = QLineEdit()
         self._openai_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._openai_api_key_edit.setPlaceholderText(
@@ -273,42 +401,17 @@ class SettingsDialog(QDialog):
             openai_key_layout.setContentsMargins(0, 0, 0, 0)
             openai_key_layout.addWidget(self._openai_api_key_edit)
             openai_key_layout.addWidget(self._openai_key_toggle)
-            form.addRow("OpenAI API key:", openai_key_row)
-            form.addRow("OpenAI model:", self._openai_model_combo)
+            form_prov.addRow("OpenAI API key:", openai_key_row)
+            form_prov.addRow("OpenAI model:", self._openai_model_combo)
 
-        self._groq_api_key_edit = QLineEdit()
-        self._groq_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._groq_api_key_edit.setPlaceholderText("Get a free key at console.groq.com")
-        self._groq_key_toggle = QPushButton("👁")
-        self._groq_key_toggle.setFixedSize(28, 28)
-        self._groq_key_toggle.setCheckable(True)
-        self._groq_key_toggle.setStyleSheet("QPushButton { background: transparent; border: none; }")
-        self._groq_key_toggle.toggled.connect(
-            lambda checked: self._groq_api_key_edit.setEchoMode(
-                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-            )
-        )
-        groq_key_row = QWidget()
-        groq_key_layout = QHBoxLayout(groq_key_row)
-        groq_key_layout.setContentsMargins(0, 0, 0, 0)
-        groq_key_layout.addWidget(self._groq_api_key_edit)
-        groq_key_layout.addWidget(self._groq_key_toggle)
-        form.addRow("Groq API key:", groq_key_row)
+        outer.addWidget(grp_prov)
 
-        self._groq_model_combo = QComboBox()
-        self._groq_model_combo.addItems(
-            [
-                "openai/gpt-oss-120b",
-                "openai/gpt-oss-20b",
-                "qwen/qwen3.8-27b",
-                "qwen/qwen3.6-27b",
-            ]
-        )
-        form.addRow("Groq model:", self._groq_model_combo)
+        # ── Generation ────────────────────────────────────────────────
+        grp_gen, form_gen = _make_group("Generation")
 
         self._trigger_combo = QComboBox()
         self._trigger_combo.addItems(["auto", "manual", "continuous"])
-        form.addRow("Trigger mode:", self._trigger_combo)
+        form_gen.addRow("Trigger mode:", self._trigger_combo)
 
         self._temp_slider = QSlider(Qt.Orientation.Horizontal)
         self._temp_slider.setRange(0, 100)
@@ -322,65 +425,64 @@ class SettingsDialog(QDialog):
         rl.setContentsMargins(0, 0, 0, 0)
         rl.addWidget(self._temp_slider)
         rl.addWidget(self._temp_label)
-        form.addRow("Temperature:", row)
+        form_gen.addRow("Temperature:", row)
 
         self._system_prompt = QTextEdit()
         self._system_prompt.setFixedHeight(100)
-        form.addRow("System prompt:", self._system_prompt)
+        form_gen.addRow("System prompt:", self._system_prompt)
 
         self._session_ctx = QLineEdit()
         self._session_ctx.setPlaceholderText(
             "e.g. Python developer interview at Google"
         )
-        form.addRow("Session context:", self._session_ctx)
+        form_gen.addRow("Session context:", self._session_ctx)
 
         self._resume_context_enabled = QCheckBox("Use uploaded resume as context for resume-related questions")
         self._resume_context_enabled.setChecked(True)
-        form.addRow("Resume context:", self._resume_context_enabled)
+        form_gen.addRow("Resume context:", self._resume_context_enabled)
 
-        return w
+        outer.addWidget(grp_gen)
+
+        outer.addStretch()
+        return _scrollable(page)
 
     # ── Tab: Resume ───────────────────────────────────────────────────
 
     def _make_resume_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setSpacing(_SECTION_SPACING)
+        outer.setContentsMargins(*_TAB_MARGINS)
 
-        heading = QLabel("Upload Resume")
-        heading.setStyleSheet("font-size: 11pt; font-weight: 700;")
-        layout.addWidget(heading)
+        # ── Profile info ──────────────────────────────────────────────
+        grp_profile, form_profile = _make_group("Profile Information")
 
-        profile_form = QFormLayout()
         self._profile_person_name = QLineEdit()
         self._profile_person_name.setPlaceholderText("e.g. Jane Doe")
-        profile_form.addRow("Person name:", self._profile_person_name)
+        form_profile.addRow("Person name:", self._profile_person_name)
 
         self._profile_target_role = QLineEdit()
         self._profile_target_role.setPlaceholderText("e.g. Senior Data Engineer")
-        profile_form.addRow("Target role:", self._profile_target_role)
+        form_profile.addRow("Target role:", self._profile_target_role)
 
         self._profile_experience = QLineEdit()
         self._profile_experience.setPlaceholderText("e.g. 7 years")
-        profile_form.addRow("Experience:", self._profile_experience)
-        layout.addLayout(profile_form)
+        form_profile.addRow("Experience:", self._profile_experience)
+
+        outer.addWidget(grp_profile)
+
+        # ── Upload & manage ───────────────────────────────────────────
+        grp_upload, _ = _make_group("Resume Document")
+        upload_vbox = QVBoxLayout()
+        upload_vbox.setSpacing(10)
 
         detail = QLabel(
             "Supported formats: PDF, DOCX, TXT. Resume data is extracted into a structured "
             "active profile used for transcript normalization and personalized interview answers."
         )
         detail.setWordWrap(True)
-        detail.setStyleSheet("color: #8b949e;")
-        layout.addWidget(detail)
-
-        context_label = QLabel("Review the extracted context before using it in interview answers:")
-        context_label.setWordWrap(True)
-        layout.addWidget(context_label)
-        self._resume_context_edit = QTextEdit()
-        self._resume_context_edit.setPlaceholderText("Extracted resume context will appear here")
-        self._resume_context_edit.setMinimumHeight(170)
-        layout.addWidget(self._resume_context_edit)
+        detail.setStyleSheet("color: #8b949e; font-size: 10pt;")
+        upload_vbox.addWidget(detail)
 
         self._resume_status_label = QLabel("")
         self._resume_status_label.setWordWrap(True)
@@ -391,12 +493,12 @@ class SettingsDialog(QDialog):
             "padding: 8px;"
             "color: #dce7ff;"
         )
-        layout.addWidget(self._resume_status_label)
+        upload_vbox.addWidget(self._resume_status_label)
 
         self._resume_message_label = QLabel("")
         self._resume_message_label.setWordWrap(True)
         self._resume_message_label.setStyleSheet("color: #8b949e;")
-        layout.addWidget(self._resume_message_label)
+        upload_vbox.addWidget(self._resume_message_label)
 
         button_row = QHBoxLayout()
         self._resume_upload_btn = QPushButton("Upload / Replace")
@@ -406,19 +508,48 @@ class SettingsDialog(QDialog):
         self._resume_remove_btn = QPushButton("Remove")
         self._resume_remove_btn.clicked.connect(self._on_resume_remove_clicked)
         button_row.addWidget(self._resume_remove_btn)
-
         button_row.addStretch()
-        layout.addLayout(button_row)
-        layout.addStretch()
+        upload_vbox.addLayout(button_row)
+
+        # Replace the QFormLayout from _make_group with our custom layout
+        grp_upload.layout().deleteLater()
+        grp_upload.setLayout(upload_vbox)
+        outer.addWidget(grp_upload)
+
+        # ── Extracted context ─────────────────────────────────────────
+        grp_ctx, _ = _make_group("Extracted Context")
+        ctx_vbox = QVBoxLayout()
+        ctx_vbox.setSpacing(8)
+
+        context_label = QLabel("Review the extracted context before using it in interview answers:")
+        context_label.setWordWrap(True)
+        context_label.setStyleSheet("color: #8b949e; font-size: 10pt;")
+        ctx_vbox.addWidget(context_label)
+
+        self._resume_context_edit = QTextEdit()
+        self._resume_context_edit.setPlaceholderText("Extracted resume context will appear here")
+        self._resume_context_edit.setMinimumHeight(140)
+        ctx_vbox.addWidget(self._resume_context_edit)
+
+        grp_ctx.layout().deleteLater()
+        grp_ctx.setLayout(ctx_vbox)
+        outer.addWidget(grp_ctx)
+
+        outer.addStretch()
 
         self.set_resume_status(self._resume_status)
-        return w
+        return _scrollable(page)
 
     # ── Tab: Appearance ───────────────────────────────────────────────
 
     def _make_appearance_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setSpacing(_SECTION_SPACING)
+        outer.setContentsMargins(*_TAB_MARGINS)
+
+        # ── Window ────────────────────────────────────────────────────
+        grp_win, form_win = _make_group("Window")
 
         self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self._opacity_slider.setRange(30, 100)
@@ -432,83 +563,120 @@ class SettingsDialog(QDialog):
         rl.setContentsMargins(0, 0, 0, 0)
         rl.addWidget(self._opacity_slider)
         rl.addWidget(self._opacity_label)
-        form.addRow("Opacity:", row)
-
-        self._font_spin = QSpinBox()
-        self._font_spin.setRange(8, 20)
-        self._font_spin.setValue(11)
-        form.addRow("Font size:", self._font_spin)
+        form_win.addRow("Opacity:", row)
 
         self._width_spin = QSpinBox()
         self._width_spin.setRange(300, 1200)
         self._width_spin.setValue(420)
-        form.addRow("Window width:", self._width_spin)
+        form_win.addRow("Window width:", self._width_spin)
 
         self._height_spin = QSpinBox()
         self._height_spin.setRange(300, 1200)
         self._height_spin.setValue(650)
-        form.addRow("Window height:", self._height_spin)
+        form_win.addRow("Window height:", self._height_spin)
 
-        return w
+        outer.addWidget(grp_win)
+
+        # ── Typography ────────────────────────────────────────────────
+        grp_type, form_type = _make_group("Typography")
+
+        self._font_spin = QSpinBox()
+        self._font_spin.setRange(8, 20)
+        self._font_spin.setValue(11)
+        form_type.addRow("Font size:", self._font_spin)
+
+        outer.addWidget(grp_type)
+
+        outer.addStretch()
+        return _scrollable(page)
 
     # ── Tab: Browser Input ────────────────────────────────────────────
 
     def _make_browser_input_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        form = QFormLayout()
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setSpacing(_SECTION_SPACING)
+        outer.setContentsMargins(*_TAB_MARGINS)
+
+        # ── Connection ────────────────────────────────────────────────
+        grp_conn, form_conn = _make_group("Connection")
 
         self._bb_enabled_check = QCheckBox("Enable remote Browser Input panel")
-        form.addRow(self._bb_enabled_check)
+        form_conn.addRow(self._bb_enabled_check)
 
         self._bb_supabase_url_edit = QLineEdit()
         self._bb_supabase_url_edit.setPlaceholderText("https://<project-ref>.supabase.co")
-        form.addRow("Supabase URL:", self._bb_supabase_url_edit)
+        form_conn.addRow("Supabase URL:", self._bb_supabase_url_edit)
 
         self._bb_publishable_key_edit = QLineEdit()
         self._bb_publishable_key_edit.setPlaceholderText("sb_publishable_... or anon key")
-        form.addRow("Client API Key:", self._bb_publishable_key_edit)
+        form_conn.addRow("Client API Key:", self._bb_publishable_key_edit)
 
         key_note = QLabel(
             "Use the public client/anon key only — never enter the service_role key."
         )
-        key_note.setStyleSheet("color: #8b949e; font-size: 11px;")
+        key_note.setStyleSheet("color: #8b949e; font-size: 10pt;")
         key_note.setWordWrap(True)
-        form.addRow("", key_note)
+        form_conn.addRow("", key_note)
+
+        outer.addWidget(grp_conn)
+
+        # ── Sender ────────────────────────────────────────────────────
+        grp_sender, form_sender = _make_group("Sender App")
 
         self._bb_sender_url_edit = QLineEdit()
         self._bb_sender_url_edit.setPlaceholderText("https://your-sender-app.netlify.app")
-        form.addRow("Sender Webpage URL:", self._bb_sender_url_edit)
+        form_sender.addRow("Sender Webpage URL:", self._bb_sender_url_edit)
 
         self._bb_max_messages_spin = QSpinBox()
         self._bb_max_messages_spin.setRange(10, 1000)
-        form.addRow("Max in-memory messages:", self._bb_max_messages_spin)
+        form_sender.addRow("Max in-memory messages:", self._bb_max_messages_spin)
 
-        layout.addLayout(form)
-        layout.addStretch()
-        return w
+        outer.addWidget(grp_sender)
+
+        outer.addStretch()
+        return _scrollable(page)
 
     # ── Tab: About ────────────────────────────────────────────────────
 
     def _make_about_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.addWidget(QLabel("<b>GhostMic</b> — Real-time AI meeting assistant"))
-        layout.addWidget(QLabel("Version 1.0.0"))
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setSpacing(_SECTION_SPACING)
+        outer.setContentsMargins(*_TAB_MARGINS)
+
+        grp_about, _ = _make_group("GhostMic")
+        about_vbox = QVBoxLayout()
+        about_vbox.setSpacing(10)
+
+        title = QLabel("<b>GhostMic</b> — Real-time AI meeting assistant")
+        about_vbox.addWidget(title)
+
+        about_vbox.addWidget(QLabel("Version 1.0.0"))
+
         link = QLabel(
             '<a href="https://github.com/sindhub2025/Interview-Tool" '
             'style="color: #58a6ff;">GitHub Repository</a>'
         )
         link.setOpenExternalLinks(True)
-        layout.addWidget(link)
-        layout.addWidget(
-            QLabel(
-                "Invisible to screen-capture (WDA_EXCLUDEFROMCAPTURE).\n"
-                "Your conversations are processed locally or via your own API keys."
-            )
+        about_vbox.addWidget(link)
+
+        desc = QLabel(
+            "Invisible to screen-capture (WDA_EXCLUDEFROMCAPTURE).\n"
+            "Your conversations are processed locally or via your own API keys."
         )
-        layout.addStretch()
-        return w
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #8b949e;")
+        about_vbox.addWidget(desc)
+
+        about_vbox.addStretch()
+
+        grp_about.layout().deleteLater()
+        grp_about.setLayout(about_vbox)
+        outer.addWidget(grp_about)
+
+        outer.addStretch()
+        return _scrollable(page)
 
     # ------------------------------------------------------------------
     # Load / Save
