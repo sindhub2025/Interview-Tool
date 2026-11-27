@@ -11,6 +11,7 @@ Design constraints:
 from __future__ import annotations
 
 import html
+import sys
 import textwrap
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -345,6 +346,7 @@ class BrowserInputPanel(QWidget):
     start_session_requested = pyqtSignal()
     stop_session_requested = pyqtSignal()
     copy_pairing_code_requested = pyqtSignal()
+    collapse_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -430,6 +432,23 @@ class BrowserInputPanel(QWidget):
         )
         self._clear_btn.clicked.connect(self._on_clear_all)
         header_layout.addWidget(self._clear_btn)
+
+        self._collapse_btn = QPushButton("«")
+        self._collapse_btn.setObjectName("bi_collapse_btn")
+        self._collapse_btn.setFixedSize(24, 22)
+        self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._collapse_btn.setStyleSheet(
+            "QPushButton#bi_collapse_btn {"
+            f"  color: {TEXT_SECONDARY}; font-size: 11pt; font-weight: 700;"
+            f"  border: 1px solid {BORDER}; border-radius: 4px;"
+            "  padding: 0px 4px; background: transparent;"
+            "}"
+            "QPushButton#bi_collapse_btn:hover {"
+            f"  color: {TEXT_PRIMARY}; background: rgba(139,148,158,0.18);"
+            "}"
+        )
+        self._collapse_btn.clicked.connect(self.collapse_requested.emit)
+        header_layout.addWidget(self._collapse_btn)
 
         self._outer_layout.addWidget(self._header_widget)
 
@@ -732,14 +751,37 @@ class BrowserInputPanel(QWidget):
         if not self._messages:
             self._empty_label.show()
 
+    @staticmethod
+    def _apply_dialog_stealth(box: QMessageBox) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            from ghostmic.core.stealth import apply_stealth, hide_from_taskbar
+
+            hwnd = int(box.winId())
+            hide_from_taskbar(hwnd)
+            apply_stealth(hwnd)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("BrowserInputPanel: could not apply stealth to dialog: %s", exc)
+
     def _on_clear_all(self) -> None:
-        reply = QMessageBox.question(
-            self,
-            "Clear All Messages",
-            "Remove all received messages from this session?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Clear All Messages")
+        box.setText("Remove all received messages from this session?")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
         )
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setWindowModality(Qt.WindowModality.ApplicationModal)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        if bool(self._config.get("ui", {}).get("stealth_enabled", True)):
+            self._apply_dialog_stealth(box)
+            QTimer.singleShot(0, lambda: self._apply_dialog_stealth(box))
+            QTimer.singleShot(50, lambda: self._apply_dialog_stealth(box))
+        box.raise_()
+        box.activateWindow()
+        reply = box.exec()
         if reply != QMessageBox.StandardButton.Yes:
             return
         for card in list(self._cards.values()):

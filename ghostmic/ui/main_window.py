@@ -410,6 +410,7 @@ class MainWindow(QMainWindow):
         self._browser_panel_width = int(
             self._config.get("ui", {}).get("browser_panel_width", 380)
         )
+        self._pre_remote_width: Optional[int] = None
         self._h_splitter: Optional[QSplitter] = None  # horizontal content splitter
 
         self._setup_window()
@@ -453,14 +454,26 @@ class MainWindow(QMainWindow):
         self._expanded_window_size = QSize(w, h)
         self.resize(w, h)
 
-        # Position: bottom-right corner with 20px margin
-        screen = QApplication.primaryScreen()
-        if screen:
-            geo = screen.availableGeometry()
-            cfg_x = ui.get("window_x")
-            cfg_y = ui.get("window_y")
-            x = cfg_x if cfg_x is not None else (geo.right() - w - 20)
-            y = cfg_y if cfg_y is not None else (geo.bottom() - h - 20)
+        # Position: bottom-right corner with 20px margin, clamped to a visible screen
+        cfg_x = ui.get("window_x")
+        cfg_y = ui.get("window_y")
+        primary = QApplication.primaryScreen()
+        if cfg_x is not None and cfg_y is not None:
+            target_screen = QApplication.screenAt(QPoint(int(cfg_x) + w // 2, int(cfg_y) + h // 2)) or primary
+            if target_screen is not None:
+                geo = target_screen.availableGeometry()
+                clamped_w = min(w, geo.width())
+                clamped_h = min(h, geo.height())
+                x = max(geo.x(), min(int(cfg_x), geo.x() + geo.width() - clamped_w))
+                y = max(geo.y(), min(int(cfg_y), geo.y() + geo.height() - clamped_h))
+                self.resize(clamped_w, clamped_h)
+                self.move(x, y)
+            else:
+                self.move(int(cfg_x), int(cfg_y))
+        elif primary is not None:
+            geo = primary.availableGeometry()
+            x = max(geo.x(), geo.x() + geo.width() - w - 20)
+            y = max(geo.y(), geo.y() + geo.height() - h - 20)
             self.move(x, y)
 
         opacity = ui.get("opacity", 0.95)
@@ -746,8 +759,9 @@ class MainWindow(QMainWindow):
             self._browser_panel.setMaximumWidth(700)
             self._h_splitter.addWidget(self._browser_panel)
             self._browser_panel.setVisible(False)
-            # Wire browser panel signals
-            self._title_bar.browser_input_toggled.connect(self.toggle_browser_input_panel)
+            self._browser_panel.collapse_requested.connect(
+                lambda: self.toggle_browser_input_panel(False)
+            )
         else:
             self._browser_panel = None
 
@@ -1710,14 +1724,32 @@ class MainWindow(QMainWindow):
     # Browser Input panel
     # ------------------------------------------------------------------
 
+    def _fit_geometry_to_screen(self, x: int, y: int, w: int, h: int) -> QRect:
+        """Clamp size and position so the window stays within the active screen."""
+        screen = (
+            QApplication.screenAt(QPoint(x + w // 2, y + h // 2))
+            or QApplication.screenAt(self.frameGeometry().center())
+            or QApplication.primaryScreen()
+        )
+        if screen is None:
+            return QRect(x, y, w, h)
+
+        available = screen.availableGeometry()
+        clamped_w = min(w, available.width())
+        clamped_h = min(h, available.height())
+        clamped_x = max(available.x(), min(x, available.x() + available.width() - clamped_w))
+        clamped_y = max(available.y(), min(y, available.y() + available.height() - clamped_h))
+        return QRect(clamped_x, clamped_y, clamped_w, clamped_h)
+
     def toggle_browser_input_panel(self, show: bool) -> None:
         """
         Expand or collapse the Browser Input panel to the right of the main content.
 
         When expanding:
           - Make the panel visible inside the horizontal splitter.
-          - Grow the window width by the panel's saved/default width.
-          - Keep the original GhostMic content area width unchanged.
+          - Grow the window width by the panel's saved/default width, clamped to
+            the active screen's available geometry so the window stays on-screen.
+          - Shift the window left/up if needed so it never overflows the screen.
 
         When collapsing:
           - Hide the panel.
@@ -1729,31 +1761,69 @@ class MainWindow(QMainWindow):
             return
 
         if show:
+            if self._browser_panel.isVisible() and self._browser_panel.is_panel_expanded:
+                self._title_bar.set_browser_input_checked(True)
+                return
+
+            self._pre_remote_width = self.width()
             panel_w = max(300, self._browser_panel_width)
-            self._browser_panel.setVisible(True)
-            self._browser_panel.set_collapsed(False)
-            if self._h_splitter is not None:
-                current_left = self._h_splitter.sizes()[0] if self._h_splitter.sizes() else self.width()
-                if current_left <= 0:
-                    current_left = self.width()
-                self._h_splitter.setSizes([current_left, panel_w])
-            # Grow window width and ensure enough vertical space for message list
-            new_w = self.width() + panel_w
             target_h = self.height()
             if not self._qa_revealed:
                 target_h = max(target_h, self._expanded_window_size.height())
-            self.resize(new_w, target_h)
+
+            new_w = self.width() + panel_w
+            target = self._fit_geometry_to_screen(self.x(), self.y(), new_w, target_h)
+            final_w = target.width()
+
+            handle_w = self._h_splitter.handleWidth() if self._h_splitter is not None else 0
+            avail_panes_w = max(0, final_w - handle_w)
+            effective_panel_w = (
+                min(panel_w, max(300, avail_panes_w // 2))
+                if avail_panes_w >= 300
+                else avail_panes_w
+            )
+            left_w = max(0, avail_panes_w - effective_panel_w)
+
+            self._browser_panel.setVisible(True)
+            self._browser_panel.set_collapsed(False)
+            if self._h_splitter is not None:
+                self._h_splitter.setSizes([left_w, effective_panel_w])
+
+            self.setGeometry(target)
         else:
-            # Persist the panel width before hiding
-            if self._h_splitter is not None and len(self._h_splitter.sizes()) > 1 and self._h_splitter.sizes()[1] > 0:
-                self._browser_panel_width = max(300, self._h_splitter.sizes()[1])
+            if not self._browser_panel.isVisible() and not self._browser_panel.is_panel_expanded:
+                self._title_bar.set_browser_input_checked(False)
+                return
+
+            # Persist the panel width only when both panes are visible so hidden QA
+            # does not inflate browser_panel_width up to maximumWidth.
+            if (
+                self._qa_revealed
+                and self._h_splitter is not None
+                and len(self._h_splitter.sizes()) > 1
+                and self._h_splitter.sizes()[0] > 0
+                and self._h_splitter.sizes()[1] > 0
+            ):
+                self._browser_panel_width = max(300, min(700, self._h_splitter.sizes()[1]))
 
             self._browser_panel.setVisible(False)
             self._browser_panel.set_collapsed(True)
-            # Restore original GhostMic width (and height if QA area was not revealed)
-            left_w = self._h_splitter.sizes()[0] if (self._h_splitter and self._h_splitter.sizes() and self._h_splitter.sizes()[0] > 0) else self._expanded_window_size.width()
+
+            if (
+                self._qa_revealed
+                and self._h_splitter is not None
+                and self._h_splitter.sizes()
+                and self._h_splitter.sizes()[0] > 0
+            ):
+                left_w = self._h_splitter.sizes()[0]
+            elif self._pre_remote_width:
+                left_w = self._pre_remote_width
+            else:
+                left_w = self._expanded_window_size.width()
+
             target_h = self.height() if self._qa_revealed else self._collapsed_window_height
-            self.resize(left_w, target_h)
+            target = self._fit_geometry_to_screen(self.x(), self.y(), left_w, target_h)
+            self.setGeometry(target)
 
         self._browser_panel_visible = show
         self._title_bar.set_browser_input_checked(show)
