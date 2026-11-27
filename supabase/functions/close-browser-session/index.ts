@@ -11,19 +11,30 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function jsonResponse(body: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...CORS_HEADERS,
+    },
+  });
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, content-type",
-      },
-    });
+    return new Response("ok", { headers: CORS_HEADERS });
   }
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) {
-    return new Response(JSON.stringify({ error: "Missing Authorization header" }), { status: 401 });
+    return jsonResponse({ error: "Missing Authorization header" }, 401);
   }
 
   const userClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY")!, {
@@ -32,7 +43,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: { user }, error: authError } = await userClient.auth.getUser();
   if (authError || !user) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+    return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
   let sessionId = "";
@@ -40,11 +51,11 @@ Deno.serve(async (req: Request) => {
     const body = await req.json();
     sessionId = String(body?.session_id || "").trim();
   } catch {
-    return new Response(JSON.stringify({ error: "Invalid request body" }), { status: 400 });
+    return jsonResponse({ error: "Invalid request body" }, 400);
   }
 
   if (!sessionId) {
-    return new Response(JSON.stringify({ error: "session_id is required" }), { status: 400 });
+    return jsonResponse({ error: "session_id is required" }, 400);
   }
 
   const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -59,15 +70,10 @@ Deno.serve(async (req: Request) => {
 
   if (updateError) {
     console.error("close-browser-session: update error", updateError.message);
-    return new Response(JSON.stringify({ error: "Failed to close session" }), { status: 500 });
+    return jsonResponse({ error: "Failed to close session" }, 500);
   }
 
   console.log(`close-browser-session: session=${sessionId} closed by owner=${user.id}`);
 
-  return new Response(JSON.stringify({ ok: true }), {
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
+  return jsonResponse({ ok: true });
 });

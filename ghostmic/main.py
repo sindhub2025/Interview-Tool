@@ -319,13 +319,13 @@ def _default_config() -> dict:
         },
         "hotkeys": {
             "toggle_recording": "ctrl+shift+g",
-            "toggle_window": "ctrl+a",
+            "toggle_window": "ctrl+shift+a",
             "generate_response": "ctrl+g",
             "copy_response": "ctrl+shift+c",
             "clear_transcript": "ctrl+shift+x",
             "win_h_dictation": "win+h",
-            "screenshot_email": "ctrl+z",
-            "quit_app": "ctrl+q",
+            "screenshot_email": "ctrl+shift+z",
+            "quit_app": "ctrl+shift+q",
         },
         "screenshot_email": {
             "enabled": False,
@@ -396,12 +396,12 @@ def _load_config(path: str) -> dict:
     cfg = _merge_defaults(cfg, _default_config())
     hotkeys_cfg = cfg.get("hotkeys", {})
     if isinstance(hotkeys_cfg, dict):
-        if hotkeys_cfg.get("toggle_window") == "ctrl+shift+h":
-            hotkeys_cfg["toggle_window"] = "ctrl+a"
-        if hotkeys_cfg.get("screenshot_email") == "ctrl+shift+e":
-            hotkeys_cfg["screenshot_email"] = "ctrl+z"
-        if "quit_app" not in hotkeys_cfg:
-            hotkeys_cfg["quit_app"] = "ctrl+q"
+        if str(hotkeys_cfg.get("toggle_window", "")).strip().lower() in ("ctrl+shift+h", "ctrl+a"):
+            hotkeys_cfg["toggle_window"] = "ctrl+shift+a"
+        if str(hotkeys_cfg.get("screenshot_email", "")).strip().lower() in ("ctrl+shift+e", "ctrl+z"):
+            hotkeys_cfg["screenshot_email"] = "ctrl+shift+z"
+        if "quit_app" not in hotkeys_cfg or str(hotkeys_cfg.get("quit_app", "")).strip().lower() == "ctrl+q":
+            hotkeys_cfg["quit_app"] = "ctrl+shift+q"
     ai_cfg = cfg.get("ai", {})
     if isinstance(ai_cfg, dict):
         ai_cfg.pop("ollama_model", None)

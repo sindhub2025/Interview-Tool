@@ -35,19 +35,30 @@ async function sha256hex(text: string): Promise<string> {
     .join("");
 }
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function jsonResponse(body: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...CORS_HEADERS,
+    },
+  });
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, content-type",
-      },
-    });
+    return new Response("ok", { headers: CORS_HEADERS });
   }
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) {
-    return new Response(JSON.stringify({ error: "Missing Authorization header" }), { status: 401 });
+    return jsonResponse({ error: "Missing Authorization header" }, 401);
   }
 
   const userClient = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY")!, {
@@ -56,7 +67,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: { user }, error: authError } = await userClient.auth.getUser();
   if (authError || !user) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+    return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
   let pairingCode = "";
@@ -64,11 +75,11 @@ Deno.serve(async (req: Request) => {
     const body = await req.json();
     pairingCode = String(body?.pairing_code || "").trim().toUpperCase();
   } catch {
-    return new Response(JSON.stringify({ error: "Invalid request body" }), { status: 400 });
+    return jsonResponse({ error: "Invalid request body" }, 400);
   }
 
   if (!pairingCode || pairingCode.length !== 10) {
-    return new Response(JSON.stringify({ error: "Invalid pairing code" }), { status: 400 });
+    return jsonResponse({ error: "Invalid pairing code" }, 400);
   }
 
   const pairingHash = await sha256hex(pairingCode);
@@ -86,10 +97,7 @@ Deno.serve(async (req: Request) => {
 
   if (lookupError || !session) {
     // Don't reveal whether the code exists or is expired
-    return new Response(
-      JSON.stringify({ error: "Invalid or expired pairing code" }),
-      { status: 404 }
-    );
+    return jsonResponse({ error: "Invalid or expired pairing code" }, 404);
   }
 
   // Mark session as paired with this sender
@@ -100,27 +108,16 @@ Deno.serve(async (req: Request) => {
     .eq("status", "waiting"); // Optimistic concurrency: reject if already claimed
 
   if (updateError) {
-    return new Response(
-      JSON.stringify({ error: "Session already in use or update failed" }),
-      { status: 409 }
-    );
+    return jsonResponse({ error: "Session already in use or update failed" }, 409);
   }
 
   console.log(
     `join-browser-session: session=${session.id} sender=${user.id} owner=${session.owner_id}`
   );
 
-  return new Response(
-    JSON.stringify({
-      session_id: session.id,
-      channel_topic: session.channel_topic,
-      expires_at: session.expires_at,
-    }),
-    {
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
-    }
-  );
+  return jsonResponse({
+    session_id: session.id,
+    channel_topic: session.channel_topic,
+    expires_at: session.expires_at,
+  });
 });

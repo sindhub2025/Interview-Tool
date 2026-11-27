@@ -43,21 +43,30 @@ async function sha256hex(text: string): Promise<string> {
     .join("");
 }
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function jsonResponse(body: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...CORS_HEADERS,
+    },
+  });
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, content-type",
-      },
-    });
+    return new Response("ok", { headers: CORS_HEADERS });
   }
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) {
-    return new Response(JSON.stringify({ error: "Missing Authorization header" }), {
-      status: 401,
-    });
+    return jsonResponse({ error: "Missing Authorization header" }, 401);
   }
 
   // Create a client scoped to the calling user (using their JWT)
@@ -68,7 +77,7 @@ Deno.serve(async (req: Request) => {
   // Verify the user identity
   const { data: { user }, error: authError } = await userClient.auth.getUser();
   if (authError || !user) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+    return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
   // Parse request body
@@ -102,24 +111,16 @@ Deno.serve(async (req: Request) => {
 
   if (insertError) {
     console.error("create-browser-session: insert error", insertError.message);
-    return new Response(JSON.stringify({ error: "Session creation failed" }), { status: 500 });
+    return jsonResponse({ error: "Session creation failed" }, 500);
   }
 
   // Never log the pairing_code
   console.log(`create-browser-session: session=${sessionId} expires=${expiresAt} owner=${user.id}`);
 
-  return new Response(
-    JSON.stringify({
-      session_id: sessionId,
-      pairing_code: pairingCode,
-      channel_topic: channelTopic,
-      expires_at: expiresAt,
-    }),
-    {
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
-    }
-  );
+  return jsonResponse({
+    session_id: sessionId,
+    pairing_code: pairingCode,
+    channel_topic: channelTopic,
+    expires_at: expiresAt,
+  });
 });

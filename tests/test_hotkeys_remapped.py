@@ -21,9 +21,9 @@ def _qt_app() -> QApplication:
 
 
 def test_default_hotkeys_remapped() -> None:
-    assert DEFAULT_HOTKEYS["quit_app"] == "<ctrl>+q"
-    assert DEFAULT_HOTKEYS["toggle_window"] == "<ctrl>+a"
-    assert DEFAULT_HOTKEYS["screenshot_email"] == "<ctrl>+z"
+    assert DEFAULT_HOTKEYS["quit_app"] == "<ctrl>+<shift>+q"
+    assert DEFAULT_HOTKEYS["toggle_window"] == "<ctrl>+<shift>+a"
+    assert DEFAULT_HOTKEYS["screenshot_email"] == "<ctrl>+<shift>+z"
 
 
 def test_settings_dialog_loads_and_saves_remapped_hotkeys() -> None:
@@ -35,13 +35,13 @@ def test_settings_dialog_loads_and_saves_remapped_hotkeys() -> None:
         "ui": {"stealth_enabled": False},
         "hotkeys": {
             "toggle_recording": "ctrl+shift+g",
-            "toggle_window": "ctrl+a",
+            "toggle_window": "ctrl+shift+a",
             "generate_response": "ctrl+g",
             "copy_response": "ctrl+shift+c",
             "clear_transcript": "ctrl+shift+x",
             "win_h_dictation": "win+h",
-            "screenshot_email": "ctrl+z",
-            "quit_app": "ctrl+q",
+            "screenshot_email": "ctrl+shift+z",
+            "quit_app": "ctrl+shift+q",
         },
         "dictation": {"enabled": True, "commit_idle_ms": 1200},
         "screenshot_email": {"enabled": False},
@@ -49,9 +49,9 @@ def test_settings_dialog_loads_and_saves_remapped_hotkeys() -> None:
 
     dialog = SettingsDialog(base_config)
     try:
-        assert dialog._hotkey_quit.text() == "ctrl+q"
-        assert dialog._hotkey_window.text() == "ctrl+a"
-        assert dialog._hotkey_screenshot_email.text() == "ctrl+z"
+        assert dialog._hotkey_quit.text() == "ctrl+shift+q"
+        assert dialog._hotkey_window.text() == "ctrl+shift+a"
+        assert dialog._hotkey_screenshot_email.text() == "ctrl+shift+z"
 
         emitted: list[dict] = []
         dialog.settings_saved.connect(emitted.append)
@@ -59,28 +59,59 @@ def test_settings_dialog_loads_and_saves_remapped_hotkeys() -> None:
 
         assert emitted
         hotkeys = emitted[0]["hotkeys"]
-        assert hotkeys["quit_app"] == "ctrl+q"
-        assert hotkeys["toggle_window"] == "ctrl+a"
-        assert hotkeys["screenshot_email"] == "ctrl+z"
+        assert hotkeys["quit_app"] == "ctrl+shift+q"
+        assert hotkeys["toggle_window"] == "ctrl+shift+a"
+        assert hotkeys["screenshot_email"] == "ctrl+shift+z"
     finally:
         dialog.deleteLater()
 
 
 def test_load_config_migrates_old_hotkeys(tmp_path) -> None:
-    old_cfg = {
+    legacy_cfg = {
         "hotkeys": {
             "toggle_recording": "ctrl+shift+g",
             "toggle_window": "ctrl+shift+h",
             "screenshot_email": "ctrl+shift+e",
         }
     }
-    cfg_file = tmp_path / "config.json"
-    cfg_file.write_text(json.dumps(old_cfg), encoding="utf-8")
+    legacy_file = tmp_path / "legacy_config.json"
+    legacy_file.write_text(json.dumps(legacy_cfg), encoding="utf-8")
 
-    loaded = _load_config(str(cfg_file))
-    assert loaded["hotkeys"]["toggle_window"] == "ctrl+a"
-    assert loaded["hotkeys"]["screenshot_email"] == "ctrl+z"
-    assert loaded["hotkeys"]["quit_app"] == "ctrl+q"
+    loaded_legacy = _load_config(str(legacy_file))
+    assert loaded_legacy["hotkeys"]["toggle_window"] == "ctrl+shift+a"
+    assert loaded_legacy["hotkeys"]["screenshot_email"] == "ctrl+shift+z"
+    assert loaded_legacy["hotkeys"]["quit_app"] == "ctrl+shift+q"
+
+    prev_cfg = {
+        "hotkeys": {
+            "toggle_recording": "ctrl+shift+g",
+            "toggle_window": "ctrl+a",
+            "screenshot_email": "ctrl+z",
+            "quit_app": "ctrl+q",
+        }
+    }
+    prev_file = tmp_path / "prev_config.json"
+    prev_file.write_text(json.dumps(prev_cfg), encoding="utf-8")
+
+    loaded_prev = _load_config(str(prev_file))
+    assert loaded_prev["hotkeys"]["toggle_window"] == "ctrl+shift+a"
+    assert loaded_prev["hotkeys"]["screenshot_email"] == "ctrl+shift+z"
+    assert loaded_prev["hotkeys"]["quit_app"] == "ctrl+shift+q"
+
+    custom_cfg = {
+        "hotkeys": {
+            "toggle_window": "ctrl+alt+a",
+            "screenshot_email": "ctrl+alt+z",
+            "quit_app": "ctrl+alt+q",
+        }
+    }
+    custom_file = tmp_path / "custom_config.json"
+    custom_file.write_text(json.dumps(custom_cfg), encoding="utf-8")
+
+    loaded_custom = _load_config(str(custom_file))
+    assert loaded_custom["hotkeys"]["toggle_window"] == "ctrl+alt+a"
+    assert loaded_custom["hotkeys"]["screenshot_email"] == "ctrl+alt+z"
+    assert loaded_custom["hotkeys"]["quit_app"] == "ctrl+alt+q"
 
 
 def test_hotkey_manager_registers_remapped_hotkeys(monkeypatch) -> None:
@@ -104,9 +135,9 @@ def test_hotkey_manager_registers_remapped_hotkeys(monkeypatch) -> None:
 
     manager = HotkeyManager(
         {
-            "toggle_window": "ctrl+a",
-            "screenshot_email": "ctrl+z",
-            "quit_app": "ctrl+q",
+            "toggle_window": "ctrl+shift+a",
+            "screenshot_email": "ctrl+shift+z",
+            "quit_app": "ctrl+shift+q",
         },
         {
             "toggle_window": lambda: None,
@@ -115,9 +146,9 @@ def test_hotkey_manager_registers_remapped_hotkeys(monkeypatch) -> None:
         },
     )
     manager.start()
-    assert "<ctrl>+a" in registered
-    assert "<ctrl>+z" in registered
-    assert "<ctrl>+q" in registered
+    assert "<ctrl>+<shift>+a" in registered
+    assert "<ctrl>+<shift>+z" in registered
+    assert "<ctrl>+<shift>+q" in registered
     manager.stop()
 
 

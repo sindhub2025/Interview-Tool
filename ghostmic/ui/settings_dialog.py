@@ -528,15 +528,15 @@ class SettingsDialog(QDialog):
         if idx >= 0:
             self._lang_combo.setCurrentIndex(idx)
         self._hotkey_toggle.setText(hotkeys.get("toggle_recording", "ctrl+shift+g"))
-        self._hotkey_window.setText(hotkeys.get("toggle_window", "ctrl+a"))
+        self._hotkey_window.setText(hotkeys.get("toggle_window", "ctrl+shift+a"))
         self._hotkey_ai.setText(hotkeys.get("generate_response", "ctrl+g"))
         self._hotkey_copy.setText(hotkeys.get("copy_response", "ctrl+shift+c"))
         self._hotkey_clear.setText(hotkeys.get("clear_transcript", "ctrl+shift+x"))
         self._hotkey_dictation.setText(hotkeys.get("win_h_dictation", "win+h"))
         self._hotkey_screenshot_email.setText(
-            hotkeys.get("screenshot_email", "ctrl+z")
+            hotkeys.get("screenshot_email", "ctrl+shift+z")
         )
-        self._hotkey_quit.setText(hotkeys.get("quit_app", "ctrl+q"))
+        self._hotkey_quit.setText(hotkeys.get("quit_app", "ctrl+shift+q"))
         self._screenshot_email_enabled.setChecked(
             bool(screenshot_email.get("enabled", False))
         )
@@ -639,7 +639,7 @@ class SettingsDialog(QDialog):
         cfg.setdefault("hotkeys", {})
         cfg["hotkeys"]["toggle_recording"] = self._hotkey_toggle.text()
         cfg["hotkeys"]["toggle_window"] = (
-            self._hotkey_window.text().strip().lower() or "ctrl+a"
+            self._hotkey_window.text().strip().lower() or "ctrl+shift+a"
         )
         cfg["hotkeys"]["generate_response"] = self._hotkey_ai.text()
         cfg["hotkeys"]["copy_response"] = self._hotkey_copy.text()
@@ -647,10 +647,10 @@ class SettingsDialog(QDialog):
         cfg["hotkeys"]["win_h_dictation"] = self._hotkey_dictation.text()
         cfg["hotkeys"]["screenshot_email"] = (
             self._hotkey_screenshot_email.text().strip().lower()
-            or "ctrl+z"
+            or "ctrl+shift+z"
         )
         cfg["hotkeys"]["quit_app"] = (
-            self._hotkey_quit.text().strip().lower() or "ctrl+q"
+            self._hotkey_quit.text().strip().lower() or "ctrl+shift+q"
         )
 
         recipient = self._screenshot_email_recipient.text().strip()

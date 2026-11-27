@@ -414,7 +414,7 @@ class MainWindow(QMainWindow):
         self._h_splitter: Optional[QSplitter] = None  # horizontal content splitter
 
         self._setup_window()
-        hotkey_quit = self._config.get("hotkeys", {}).get("quit_app", "ctrl+q")
+        hotkey_quit = self._config.get("hotkeys", {}).get("quit_app", "ctrl+shift+q")
         self._quit_shortcut = QShortcut(QKeySequence(hotkey_quit), self)
         self._quit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._quit_shortcut.activated.connect(self._on_close)
@@ -1403,7 +1403,7 @@ class MainWindow(QMainWindow):
         (GhostMicApp._on_settings_saved) to avoid double writes.
         """
         self._config = config
-        hotkey_quit = config.get("hotkeys", {}).get("quit_app", "ctrl+q")
+        hotkey_quit = config.get("hotkeys", {}).get("quit_app", "ctrl+shift+q")
         if getattr(self, "_quit_shortcut", None):
             self._quit_shortcut.setKey(QKeySequence(hotkey_quit))
         ui = config.get("ui", {})

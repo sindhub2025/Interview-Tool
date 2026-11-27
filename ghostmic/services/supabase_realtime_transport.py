@@ -84,10 +84,11 @@ class SupabaseRealtimeTransport(BrowserTransport):
 
         try:
             # Anonymous sign-in
-            auth_response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._client.auth.sign_in_anonymously(),
-            )
+            auth_response = await self._client.auth.sign_in_anonymously()
+            session = getattr(auth_response, "session", None)
+            access_token = getattr(session, "access_token", None)
+            if access_token:
+                await self._client.realtime.set_auth(access_token)
             logger.debug(
                 "SupabaseRealtimeTransport: anonymous auth ok, uid=%s",
                 getattr(getattr(auth_response, "user", None), "id", "?"),
@@ -96,12 +97,9 @@ class SupabaseRealtimeTransport(BrowserTransport):
             raise BrowserTransportError(f"Anonymous authentication failed: {exc}") from exc
 
         try:
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._client.functions.invoke(
-                    "create-browser-session",
-                    invoke_options={"body": {"ttl_minutes": self._ttl}},
-                ),
+            response = await self._client.functions.invoke(
+                "create-browser-session",
+                invoke_options={"body": {"ttl_minutes": self._ttl}},
             )
         except Exception as exc:
             raise BrowserTransportError(
@@ -109,12 +107,9 @@ class SupabaseRealtimeTransport(BrowserTransport):
             ) from exc
 
         try:
-            if hasattr(response, "data"):
-                data = response.data
-                if isinstance(data, (bytes, bytearray)):
-                    data = json.loads(data)
-            else:
-                data = response
+            data = response.data if hasattr(response, "data") else response
+            if isinstance(data, (bytes, bytearray, str)):
+                data = json.loads(data)
 
             self._session_id = data["session_id"]
             self._channel_topic = data["channel_topic"]
@@ -143,69 +138,92 @@ class SupabaseRealtimeTransport(BrowserTransport):
         assert self._client is not None, "Must call create_session first."
         topic = self._channel_topic or f"browser_session:{session_id}"
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+        channel = self._client.channel(topic, {"config": {"private": True}})
 
-        def _subscribe():
-            channel = self._client.channel(topic, {"config": {"private": True}})
-
-            def _on_broadcast(payload):
-                """Called by Supabase SDK for each broadcast event."""
-                try:
-                    event_type = payload.get("event", "")
-                    if event_type == SENDER_JOINED_EVENT:
-                        loop.call_soon_threadsafe(on_connected)
-                        return
-                    if event_type == BROWSER_MESSAGE_EVENT:
-                        body = payload.get("payload", payload)
-                        if isinstance(body, str):
-                            body = json.loads(body)
-                        loop.call_soon_threadsafe(on_message, body)
-                except Exception as exc:
-                    logger.warning(
-                        "SupabaseRealtimeTransport: broadcast handler error: %s", exc
-                    )
-
-            def _on_system(status, *args):
-                logger.debug(
-                    "SupabaseRealtimeTransport: channel system event: %s %s",
-                    status,
-                    args,
+        def _on_broadcast(payload):
+            """Called by Supabase SDK for each broadcast event."""
+            try:
+                event_type = payload.get("event", "")
+                if event_type == SENDER_JOINED_EVENT:
+                    loop.call_soon_threadsafe(on_connected)
+                    return
+                if event_type == BROWSER_MESSAGE_EVENT:
+                    body = payload.get("payload", payload)
+                    if isinstance(body, (str, bytes, bytearray)):
+                        body = json.loads(body)
+                    loop.call_soon_threadsafe(on_message, body)
+            except Exception as exc:
+                logger.warning(
+                    "SupabaseRealtimeTransport: broadcast handler error: %s", exc
                 )
-                if status in ("CHANNEL_ERROR", "TIMED_OUT"):
-                    loop.call_soon_threadsafe(on_disconnected)
 
-            channel.on_broadcast(event=BROWSER_MESSAGE_EVENT, callback=_on_broadcast)
-            channel.on_broadcast(event=SENDER_JOINED_EVENT, callback=_on_broadcast)
-            channel.subscribe(_on_system)
-            self._channel = channel
+        initial_state: dict[str, object] = {
+            "done": False,
+            "status": None,
+            "error": None,
+        }
 
-        await loop.run_in_executor(None, _subscribe)
+        def _on_system(status, *args):
+            status_str = str(getattr(status, "value", status))
+            err = args[0] if args else None
+            logger.debug(
+                "SupabaseRealtimeTransport: channel system event: %s %s",
+                status_str,
+                err,
+            )
+            if not initial_state["done"]:
+                initial_state["status"] = status_str
+                initial_state["error"] = err
+                return
+            if status_str in ("CHANNEL_ERROR", "TIMED_OUT"):
+                loop.call_soon_threadsafe(on_disconnected)
+
+        channel.on_broadcast(event=BROWSER_MESSAGE_EVENT, callback=_on_broadcast)
+        channel.on_broadcast(event=SENDER_JOINED_EVENT, callback=_on_broadcast)
+
+        try:
+            await channel.subscribe(_on_system)
+        except Exception as exc:
+            raise BrowserTransportError(
+                f"Failed to subscribe to Realtime channel {topic}: {exc}"
+            ) from exc
+        finally:
+            initial_state["done"] = True
+
+        if initial_state["status"] != "SUBSCRIBED":
+            try:
+                await self._client.remove_channel(channel)
+            except Exception:
+                pass
+            raise BrowserTransportError(
+                f"Realtime channel subscription failed ({initial_state['status']}): {initial_state['error']}"
+            )
+
+        self._channel = channel
         logger.info(
             "SupabaseRealtimeTransport: subscribed to channel %s", topic
         )
 
     async def close_session(self) -> None:
         """Unsubscribe from the channel and close the Edge Function session."""
-        if self._channel is not None:
+        if self._channel is not None and self._client is not None:
             try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: self._channel.unsubscribe()
-                )
+                await self._client.remove_channel(self._channel)
             except Exception as exc:
                 logger.warning(
                     "SupabaseRealtimeTransport: unsubscribe error: %s", exc
                 )
             finally:
                 self._channel = None
+        else:
+            self._channel = None
 
         if self._session_id and self._client is not None:
             try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self._client.functions.invoke(
-                        "close-browser-session",
-                        invoke_options={"body": {"session_id": self._session_id}},
-                    ),
+                await self._client.functions.invoke(
+                    "close-browser-session",
+                    invoke_options={"body": {"session_id": self._session_id}},
                 )
             except Exception as exc:
                 logger.warning(
@@ -216,9 +234,11 @@ class SupabaseRealtimeTransport(BrowserTransport):
 
         if self._client is not None:
             try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: self._client.auth.sign_out()
-                )
+                await self._client.realtime.close()
+            except Exception:
+                pass
+            try:
+                await self._client.auth.sign_out()
             except Exception as exc:
                 logger.warning(
                     "SupabaseRealtimeTransport: sign_out error: %s", exc
@@ -231,22 +251,19 @@ class SupabaseRealtimeTransport(BrowserTransport):
     # ------------------------------------------------------------------
 
     async def _ensure_client(self) -> None:
-        """Lazily create the Supabase client (import is deferred so the app
-        starts even when supabase-py is not installed)."""
+        """Lazily create the async Supabase client (import is deferred so the
+        app starts even when supabase-py is not installed)."""
         if self._client is not None:
             return
         try:
-            from supabase import create_client, Client  # type: ignore[import]
+            from supabase import acreate_client  # type: ignore[import]
         except ImportError as exc:
             raise BrowserTransportError(
                 "supabase Python package is not installed. "
                 "Run: pip install supabase"
             ) from exc
 
-        def _create():
-            return create_client(self._url, self._key)
-
-        self._client = await asyncio.get_event_loop().run_in_executor(None, _create)
+        self._client = await acreate_client(self._url, self._key)
         logger.debug(
-            "SupabaseRealtimeTransport: Supabase client created for %s", self._url
+            "SupabaseRealtimeTransport: async Supabase client created for %s", self._url
         )
